@@ -35,6 +35,7 @@ export default {
       entryVariablesLoading: false,
       extracting: false,
       generating: false,
+      parsing: false,
       editingVarKey: null,
       selectedGenerateTemplate: null,
     }
@@ -553,23 +554,30 @@ export default {
         `<option value="${t}">${t}</option>`
       ).join('')
 
-      const fieldRows = fields.map((fd, idx) => `
-        <div class="tx-row flex items-start gap-2 p-3" data-field-idx="${idx}">
-          <div class="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <input name="fk_${idx}" value="${escHtml(fd.key || '')}" placeholder="${T('forms.field_key')}" class="tx-input" style="padding:.375rem .5rem" />
-            <input name="fl_${idx}" value="${escHtml(fd.label || '')}" placeholder="${T('forms.field_label')}" class="tx-input" style="padding:.375rem .5rem" />
-            <select name="ft_${idx}" class="tx-select" style="padding:.375rem .5rem">
-              ${['text', 'textarea', 'select', 'list', 'date', 'number', 'checkbox'].map(tp =>
-                `<option value="${tp}"${fd.type === tp ? ' selected' : ''}>${tp}</option>`
-              ).join('')}
-            </select>
-            <label class="flex items-center gap-1.5 text-sm" style="color:var(--txt-primary)">
-              <input type="checkbox" name="fr_${idx}" ${fd.required ? 'checked' : ''} class="h-4 w-4" style="accent-color:var(--brand)" />
-              <span>${T('forms.field_required')}</span>
-            </label>
+      const fieldRows = fields.map((fd, idx) => {
+        const optsStr = Array.isArray(fd.options) ? fd.options.join(', ') : ''
+        return `
+        <div class="tx-row p-3" data-field-idx="${idx}">
+          <div class="flex items-start gap-2">
+            <div class="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <input name="fk_${idx}" value="${escHtml(fd.key || '')}" placeholder="${T('forms.field_key')}" class="tx-input" style="padding:.375rem .5rem" />
+              <input name="fl_${idx}" value="${escHtml(fd.label || '')}" placeholder="${T('forms.field_label')}" class="tx-input" style="padding:.375rem .5rem" />
+              <select name="ft_${idx}" class="tx-select" style="padding:.375rem .5rem">
+                ${['text', 'textarea', 'select', 'list', 'date', 'number', 'checkbox'].map(tp =>
+                  `<option value="${tp}"${fd.type === tp ? ' selected' : ''}>${tp}</option>`
+                ).join('')}
+              </select>
+              <label class="flex items-center gap-1.5 text-sm" style="color:var(--txt-primary)">
+                <input type="checkbox" name="fr_${idx}" ${fd.required ? 'checked' : ''} class="h-4 w-4" style="accent-color:var(--brand)" />
+                <span>${T('forms.field_required')}</span>
+              </label>
+            </div>
+            <button data-action="remove-form-field" data-idx="${idx}" class="p-1 transition-colors mt-1" style="color:var(--txt-secondary)" title="${T('forms.remove_field')}">${ICONS.trash}</button>
           </div>
-          <button data-action="remove-form-field" data-idx="${idx}" class="p-1 transition-colors mt-1" style="color:var(--txt-secondary)" title="${T('forms.remove_field')}">${ICONS.trash}</button>
-        </div>`).join('')
+          ${fd.type === 'select' ? `<div class="mt-1.5 ml-0"><input name="fo_${idx}" value="${escHtml(optsStr)}" placeholder="${T('forms.field_options_hint')}" class="tx-input text-xs" style="padding:.25rem .5rem" /></div>` : ''}
+          <div class="mt-1.5 ml-0"><input name="fh_${idx}" value="${escHtml(fd.hint || '')}" placeholder="${T('forms.field_hint')}" class="tx-input text-xs" style="padding:.25rem .5rem" /></div>
+        </div>`
+      }).join('')
 
       return `<div class="mt-4 space-y-4">
         <button data-action="back-forms" class="tx-btn-ghost tx-btn-sm flex items-center gap-1 text-sm" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
@@ -765,6 +773,10 @@ export default {
       const hasCv = !!entry.files?.cv
       const additionalDocs = entry.files?.additional || []
       const cvInfo = hasCv ? entry.files.cv : null
+      const hasAnyFile = hasCv || additionalDocs.length > 0
+      const parseStatus = state.parsing
+        ? `<div class="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400"><div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div> ${T('entries.parse_running')}</div>`
+        : ''
       return `<div class="tx-card p-6">
         <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.file} ${T('entries.section_files')}</h4>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -785,6 +797,14 @@ export default {
             </label>
           </div>
         </div>
+        ${hasAnyFile ? `
+        <div class="mt-3 pt-3 border-t dark:border-gray-700">
+          ${parseStatus}
+          ${!state.parsing ? `<button data-action="parse-documents" class="tx-btn tx-btn-sm flex items-center gap-1.5" ${!hasAnyFile ? 'disabled' : ''}>
+            ${ICONS.sparkle} ${T('entries.parse_btn')}
+          </button>
+          <p class="text-xs tx-secondary mt-1.5">${T('entries.parse_hint')}</p>` : ''}
+        </div>` : ''}
       </div>`
     }
 
@@ -1205,13 +1225,21 @@ export default {
           while (fd.has(`fk_${idx}`)) {
             const key = fd.get(`fk_${idx}`)?.toString().trim()
             if (key) {
-              fields.push({
+              const fieldType = fd.get(`ft_${idx}`)?.toString() || 'text'
+              const hint = fd.get(`fh_${idx}`)?.toString().trim() || ''
+              const optionsRaw = fd.get(`fo_${idx}`)?.toString().trim() || ''
+              const fieldDef = {
                 key,
                 label: fd.get(`fl_${idx}`)?.toString().trim() || key,
-                type: fd.get(`ft_${idx}`)?.toString() || 'text',
+                type: fieldType,
                 required: fd.has(`fr_${idx}`),
                 source: 'form',
-              })
+              }
+              if (hint) fieldDef.hint = hint
+              if (fieldType === 'select' && optionsRaw) {
+                fieldDef.options = optionsRaw.split(',').map(o => o.trim()).filter(Boolean)
+              }
+              fields.push(fieldDef)
             }
             idx++
           }
@@ -1344,6 +1372,13 @@ export default {
         ?.addEventListener('click', () => {
           const eid = el.querySelector('[data-action="extract"]')?.dataset.entryId
           if (eid) handleExtract(eid)
+        })
+
+      // --- Entry detail: parse documents ---
+      el.querySelector('[data-action="parse-documents"]')
+        ?.addEventListener('click', () => {
+          const eid = state.selectedEntry?.id
+          if (eid) handleParseDocuments(eid)
         })
 
       // --- Entry detail: generate template selector ---
@@ -1499,6 +1534,32 @@ export default {
         await loadEntryVariables(entryId)
       } catch (err) { showToast(err.message, 'error') }
       state.extracting = false
+      render()
+    }
+
+    async function handleParseDocuments(entryId) {
+      state.parsing = true
+      render()
+      try {
+        const d = await api(`/candidates/${entryId}/parse-documents`, { method: 'POST' })
+        if (d.success && d.suggestions) {
+          const entry = state.selectedEntry
+          const merged = { ...(entry.field_values || {}) }
+          for (const [key, val] of Object.entries(d.suggestions)) {
+            if (val !== null && val !== undefined && val !== '') {
+              merged[key] = val
+            }
+          }
+          await api(`/candidates/${entryId}`, {
+            method: 'PUT',
+            body: JSON.stringify({ field_values: merged }),
+          })
+          const updated = await api(`/candidates/${entryId}`)
+          state.selectedEntry = updated.candidate
+          showToast(T('entries.parse_done', `Parsed ${d.documents_parsed} document(s)`), 'success')
+        }
+      } catch (err) { showToast(err.message, 'error') }
+      state.parsing = false
       render()
     }
 

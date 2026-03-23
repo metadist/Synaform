@@ -852,6 +852,138 @@ class TemplateXController extends AbstractController
         }
     }
 
+    #[Route('/candidates/{candidateId}/parse-documents', name: 'candidates_parse_documents', methods: ['POST'])]
+    #[OA\Post(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/parse-documents',
+        summary: 'Parse uploaded documents with AI to auto-fill form fields',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Parsed field suggestions')]
+    public function candidatesParseDocuments(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $form = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, $entry['form_id'] ?? 'default');
+        if (!$form) {
+            return $this->json(['success' => false, 'error' => 'Form definition not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $candidateDir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $allTexts = [];
+
+        if (!empty($entry['files']['cv'])) {
+            $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
+            $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
+            $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+            try {
+                [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+                if (!empty(trim((string) $text))) {
+                    $allTexts[] = '=== Primary Document (' . ($entry['files']['cv']['filename'] ?? $storedAs) . ') ===' . "\n" . $text;
+                }
+            } catch (\Throwable $e) {
+                $this->logger->warning('Parse-documents: failed to extract CV text', ['error' => $e->getMessage()]);
+            }
+        }
+
+        foreach ($entry['files']['additional'] ?? [] as $doc) {
+            $storedAs = $doc['stored_as'] ?? '';
+            if (empty($storedAs) || !is_file($candidateDir . '/' . $storedAs)) {
+                continue;
+            }
+            $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
+            $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+            try {
+                [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+                if (!empty(trim((string) $text))) {
+                    $allTexts[] = '=== Document (' . ($doc['filename'] ?? $storedAs) . ') ===' . "\n" . $text;
+                }
+            } catch (\Throwable $e) {
+                $this->logger->warning('Parse-documents: failed to extract doc text', ['error' => $e->getMessage(), 'file' => $storedAs]);
+            }
+        }
+
+        if (empty($allTexts)) {
+            return $this->json(['success' => false, 'error' => 'No documents uploaded or text could not be extracted from any document'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $combinedText = implode("\n\n", $allTexts);
+
+        $fields = $form['fields'] ?? [];
+        $fieldDescriptions = [];
+        foreach ($fields as $field) {
+            $desc = $field['key'] . ' (' . ($field['type'] ?? 'text') . '): ' . ($field['label'] ?? $field['key']);
+            if (!empty($field['hint'])) {
+                $desc .= ' — ' . $field['hint'];
+            }
+            if (!empty($field['options'])) {
+                $desc .= ' [allowed values: ' . implode(', ', $field['options']) . ']';
+            }
+            if ($field['type'] === 'list') {
+                $desc .= ' [return as JSON array of strings]';
+            }
+            $fieldDescriptions[] = $desc;
+        }
+
+        $fieldsBlock = implode("\n", array_map(fn ($d) => '- ' . $d, $fieldDescriptions));
+
+        $prompt = <<<PROMPT
+        You are an assistant that extracts form field values from documents.
+        Below are the form fields that need to be filled, followed by the document text.
+
+        For each field, extract the most appropriate value from the documents. Rules:
+        - For "select" fields, ONLY return one of the allowed values listed in brackets, or null if not found.
+        - For "list" fields, return a JSON array of strings (one entry per item).
+        - For "text" fields, return a plain string value.
+        - For "checkbox" fields, return true or false.
+        - For "date" fields, return in YYYY-MM-DD format.
+        - Return null for any field where no matching information is found. Do NOT guess or invent data.
+        - If a document is an interview transcript, extract answers to questions that match the field descriptions.
+
+        Form fields:
+        {$fieldsBlock}
+
+        Documents:
+        ---
+        {$combinedText}
+        ---
+
+        Return ONLY a valid JSON object where keys are the field keys and values are the extracted data.
+        PROMPT;
+
+        try {
+            $messages = [
+                ['role' => 'system', 'content' => 'You are a precise document parsing assistant. Return only valid JSON.'],
+                ['role' => 'user', 'content' => $prompt],
+            ];
+            $aiOptions = $this->resolveAiModelOptions($userId);
+            $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+            $content = $result['content'] ?? '';
+
+            $parsed = $this->parseJsonFromAiResponse($content);
+            if ($parsed === null) {
+                return $this->json(['success' => false, 'error' => 'Failed to parse AI response'], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+
+            return $this->json([
+                'success' => true,
+                'suggestions' => $parsed,
+                'documents_parsed' => count($allTexts),
+                'model' => $result['model'] ?? 'unknown',
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger->error('Parse-documents failed', ['error' => $e->getMessage(), 'candidateId' => $candidateId]);
+            return $this->json(['success' => false, 'error' => 'Document parsing failed: ' . $e->getMessage()], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
+    }
+
     #[Route('/candidates/{candidateId}/variables', name: 'candidates_variables_get', methods: ['GET'])]
     #[OA\Get(
         path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/variables',

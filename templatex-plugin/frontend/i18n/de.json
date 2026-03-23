@@ -90,6 +90,10 @@
     "confidence": "Konfidenz",
     "re_extract": "Erneut extrahieren",
     "re_validate": "Erneut validieren",
+    "parse_btn": "Dokumente auswerten & Felder ausfüllen",
+    "parse_running": "Dokumente werden ausgewertet...",
+    "parse_done": "Dokumente ausgewertet und Formularfelder aktualisiert",
+    "parse_hint": "Die KI liest alle hochgeladenen Dokumente und schlägt Werte für die Formularfelder vor",
     "form_data": "Formulardaten",
     "ai_data": "KI-Daten",
     "resolved": "Aufgelöst",
@@ -153,6 +157,8 @@
     "remove_field": "Feld entfernen",
     "confirm_delete": "Formular wirklich löschen?",
     "default_form": "Standardformular",
+    "field_options_hint": "Optionen (kommagetrennt, z.B.: verheiratet, ledig, geschieden)",
+    "list_placeholder": "Ein Eintrag pro Zeile",
     "list_placeholder": "Ein Eintrag pro Zeile"
   },
   "settings": {

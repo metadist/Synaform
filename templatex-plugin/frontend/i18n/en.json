@@ -90,6 +90,10 @@
     "confidence": "Confidence",
     "re_extract": "Re-extract",
     "re_validate": "Re-validate",
+    "parse_btn": "Parse Documents & Auto-fill",
+    "parse_running": "Parsing documents...",
+    "parse_done": "Documents parsed and form fields updated",
+    "parse_hint": "AI reads all uploaded documents and suggests values for the form fields",
     "form_data": "Form Data",
     "ai_data": "AI Data",
     "resolved": "Resolved",
@@ -153,6 +157,8 @@
     "remove_field": "Remove Field",
     "confirm_delete": "Delete this form?",
     "default_form": "Default Form",
+    "field_options_hint": "Options (comma-separated, e.g.: married, single, divorced)",
+    "list_placeholder": "One entry per line",
     "list_placeholder": "One entry per line"
   },
   "settings": {
