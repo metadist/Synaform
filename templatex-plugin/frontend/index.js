@@ -329,11 +329,11 @@ export default {
     }
 
     function emptyState(icon, title, message, hint) {
-      return `<div class="rounded-lg border dark:border-gray-700 p-8 bg-white dark:bg-gray-800 text-center">
-        <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-700 mb-3 text-gray-400">${icon}</div>
+      return `<div class="tx-card p-8 text-center">
+        <div class="inline-flex items-center justify-center w-12 h-12 rounded-full mb-3" style="background:var(--bg-chip);color:var(--txt-secondary)">${icon}</div>
         <h3 class="font-medium text-lg mb-1">${title}</h3>
-        <p class="text-sm text-gray-500 dark:text-gray-400">${message}</p>
-        ${hint ? `<p class="text-xs text-gray-400 dark:text-gray-500 mt-1">${hint}</p>` : ''}
+        <p class="text-sm tx-secondary">${message}</p>
+        ${hint ? `<p class="text-xs tx-secondary mt-1" style="opacity:.7">${hint}</p>` : ''}
       </div>`
     }
 
@@ -384,11 +384,11 @@ export default {
 
       const rows = state.templates.length > 0
         ? state.templates.map(tpl => `
-          <div data-select-template="${tpl.id}" class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-4 hover:shadow-sm transition-shadow cursor-pointer">
+          <div data-select-template="${tpl.id}" class="tx-row p-4 cursor-pointer">
             <div class="flex items-center justify-between">
               <div>
                 <div class="font-medium">${escHtml(tpl.name)}</div>
-                <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${formatDate(tpl.created_at)}${tpl.placeholder_count != null ? ` · ${tpl.placeholder_count} ${T('templates.placeholders')}` : ''}</div>
+                <div class="text-xs tx-secondary mt-0.5">${formatDate(tpl.created_at)}${tpl.placeholder_count != null ? ` · ${tpl.placeholder_count} ${T('templates.placeholders')}` : ''}</div>
               </div>
               <div class="flex items-center gap-1">
                 <button data-download-template="${tpl.id}" class="p-1.5 text-gray-400 hover:text-blue-500 rounded transition-colors" title="${T('app.download')}">${ICONS.download}</button>
@@ -401,18 +401,18 @@ export default {
       return `<div class="mt-4 space-y-4">
         <div class="flex items-center justify-between">
           <h3 class="text-lg font-medium">${T('templates.title')}</h3>
-          <label class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm font-medium transition-colors cursor-pointer">
+          <label class="tx-btn tx-btn-sm cursor-pointer">
             ${ICONS.upload} ${T('templates.upload')}
             <input type="file" id="tx-template-file-btn" accept=".docx" class="hidden" />
           </label>
         </div>
-        <div id="tx-template-drop" class="rounded-lg border-2 border-dashed border-gray-300 dark:border-gray-600 p-4 bg-white dark:bg-gray-800 text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition-colors">
-          <p class="text-sm text-gray-500 dark:text-gray-400">${T('templates.drop_hint')}</p>
+        <div id="tx-template-drop" class="tx-drop">
+          <p class="text-sm tx-secondary">${T('templates.drop_hint')}</p>
           <input type="file" id="tx-template-file" accept=".docx" class="hidden" />
           <div id="tx-template-upload-form" class="mt-3 hidden">
             <div class="flex items-center gap-2 max-w-md mx-auto">
-              <input type="text" id="tx-template-name" placeholder="${T('templates.name_label')}" class="flex-1 rounded border dark:border-gray-600 dark:bg-gray-700 px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none" />
-              <button id="tx-upload-template-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm font-medium transition-colors flex items-center gap-1">${ICONS.upload} ${T('templates.upload')}</button>
+              <input type="text" id="tx-template-name" placeholder="${T('templates.name_label')}" class="tx-input" style="flex:1" />
+              <button id="tx-upload-template-btn" class="tx-btn tx-btn-sm">${ICONS.upload} ${T('templates.upload')}</button>
             </div>
           </div>
         </div>
@@ -424,23 +424,23 @@ export default {
       const tpl = state.selectedTemplate
       const phs = tpl.placeholders || []
       const phRows = phs.map(p => `
-        <tr class="border-t dark:border-gray-700">
+        <tr class="tx-divider border-t">
           <td class="py-2 px-3 font-mono text-sm">${escHtml(p.key || p.name || '')}</td>
           <td class="py-2 px-3 text-sm">${escHtml(p.type || 'text')}</td>
           <td class="py-2 px-3 text-sm text-center">${p.occurrences ?? p.count ?? '—'}</td>
         </tr>`).join('')
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-templates" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">${ICONS.back} ${T('app.back')}</button>
-        <div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+        <button data-action="back-templates" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <div class="tx-card p-6">
           <div class="flex items-center justify-between mb-4">
             <div>
               <h3 class="text-lg font-medium">${escHtml(tpl.name)}</h3>
-              <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${T('app.created')}: ${formatDate(tpl.created_at)}</div>
+              <div class="text-xs tx-secondary mt-0.5">${T('app.created')}: ${formatDate(tpl.created_at)}</div>
             </div>
             <div class="flex items-center gap-2">
-              <button data-download-template="${tpl.id}" class="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 transition-colors">${ICONS.download} ${T('app.download')}</button>
-              <button data-delete-template="${tpl.id}" class="flex items-center gap-1 text-sm text-red-600 hover:text-red-700 dark:text-red-400 transition-colors">${ICONS.trash} ${T('app.delete')}</button>
+              <button data-download-template="${tpl.id}" class="flex items-center gap-1 text-sm tx-link">${ICONS.download} ${T('app.download')}</button>
+              <button data-delete-template="${tpl.id}" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--status-error)">${ICONS.trash} ${T('app.delete')}</button>
             </div>
           </div>
           ${phs.length > 0 ? `
@@ -448,7 +448,7 @@ export default {
             <div class="overflow-x-auto">
               <table class="w-full text-left">
                 <thead>
-                  <tr class="border-b dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                  <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
                     <th class="py-2 px-3">${T('forms.field_key')}</th>
                     <th class="py-2 px-3">${T('app.type')}</th>
                     <th class="py-2 px-3 text-center">${T('templates.occurrences')}</th>
@@ -457,7 +457,7 @@ export default {
                 <tbody>${phRows}</tbody>
               </table>
             </div>
-          ` : `<p class="text-sm text-gray-400 dark:text-gray-500">${T('templates.placeholder_count')}: 0</p>`}
+          ` : `<p class="text-sm tx-secondary">${T('templates.placeholder_count')}: 0</p>`}
         </div>
       </div>`
     }
@@ -475,11 +475,11 @@ export default {
           const count = f.fields?.length ?? f.field_count ?? 0
           const isDefault = f.is_default || f.id === 'default'
           return `
-            <div data-select-form="${f.id}" class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-4 hover:shadow-sm transition-shadow cursor-pointer">
+            <div data-select-form="${f.id}" class="tx-row p-4 cursor-pointer">
               <div class="flex items-center justify-between">
                 <div>
                   <div class="font-medium">${escHtml(f.name)}${isDefault ? ` <span class="text-xs text-gray-400 dark:text-gray-500">(${T('forms.default_form')})</span>` : ''}</div>
-                  <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${count} ${T('forms.field_count')} · ${T('app.language')}: ${escHtml(f.language || '—')}</div>
+                  <div class="text-xs tx-secondary mt-0.5">${count} ${T('forms.field_count')} · ${T('app.language')}: ${escHtml(f.language || '—')}</div>
                 </div>
                 <div class="flex items-center gap-1">
                   ${!isDefault ? `<button data-delete-form="${f.id}" class="p-1.5 text-gray-400 hover:text-red-500 rounded transition-colors" title="${T('app.delete')}">${ICONS.trash}</button>` : ''}
@@ -492,7 +492,7 @@ export default {
       return `<div class="mt-4 space-y-4">
         <div class="flex items-center justify-between">
           <h3 class="text-lg font-medium">${T('forms.title')}</h3>
-          <button data-action="new-form" class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm font-medium transition-colors">${ICONS.plus} ${T('forms.new')}</button>
+          <button data-action="new-form" class="tx-btn tx-btn-sm">${ICONS.plus} ${T('forms.new')}</button>
         </div>
         <div class="space-y-2">${rows}</div>
       </div>`
@@ -503,7 +503,7 @@ export default {
       const fields = f.fields || []
       const isDefault = f.is_default || f.id === 'default'
       const rows = fields.map(fd => `
-        <tr class="border-t dark:border-gray-700">
+        <tr class="tx-divider border-t">
           <td class="py-2 px-3 font-mono text-sm">${escHtml(fd.key)}</td>
           <td class="py-2 px-3 text-sm">${escHtml(fd.label || '')}</td>
           <td class="py-2 px-3 text-sm">${escHtml(fd.type || 'text')}</td>
@@ -511,16 +511,16 @@ export default {
         </tr>`).join('')
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-forms" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">${ICONS.back} ${T('app.back')}</button>
-        <div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+        <button data-action="back-forms" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <div class="tx-card p-6">
           <div class="flex items-center justify-between mb-4">
             <div>
               <h3 class="text-lg font-medium mb-1">${escHtml(f.name)}${isDefault ? ` <span class="text-xs text-gray-400">(${T('forms.default_form')})</span>` : ''}</h3>
-              <div class="text-xs text-gray-500 dark:text-gray-400">${T('app.language')}: ${escHtml(f.language || '—')}</div>
+              <div class="text-xs tx-secondary">${T('app.language')}: ${escHtml(f.language || '—')}</div>
             </div>
             <div class="flex items-center gap-2">
-              <button data-action="edit-form" class="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 transition-colors">${ICONS.edit} ${T('app.edit')}</button>
-              ${!isDefault ? `<button data-delete-form="${f.id}" class="flex items-center gap-1 text-sm text-red-600 hover:text-red-700 dark:text-red-400 transition-colors">${ICONS.trash} ${T('app.delete')}</button>` : ''}
+              <button data-action="edit-form" class="flex items-center gap-1 text-sm tx-link">${ICONS.edit} ${T('app.edit')}</button>
+              ${!isDefault ? `<button data-delete-form="${f.id}" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--status-error)">${ICONS.trash} ${T('app.delete')}</button>` : ''}
             </div>
           </div>
           ${fields.length > 0 ? `
@@ -528,7 +528,7 @@ export default {
             <div class="overflow-x-auto">
               <table class="w-full text-left">
                 <thead>
-                  <tr class="border-b dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                  <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
                     <th class="py-2 px-3">${T('forms.field_key')}</th>
                     <th class="py-2 px-3">${T('forms.field_label')}</th>
                     <th class="py-2 px-3">${T('forms.field_type')}</th>
@@ -538,7 +538,7 @@ export default {
                 <tbody>${rows}</tbody>
               </table>
             </div>
-          ` : `<p class="text-sm text-gray-400 dark:text-gray-500">${T('forms.fields')}: 0</p>`}
+          ` : `<p class="text-sm tx-secondary">${T('forms.fields')}: 0</p>`}
         </div>
       </div>`
     }
@@ -612,11 +612,11 @@ export default {
 
       const rows = state.entries.length > 0
         ? state.entries.map(e => `
-          <div data-select-entry="${e.id}" class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-4 hover:shadow-sm transition-shadow cursor-pointer">
+          <div data-select-entry="${e.id}" class="tx-row p-4 cursor-pointer">
             <div class="flex items-center justify-between">
               <div>
                 <div class="font-medium">${escHtml(entryDisplayName(e))}</div>
-                <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${T('entries.form')}: ${escHtml(formNameById(e.form_id))} · ${formatDate(e.created_at)}</div>
+                <div class="text-xs tx-secondary mt-0.5">${T('entries.form')}: ${escHtml(formNameById(e.form_id))} · ${formatDate(e.created_at)}</div>
               </div>
               <div class="flex items-center gap-3">
                 ${statusBadge(e.status || 'draft')}
@@ -629,7 +629,7 @@ export default {
       return `<div class="mt-4 space-y-4">
         <div class="flex items-center justify-between">
           <h3 class="text-lg font-medium">${T('entries.title')}</h3>
-          <button data-action="new-entry" class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm font-medium transition-colors">${ICONS.plus} ${T('entries.new')}</button>
+          <button data-action="new-entry" class="tx-btn tx-btn-sm">${ICONS.plus} ${T('entries.new')}</button>
         </div>
         <div class="space-y-2">${rows}</div>
       </div>`
@@ -646,19 +646,19 @@ export default {
       }
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-entries" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">${ICONS.back} ${T('app.back')}</button>
-        <div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+        <button data-action="back-entries" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <div class="tx-card p-6">
           <h3 class="text-lg font-medium mb-4">${T('entries.new')}</h3>
           <form id="tx-new-entry-form" class="space-y-4 max-w-lg">
             <div>
               <label class="block text-sm font-medium mb-1">${T('entries.form')}</label>
-              <select id="tx-entry-form-select" class="w-full rounded border dark:border-gray-600 dark:bg-gray-700 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+              <select id="tx-entry-form-select" class="tx-select">
                 <option value="">— ${T('entries.form')} —</option>
                 ${formOptions}
               </select>
             </div>
             <div id="tx-entry-fields" class="space-y-3">${fieldsHtml}</div>
-            ${state.newEntryFormDef ? `<button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm font-medium transition-colors">${T('app.save')}</button>` : ''}
+            ${state.newEntryFormDef ? `<button type="submit" class="tx-btn">${T('app.save')}</button>` : ''}
           </form>
         </div>
       </div>`
@@ -666,7 +666,7 @@ export default {
 
     function renderFormField(field) {
       const fid = `tx-field-${escHtml(field.key)}`
-      const inputCls = 'w-full rounded border dark:border-gray-600 dark:bg-gray-700 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none'
+      const inputCls = 'tx-select'
       const req = field.required ? 'required' : ''
       const reqMark = field.required ? ' <span class="text-red-500">*</span>' : ''
       const hint = field.hint ? `<p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">${escHtml(field.hint)}</p>` : ''
@@ -715,16 +715,16 @@ export default {
     function renderEntryDetail() {
       const e = state.selectedEntry
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-entries" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">${ICONS.back} ${T('app.back')}</button>
-        <div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+        <button data-action="back-entries" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <div class="tx-card p-6">
           <div class="flex items-center justify-between">
             <div>
               <h3 class="text-lg font-medium">${escHtml(entryDisplayName(e))}</h3>
-              <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${T('entries.form')}: ${escHtml(formNameById(e.form_id))} · ${T('app.created')}: ${formatDate(e.created_at)}</div>
+              <div class="text-xs tx-secondary mt-0.5">${T('entries.form')}: ${escHtml(formNameById(e.form_id))} · ${T('app.created')}: ${formatDate(e.created_at)}</div>
             </div>
             <div class="flex items-center gap-3">
               ${statusBadge(e.status || 'draft')}
-              <button data-delete-entry="${e.id}" class="flex items-center gap-1 text-sm text-red-600 hover:text-red-700 dark:text-red-400 transition-colors">${ICONS.trash} ${T('app.delete')}</button>
+              <button data-delete-entry="${e.id}" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--status-error)">${ICONS.trash} ${T('app.delete')}</button>
             </div>
           </div>
         </div>
@@ -746,16 +746,16 @@ export default {
         if (Array.isArray(val)) val = val.join(', ')
         else if (typeof val === 'boolean') val = val ? T('app.yes') : T('app.no')
         else val = String(val ?? '')
-        return `<div class="flex justify-between py-2 border-b dark:border-gray-700 last:border-0">
-          <span class="text-sm text-gray-500 dark:text-gray-400">${escHtml(key)}</span>
+        return `<div class="flex justify-between py-2 tx-divider border-b last:border-0">
+          <span class="text-sm tx-secondary">${escHtml(key)}</span>
           <span class="text-sm font-medium text-right max-w-[60%]">${escHtml(val)}</span>
         </div>`
       }).join('')
-      return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+      return `<div class="tx-card p-6">
         <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_data')}</h4>
         ${keys.length > 0
           ? `<div class="rounded border dark:border-gray-700 divide-y dark:divide-gray-700 px-3">${dataRows}</div>`
-          : `<p class="text-sm text-gray-400 dark:text-gray-500">${T('app.no_data')}</p>`}
+          : `<p class="text-sm tx-secondary">${T('app.no_data')}</p>`}
       </div>`
     }
 
@@ -765,7 +765,7 @@ export default {
       const hasCv = !!entry.files?.cv
       const additionalDocs = entry.files?.additional || []
       const cvInfo = hasCv ? entry.files.cv : null
-      return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+      return `<div class="tx-card p-6">
         <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.file} ${T('entries.section_files')}</h4>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div class="rounded border dark:border-gray-700 p-3">
@@ -806,9 +806,9 @@ export default {
           ${extractInfo.model_used ? ` · ${T('entries.extract_model')}: <span class="font-mono text-xs">${escHtml(extractInfo.model_used)}</span>` : ''}
         </div>`
       } else {
-        statusLine = `<div class="text-sm text-gray-400 dark:text-gray-500">${hasDoc ? '' : T('entries.extract_no_cv')}</div>`
+        statusLine = `<div class="text-sm tx-secondary">${hasDoc ? '' : T('entries.extract_no_cv')}</div>`
       }
-      return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+      return `<div class="tx-card p-6">
         <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.sparkle} ${T('entries.section_extraction')}</h4>
         <div class="flex items-center justify-between">
           ${statusLine}
@@ -826,7 +826,7 @@ export default {
       const isExtracted = e.status === 'extracted' || e.status === 'reviewed' || e.status === 'generated'
       if (!isExtracted && !state.entryVariables) return ''
       if (state.entryVariablesLoading) {
-        return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+        return `<div class="tx-card p-6">
           <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_variables')}</h4>
           <div class="flex items-center gap-2 py-4">
             <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
@@ -836,21 +836,21 @@ export default {
       }
       const vars = state.entryVariables
       if (!vars || vars.length === 0) {
-        return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+        return `<div class="tx-card p-6">
           <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_variables')}</h4>
-          <p class="text-sm text-gray-400 dark:text-gray-500">${T('app.no_data')}</p>
+          <p class="text-sm tx-secondary">${T('app.no_data')}</p>
         </div>`
       }
       const regularVars = vars.filter(v => v.type !== 'station')
       const stationVars = vars.filter(v => v.type === 'station')
       const rows = regularVars.map(v => renderVariableRow(v, e.id)).join('')
       const stationRows = stationVars.map(v => renderStationGroup(v)).join('')
-      return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+      return `<div class="tx-card p-6">
         <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_variables')}</h4>
         <div class="overflow-x-auto">
           <table class="w-full text-left">
             <thead>
-              <tr class="border-b dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
                 <th class="py-2 px-3">${T('entries.var_key')}</th>
                 <th class="py-2 px-3">${T('entries.var_value')}</th>
                 <th class="py-2 px-3">${T('entries.var_source')}</th>
@@ -880,7 +880,7 @@ export default {
       }
       if (isEditing) {
         const editVal = escHtml(Array.isArray(v.value) ? v.value.join('\n') : String(v.value ?? ''))
-        return `<tr class="border-t dark:border-gray-700 bg-blue-50/50 dark:bg-blue-900/10">
+        return `<tr class="tx-divider border-t bg-blue-50/50 dark:bg-blue-900/10">
           <td class="py-2 px-3 font-mono text-sm align-top">${escHtml(v.key)}</td>
           <td class="py-2 px-3" colspan="2">
             <textarea id="tx-override-input" class="w-full rounded border dark:border-gray-600 dark:bg-gray-700 px-2 py-1 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none" rows="2">${editVal}</textarea>
@@ -893,12 +893,12 @@ export default {
           </td>
         </tr>`
       }
-      return `<tr class="border-t dark:border-gray-700">
+      return `<tr class="tx-divider border-t">
         <td class="py-2 px-3 font-mono text-sm">${escHtml(v.key)}</td>
         <td class="py-2 px-3 text-sm">${displayValue}</td>
         <td class="py-2 px-3"><span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${sourceCls}">${sourceLabel}</span></td>
         <td class="py-2 px-3 text-right">
-          <button data-action="override-var" data-var-key="${escHtml(v.key)}" class="text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 transition-colors flex items-center gap-1 ml-auto">${ICONS.edit} ${T('entries.override')}</button>
+          <button data-action="override-var" data-var-key="${escHtml(v.key)}" class="text-xs tx-link flex items-center gap-1 ml-auto">${ICONS.edit} ${T('entries.override')}</button>
         </td>
       </tr>`
     }
@@ -941,18 +941,18 @@ export default {
       const docsMap = entry.documents || {}
       const docs = Object.values(docsMap)
       const docRows = docs.map(doc => `
-        <div class="flex items-center justify-between py-2 border-b dark:border-gray-700 last:border-0">
+        <div class="flex items-center justify-between py-2 tx-divider border-b last:border-0">
           <div>
             <span class="text-sm font-medium">${escHtml(doc.template_name || doc.name || T('entries.document'))}</span>
-            <span class="text-xs text-gray-500 dark:text-gray-400 ml-2">${formatDate(doc.created_at || doc.generated_at)}</span>
+            <span class="text-xs tx-secondary ml-2">${formatDate(doc.created_at || doc.generated_at)}</span>
           </div>
-          <button data-action="download-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 transition-colors">${ICONS.download} ${T('entries.download_doc')}</button>
+          <button data-action="download-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm tx-link">${ICONS.download} ${T('entries.download_doc')}</button>
         </div>`).join('')
-      return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+      return `<div class="tx-card p-6">
         <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.doc} ${T('entries.section_generate')}</h4>
         ${hasTpls ? `
           <div class="flex items-center gap-3 mb-4">
-            <select id="tx-generate-template" class="flex-1 rounded border dark:border-gray-600 dark:bg-gray-700 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+            <select id="tx-generate-template" class="flex-1 tx-input">
               <option value="">— ${T('entries.generate_select_tpl')} —</option>
               ${tplOptions}
             </select>
@@ -962,12 +962,12 @@ export default {
                 : `${ICONS.doc} ${T('entries.generate_btn')}`}
             </button>
           </div>
-        ` : `<p class="text-sm text-gray-400 dark:text-gray-500 mb-4">${T('templates.empty')}</p>`}
+        ` : `<p class="text-sm tx-secondary mb-4">${T('templates.empty')}</p>`}
         <div>
           <h5 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">${T('entries.generated_docs')}</h5>
           ${docs.length > 0
             ? `<div class="rounded border dark:border-gray-700 divide-y dark:divide-gray-700 px-3">${docRows}</div>`
-            : `<p class="text-sm text-gray-400 dark:text-gray-500">${T('entries.no_generated_docs')}</p>`}
+            : `<p class="text-sm tx-secondary">${T('entries.no_generated_docs')}</p>`}
         </div>
       </div>`
     }
@@ -986,7 +986,7 @@ export default {
             ${settingsField('company_name', T('settings.company_name'), cfg.company_name || '')}
             <div>
               <label class="block text-sm font-medium mb-1">${T('settings.default_language')}</label>
-              <select name="default_language" class="w-full rounded border dark:border-gray-600 dark:bg-gray-700 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+              <select name="default_language" class="tx-select">
                 <option value="de" ${cfg.default_language === 'de' ? 'selected' : ''}>${T('settings.lang_de')}</option>
                 <option value="en" ${cfg.default_language === 'en' ? 'selected' : ''}>${T('settings.lang_en')}</option>
               </select>
@@ -994,7 +994,7 @@ export default {
             ${settingsField('extraction_model', T('settings.extraction_model'), cfg.extraction_model || 'default')}
             ${settingsField('validation_model', T('settings.validation_model'), cfg.validation_model || 'default')}
             <div class="flex items-center gap-3">
-              <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm font-medium transition-colors">${T('app.save')}</button>
+              <button type="submit" class="tx-btn">${T('app.save')}</button>
               <span id="tx-settings-msg" class="text-sm text-green-600 dark:text-green-400 hidden">${ICONS.check} ${T('app.saved')}</span>
             </div>
           </form>
@@ -1002,15 +1002,15 @@ export default {
         <div class="rounded-lg border dark:border-gray-700 p-6 bg-white dark:bg-gray-800">
           <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3">${T('settings.info_title')}</h4>
           <div class="space-y-2 text-sm">
-            <div class="flex justify-between py-1.5 border-b dark:border-gray-700">
+            <div class="flex justify-between py-1.5 tx-divider border-b">
               <span class="text-gray-500 dark:text-gray-400">${T('settings.active_model')}</span>
               <span class="font-mono font-medium text-gray-900 dark:text-gray-100">${escHtml(modelDisplay)}</span>
             </div>
-            <div class="flex justify-between py-1.5 border-b dark:border-gray-700">
+            <div class="flex justify-between py-1.5 tx-divider border-b">
               <span class="text-gray-500 dark:text-gray-400">${T('settings.default_language')}</span>
               <span class="font-medium text-gray-900 dark:text-gray-100">${cfg.default_language === 'de' ? T('settings.lang_de') : T('settings.lang_en')}</span>
             </div>
-            <div class="flex justify-between py-1.5 border-b dark:border-gray-700">
+            <div class="flex justify-between py-1.5 tx-divider border-b">
               <span class="text-gray-500 dark:text-gray-400">${T('settings.company_name')}</span>
               <span class="font-medium text-gray-900 dark:text-gray-100">${escHtml(cfg.company_name || T('dashboard.not_set'))}</span>
             </div>
@@ -1026,7 +1026,7 @@ export default {
     function settingsField(name, label, value) {
       return `<div>
         <label class="block text-sm font-medium mb-1">${label}</label>
-        <input name="${name}" value="${escHtml(value)}" type="text" class="w-full rounded border dark:border-gray-600 dark:bg-gray-700 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none" />
+        <input name="${name}" value="${escHtml(value)}" type="text" class="tx-select" />
       </div>`
     }
 
