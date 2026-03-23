@@ -1,4 +1,4 @@
-const TX_VERSION = 'v0.3.0'
+const TX_VERSION = 'v0.1.0'
 
 export default {
   mount(el, context) {
@@ -123,8 +123,8 @@ export default {
 
     function entryDisplayName(entry) {
       if (entry.name) return entry.name
-      const d = entry.form_data || {}
-      return d.name || d.full_name
+      const d = entry.field_values || {}
+      return d.name || d.fullname || d.full_name
         || (d.first_name ? `${d.first_name} ${d.last_name || ''}`.trim() : null)
         || `#${entry.id}`
     }
@@ -135,9 +135,8 @@ export default {
     }
 
     function entryHasDoc(entry) {
-      return entry.cv_file || entry.has_cv
-        || (entry.files && entry.files.length > 0)
-        || (entry.documents && entry.documents.length > 0)
+      return entry.files?.cv
+        || (entry.files?.additional && entry.files.additional.length > 0)
     }
 
     function showToast(msg, type = 'success') {
@@ -605,7 +604,7 @@ export default {
     // --- Section: Form Data ---
 
     function renderEntryDataSection(entry) {
-      const formData = entry.form_data || {}
+      const formData = entry.field_values || {}
       const keys = Object.keys(formData)
       const dataRows = keys.map(key => {
         let val = formData[key]
@@ -628,23 +627,26 @@ export default {
     // --- Section: Files ---
 
     function renderEntryFilesSection(entry) {
+      const hasCv = !!entry.files?.cv
+      const additionalDocs = entry.files?.additional || []
+      const cvInfo = hasCv ? entry.files.cv : null
       return `<div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
         <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.file} ${T('entries.section_files')}</h4>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div class="rounded border dark:border-gray-700 p-3">
             <div class="text-xs font-medium mb-2">${T('entries.upload_doc')}</div>
-            ${entry.cv_file || entry.has_cv ? `<p class="text-xs text-green-600 dark:text-green-400 mb-2">${ICONS.check} ${T('entries.doc_uploaded')}</p>` : ''}
+            ${hasCv ? `<p class="text-xs text-green-600 dark:text-green-400 mb-2">${ICONS.check} ${escHtml(cvInfo.filename || 'cv.pdf')}</p>` : ''}
             <label class="flex items-center justify-center gap-1.5 cursor-pointer text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 border border-dashed border-gray-300 dark:border-gray-600 rounded p-2 transition-colors hover:border-blue-400">
-              ${ICONS.upload} ${T('app.upload')}
-              <input type="file" id="tx-cv-upload" accept=".pdf,.doc,.docx" class="hidden" />
+              ${ICONS.upload} ${hasCv ? T('entries.re_upload') || T('app.upload') : T('app.upload')}
+              <input type="file" id="tx-cv-upload" accept=".pdf" class="hidden" />
             </label>
           </div>
           <div class="rounded border dark:border-gray-700 p-3">
             <div class="text-xs font-medium mb-2">${T('entries.upload_extra')}</div>
-            ${entry.doc_file || entry.has_doc ? `<p class="text-xs text-green-600 dark:text-green-400 mb-2">${ICONS.check} ${T('entries.doc_uploaded')}</p>` : ''}
+            ${additionalDocs.length > 0 ? additionalDocs.map(d => `<p class="text-xs text-green-600 dark:text-green-400 mb-1">${ICONS.check} ${escHtml(d.filename)}</p>`).join('') : ''}
             <label class="flex items-center justify-center gap-1.5 cursor-pointer text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 border border-dashed border-gray-300 dark:border-gray-600 rounded p-2 transition-colors hover:border-blue-400">
               ${ICONS.upload} ${T('app.upload')}
-              <input type="file" id="tx-doc-upload" accept=".pdf,.doc,.docx" class="hidden" />
+              <input type="file" id="tx-doc-upload" class="hidden" />
             </label>
           </div>
         </div>
@@ -656,7 +658,7 @@ export default {
     function renderEntryExtractionSection(entry) {
       const hasDoc = entryHasDoc(entry)
       const isExtracted = entry.status === 'extracted' || entry.status === 'reviewed' || entry.status === 'generated'
-      const extractInfo = entry.extraction || entry.ai_extraction || {}
+      const extractInfo = entry.ai_extracted || {}
       let statusLine = ''
       if (state.extracting) {
         statusLine = `<div class="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
@@ -666,7 +668,7 @@ export default {
       } else if (isExtracted) {
         statusLine = `<div class="flex items-center gap-2 text-sm text-green-600 dark:text-green-400">
           ${ICONS.check} ${T('entries.extract_done')}
-          ${extractInfo.model ? ` · ${T('entries.extract_model')}: <span class="font-mono text-xs">${escHtml(extractInfo.model)}</span>` : ''}
+          ${extractInfo.model_used ? ` · ${T('entries.extract_model')}: <span class="font-mono text-xs">${escHtml(extractInfo.model_used)}</span>` : ''}
         </div>`
       } else {
         statusLine = `<div class="text-sm text-gray-400 dark:text-gray-500">${hasDoc ? '' : T('entries.extract_no_cv')}</div>`
@@ -795,13 +797,14 @@ export default {
     // --- Section: Generate Document ---
 
     function renderEntryGenerateSection(entry) {
-      const hasVars = state.entryVariables && state.entryVariables.length > 0
+      const hasVars = state.entryVariables && state.entryVariables.filter(v => v.type !== 'station').length > 0
       const hasTpls = state.templates && state.templates.length > 0
       if (!hasVars) return ''
       const tplOptions = (state.templates || []).map(tpl =>
         `<option value="${tpl.id}"${state.selectedGenerateTemplate == tpl.id ? ' selected' : ''}>${escHtml(tpl.name)}</option>`
       ).join('')
-      const docs = entry.generated_documents || []
+      const docsMap = entry.documents || {}
+      const docs = Object.values(docsMap)
       const docRows = docs.map(doc => `
         <div class="flex items-center justify-between py-2 border-b dark:border-gray-700 last:border-0">
           <div>
@@ -1032,9 +1035,10 @@ export default {
             else formData[field.key] = input.value
           }
           try {
+            const nameField = formData['target-position'] || formData['fullname'] || formData['name'] || ''
             await api('/candidates', {
               method: 'POST',
-              body: JSON.stringify({ form_id: parseInt(state.newEntryFormId), form_data: formData }),
+              body: JSON.stringify({ form_id: state.newEntryFormId, field_values: formData, name: nameField }),
             })
             showToast(T('app.saved'))
             state.showNewEntry = false
@@ -1239,7 +1243,32 @@ export default {
       state.entryVariablesLoading = true
       try {
         const d = await api(`/candidates/${entryId}/variables`)
-        state.entryVariables = d.variables || []
+        const varsMap = d.variables || {}
+        const sourcesDef = d.sources || {}
+        const stationCount = d.station_count || 0
+        const varList = []
+        const stationData = []
+        for (const [key, value] of Object.entries(varsMap)) {
+          if (key.startsWith('stations.')) {
+            const m = key.match(/^stations\.(\w+)\.(\d+)$/)
+            if (m) {
+              const field = m[1], idx = parseInt(m[2]) - 1
+              if (!stationData[idx]) stationData[idx] = {}
+              stationData[idx][field] = value
+            }
+            continue
+          }
+          const src = sourcesDef[key]
+          let source = 'form'
+          const overrides = state.selectedEntry?.variable_overrides || {}
+          if (overrides[key] !== undefined && overrides[key] !== null) source = 'override'
+          else if (src?.primary === 'ai') source = 'ai'
+          varList.push({ key, value, source, type: key.startsWith('checkb.') ? 'checkbox' : 'text' })
+        }
+        if (stationData.length > 0) {
+          varList.push({ key: 'stations', value: stationData, source: 'ai', type: 'station' })
+        }
+        state.entryVariables = varList
       } catch (_) { state.entryVariables = null }
       state.entryVariablesLoading = false
     }
@@ -1263,10 +1292,13 @@ export default {
 
     async function handleOverrideSave(entryId, key, value) {
       try {
-        await api(`/candidates/${entryId}/variables/override`, {
-          method: 'POST',
-          body: JSON.stringify({ key, value }),
+        const existing = state.selectedEntry?.variable_overrides || {}
+        const overrides = { ...existing, [key]: value }
+        await api(`/candidates/${entryId}/variables`, {
+          method: 'PUT',
+          body: JSON.stringify({ overrides }),
         })
+        if (state.selectedEntry) state.selectedEntry.variable_overrides = overrides
         await loadEntryVariables(entryId)
         state.editingVarKey = null
         showToast(T('app.saved'))

@@ -10,6 +10,7 @@ use App\Repository\PluginDataRepository;
 use App\AI\Service\AiFacade;
 use App\Service\File\FileProcessor;
 use App\Service\PluginDataService;
+use App\Service\ModelConfigService;
 use App\Service\RateLimitService;
 use PhpOffice\PhpWord\TemplateProcessor;
 use OpenApi\Attributes as OA;
@@ -40,6 +41,7 @@ class TemplateXController extends AbstractController
         private PluginDataRepository $pluginDataRepository,
         private ConfigRepository $configRepository,
         private RateLimitService $rateLimitService,
+        private ModelConfigService $modelConfigService,
         private LoggerInterface $logger,
         private AiFacade $aiFacade,
         private FileProcessor $fileProcessor,
@@ -807,17 +809,21 @@ class TemplateXController extends AbstractController
 
         try {
             $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/cv.pdf';
-            $textResult = $this->fileProcessor->extractText($relativePath, 'pdf', $userId);
-            $rawText = $textResult['text'] ?? '';
+            [$rawText, $extractMeta] = $this->fileProcessor->extractText($relativePath, 'pdf', $userId);
+            $rawText = $rawText ?? '';
 
             if (empty(trim($rawText))) {
                 return $this->json(['success' => false, 'error' => 'Could not extract text from CV'], Response::HTTP_UNPROCESSABLE_ENTITY);
             }
 
             $prompt = $this->buildExtractionPrompt($rawText);
-            $options = ['response_format' => 'json'];
-            $result = $this->aiFacade->chat($prompt, $userId, $options);
-            $content = $result['content'];
+            $messages = [
+                ['role' => 'system', 'content' => 'You are a precise CV data extraction assistant. Return only valid JSON.'],
+                ['role' => 'user', 'content' => $prompt],
+            ];
+            $aiOptions = $this->resolveAiModelOptions($userId);
+            $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+            $content = $result['content'] ?? '';
 
             $extracted = $this->parseJsonFromAiResponse($content);
             if ($extracted === null) {
@@ -970,16 +976,12 @@ class TemplateXController extends AbstractController
                 }
             }
 
-            $movingYes = strtolower((string) ($variables['moving'] ?? '')) === 'ja';
-            $tp->setCheckbox('checkb.moving.yes', $movingYes);
-            $tp->setCheckbox('checkb.moving.no', !$movingYes);
-
-            $travelOrCommute = strtolower((string) ($variables['travelorcommute'] ?? ''));
-            $commuteYes = $travelOrCommute === 'ja';
-            $tp->setCheckbox('checkb.commute.yes', $commuteYes);
-            $tp->setCheckbox('checkb.commute.no', !$commuteYes);
-            $tp->setCheckbox('checkb.travel.yes', $commuteYes);
-            $tp->setCheckbox('checkb.travel.no', !$commuteYes);
+            $checkboxKeys = ['moving', 'commute', 'travel'];
+            foreach ($checkboxKeys as $cbKey) {
+                $yesVal = $variables["checkb.{$cbKey}.yes"] ?? false;
+                $tp->setCheckbox("checkb.{$cbKey}.yes", (bool) $yesVal);
+                $tp->setCheckbox("checkb.{$cbKey}.no", !(bool) $yesVal);
+            }
 
             $listKeys = ['relevantposlist', 'relevantfortargetposlist', 'languageslist', 'otherskillslist', 'benefits'];
             foreach ($listKeys as $listKey) {
@@ -1286,7 +1288,8 @@ class TemplateXController extends AbstractController
                 ['key' => 'relevantposlist', 'label' => 'Relevante vorherige Positionen', 'type' => 'list', 'required' => false, 'source' => 'form', 'hint' => 'Eine Position pro Zeile'],
                 ['key' => 'relevantfortargetposlist', 'label' => 'Relevante Berufserfahrung für Position', 'type' => 'list', 'required' => false, 'source' => 'form', 'hint' => 'z.B. Direct Reports, Mitarbeiteranzahl'],
                 ['key' => 'moving', 'label' => 'Umzugsbereitschaft', 'type' => 'select', 'options' => ['Ja', 'Nein'], 'required' => false, 'source' => 'form'],
-                ['key' => 'travelorcommute', 'label' => 'Pendel-/Reisebereitschaft', 'type' => 'select', 'options' => ['Ja', 'Nein'], 'required' => false, 'source' => 'form'],
+                ['key' => 'commute', 'label' => 'Pendelbereitschaft', 'type' => 'select', 'options' => ['Ja', 'Nein'], 'required' => false, 'source' => 'form'],
+                ['key' => 'travel', 'label' => 'Reisebereitschaft', 'type' => 'select', 'options' => ['Ja', 'Nein'], 'required' => false, 'source' => 'form'],
                 ['key' => 'noticeperiod', 'label' => 'Kündigungsfrist', 'type' => 'text', 'required' => false, 'source' => 'form'],
                 ['key' => 'currentansalary', 'label' => 'Aktuelles Bruttojahresgehalt', 'type' => 'text', 'required' => false, 'source' => 'form'],
                 ['key' => 'expectedansalary', 'label' => 'Erwartetes Bruttojahresgehalt', 'type' => 'text', 'required' => false, 'source' => 'form', 'hint' => "'nicht relevant' zum Weglassen"],
@@ -1377,6 +1380,8 @@ class TemplateXController extends AbstractController
             'education' => ['primary' => 'ai', 'fallback' => 'form'],
             'moving' => ['primary' => 'form'],
             'travelorcommute' => ['primary' => 'form'],
+            'commute' => ['primary' => 'form'],
+            'travel' => ['primary' => 'form'],
             'noticeperiod' => ['primary' => 'form'],
             'currentansalary' => ['primary' => 'form'],
             'expectedansalary' => ['primary' => 'form'],
@@ -1435,12 +1440,15 @@ class TemplateXController extends AbstractController
         $variables['checkb.moving.yes'] = $movingYes;
         $variables['checkb.moving.no'] = !$movingYes;
 
-        $travelOrCommute = strtolower((string) ($variables['travelorcommute'] ?? ''));
-        $commuteYes = $travelOrCommute === 'ja';
+        $commuteVal = $formData['commute'] ?? $variables['travelorcommute'] ?? '';
+        $commuteYes = strtolower((string) $commuteVal) === 'ja';
         $variables['checkb.commute.yes'] = $commuteYes;
         $variables['checkb.commute.no'] = !$commuteYes;
-        $variables['checkb.travel.yes'] = $commuteYes;
-        $variables['checkb.travel.no'] = !$commuteYes;
+
+        $travelVal = $formData['travel'] ?? $variables['travelorcommute'] ?? '';
+        $travelYes = strtolower((string) $travelVal) === 'ja';
+        $variables['checkb.travel.yes'] = $travelYes;
+        $variables['checkb.travel.no'] = !$travelYes;
 
         $stations = $aiData['stations'] ?? [];
         if (array_key_exists('stations', $overrides) && is_array($overrides['stations'])) {
@@ -1460,6 +1468,27 @@ class TemplateXController extends AbstractController
             'variables' => $variables,
             'station_count' => $stationCount,
         ];
+    }
+
+    private function resolveAiModelOptions(int $userId): array
+    {
+        $modelId = $this->modelConfigService->getDefaultModel('CHAT', $userId);
+        if ($modelId) {
+            return [
+                'model' => $this->modelConfigService->getModelName($modelId),
+                'provider' => $this->modelConfigService->getProviderForModel($modelId),
+            ];
+        }
+
+        $modelId = $this->modelConfigService->getDefaultModel('CHAT', 0);
+        if ($modelId) {
+            return [
+                'model' => $this->modelConfigService->getModelName($modelId),
+                'provider' => $this->modelConfigService->getProviderForModel($modelId),
+            ];
+        }
+
+        return [];
     }
 
     private function cleanTemplateMacros(string $docxPath): string
