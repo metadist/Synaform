@@ -178,6 +178,7 @@ export default {
       _pendingTemplateFile = null
       state.view = view
       window.location.hash = `#tx-${view}`
+      render()
       loadViewData(view)
     }
 
@@ -390,7 +391,7 @@ export default {
               <table class="w-full text-left">
                 <thead>
                   <tr class="border-b dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    <th class="py-2 px-3">Key</th>
+                    <th class="py-2 px-3">${T('forms.field_key')}</th>
                     <th class="py-2 px-3">${T('app.type')}</th>
                     <th class="py-2 px-3 text-center">${T('templates.occurrences')}</th>
                   </tr>
@@ -417,7 +418,7 @@ export default {
             <div data-select-form="${f.id}" class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-4 hover:shadow-sm transition-shadow cursor-pointer">
               <div class="flex items-center justify-between">
                 <div>
-                  <div class="font-medium">${escHtml(f.name)}${f.is_default ? ` <span class="text-xs text-gray-400 dark:text-gray-500">(${T('forms.default_form')})</span>` : ''}</div>
+                  <div class="font-medium">${escHtml(f.name)}${(f.is_default || f.id === 'default') ? ` <span class="text-xs text-gray-400 dark:text-gray-500">(${T('forms.default_form')})</span>` : ''}</div>
                   <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${count} ${T('forms.field_count')} · ${T('app.language')}: ${escHtml(f.language || '—')}</div>
                 </div>
               </div>
@@ -445,7 +446,7 @@ export default {
       return `<div class="mt-4 space-y-4">
         <button data-action="back-forms" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">${ICONS.back} ${T('app.back')}</button>
         <div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
-          <h3 class="text-lg font-medium mb-1">${escHtml(f.name)}${f.is_default ? ` <span class="text-xs text-gray-400">(${T('forms.default_form')})</span>` : ''}</h3>
+          <h3 class="text-lg font-medium mb-1">${escHtml(f.name)}${(f.is_default || f.id === 'default') ? ` <span class="text-xs text-gray-400">(${T('forms.default_form')})</span>` : ''}</h3>
           <div class="text-xs text-gray-500 dark:text-gray-400 mb-4">${T('app.language')}: ${escHtml(f.language || '—')}</div>
           ${fields.length > 0 ? `
             <h4 class="text-sm font-medium mb-2">${T('forms.fields')} (${fields.length})</h4>
@@ -562,7 +563,7 @@ export default {
           break
         }
         case 'list':
-          input = `<textarea id="${fid}" name="${escHtml(field.key)}" class="${inputCls}" rows="3" placeholder="One entry per line" ${req}></textarea>`
+          input = `<textarea id="${fid}" name="${escHtml(field.key)}" class="${inputCls}" rows="3" placeholder="${T('forms.list_placeholder')}" ${req}></textarea>`
           break
         case 'date':
           input = `<input type="date" id="${fid}" name="${escHtml(field.key)}" class="${inputCls}" ${req} />`
@@ -808,7 +809,7 @@ export default {
       const docRows = docs.map(doc => `
         <div class="flex items-center justify-between py-2 border-b dark:border-gray-700 last:border-0">
           <div>
-            <span class="text-sm font-medium">${escHtml(doc.template_name || doc.name || 'Document')}</span>
+            <span class="text-sm font-medium">${escHtml(doc.template_name || doc.name || T('entries.document'))}</span>
             <span class="text-xs text-gray-500 dark:text-gray-400 ml-2">${formatDate(doc.created_at || doc.generated_at)}</span>
           </div>
           <button data-action="download-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 transition-colors">${ICONS.download} ${T('entries.download_doc')}</button>
@@ -1378,6 +1379,7 @@ export default {
         }
         state.status = data
         state.loading = false
+        await Promise.all([fetchForms(), fetchTemplates(), fetchEntries()])
         loadViewData(state.view)
       } catch (err) {
         state.error = err.message

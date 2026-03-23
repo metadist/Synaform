@@ -115,7 +115,8 @@
     "generate_select_tpl": "Template auswählen",
     "generated_docs": "Generierte Dokumente",
     "no_generated_docs": "Noch keine Dokumente generiert",
-    "download_doc": "Herunterladen"
+    "download_doc": "Herunterladen",
+    "re_upload": "Erneut hochladen"
   },
   "templates": {
     "title": "Templates",
@@ -151,7 +152,8 @@
     "add_field": "Feld hinzufügen",
     "remove_field": "Feld entfernen",
     "confirm_delete": "Formular wirklich löschen?",
-    "default_form": "Standardformular"
+    "default_form": "Standardformular",
+    "list_placeholder": "Ein Eintrag pro Zeile"
   },
   "settings": {
     "title": "Einstellungen",

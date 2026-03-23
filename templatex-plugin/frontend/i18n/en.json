@@ -115,7 +115,8 @@
     "generate_select_tpl": "Select a template",
     "generated_docs": "Generated Documents",
     "no_generated_docs": "No documents generated yet",
-    "download_doc": "Download"
+    "download_doc": "Download",
+    "re_upload": "Re-upload"
   },
   "templates": {
     "title": "Templates",
@@ -151,7 +152,8 @@
     "add_field": "Add Field",
     "remove_field": "Remove Field",
     "confirm_delete": "Delete this form?",
-    "default_form": "Default Form"
+    "default_form": "Default Form",
+    "list_placeholder": "One entry per line"
   },
   "settings": {
     "title": "Settings",
