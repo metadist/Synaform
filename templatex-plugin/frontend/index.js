@@ -244,9 +244,38 @@ export default {
     // Render engine
     // =========================================================================
 
+    const TX_STYLES = `
+      .tx { color: var(--txt-primary); }
+      .tx-secondary { color: var(--txt-secondary); }
+      .tx-card { background: var(--bg-card); border-radius: .75rem; box-shadow: inset 0 0 0 1px var(--border-light), 0 1px 2px rgba(0,0,0,.04); }
+      .tx-row { background: var(--bg-card); box-shadow: inset 0 0 0 1px var(--border-light); border-radius: .5rem; }
+      .tx-row:hover { box-shadow: inset 0 0 0 1px var(--brand-alpha-light), 0 2px 6px rgba(0,0,0,.06); }
+      .tx-input { background: var(--bg-app); color: var(--txt-primary); border: 1px solid var(--divider); border-radius: .375rem; padding: .5rem .75rem; font-size: .875rem; outline: none; width: 100%; }
+      .tx-input:focus { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-alpha-light); }
+      .tx-input::placeholder { color: var(--txt-secondary); opacity: .6; }
+      .tx-select { background: var(--bg-app); color: var(--txt-primary); border: 1px solid var(--divider); border-radius: .375rem; padding: .5rem .75rem; font-size: .875rem; outline: none; width: 100%; }
+      .tx-select:focus { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-alpha-light); }
+      .tx-btn { background: var(--brand); color: #fff; border: none; border-radius: .375rem; padding: .5rem 1rem; font-size: .875rem; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: .375rem; transition: background .15s; }
+      .tx-btn:hover { background: var(--brand-hover); }
+      .tx-btn:disabled { opacity: .5; cursor: not-allowed; }
+      .tx-btn-sm { padding: .375rem .75rem; }
+      .tx-btn-danger { background: var(--status-error); }
+      .tx-btn-danger:hover { opacity: .85; }
+      .tx-btn-ghost { background: transparent; color: var(--brand); }
+      .tx-btn-ghost:hover { background: var(--brand-alpha-light); }
+      .tx-link { color: var(--brand); cursor: pointer; }
+      .tx-link:hover { text-decoration: underline; }
+      .tx-label { display: block; font-size: .875rem; font-weight: 500; color: var(--txt-primary); margin-bottom: .25rem; }
+      .tx-badge { display: inline-flex; align-items: center; padding: .125rem .5rem; border-radius: .25rem; font-size: .75rem; font-weight: 500; }
+      .tx-divider { border-color: var(--divider); }
+      .tx-drop { border: 2px dashed var(--divider); border-radius: .5rem; background: var(--bg-card); text-align: center; padding: 1rem; cursor: pointer; transition: border-color .15s; }
+      .tx-drop:hover { border-color: var(--brand); }
+    `
+
     function render() {
       el.innerHTML = `
-        <div class="max-w-6xl mx-auto px-4 py-6">
+        <style>${TX_STYLES}</style>
+        <div class="tx max-w-6xl mx-auto px-4 py-6">
           ${renderHeader()}
           ${renderNav()}
           <div id="tx-content" class="mt-4">${renderView()}</div>
@@ -262,13 +291,13 @@ export default {
     }
 
     function renderNav() {
-      return `<nav class="flex gap-1 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">${
+      return `<nav class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">${
         NAV_KEYS.map(key => {
           const active = state.view === key
-          const cls = active
-            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
-          return `<button data-nav="${key}" class="flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${cls}">${ICONS[NAV_ICONS[key]]} ${T('nav.' + key)}</button>`
+          const style = active
+            ? 'border-bottom:2px solid var(--brand);color:var(--brand)'
+            : 'border-bottom:2px solid transparent;color:var(--txt-secondary)'
+          return `<button data-nav="${key}" class="flex items-center gap-1.5 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors" style="${style}">${ICONS[NAV_ICONS[key]]} ${T('nav.' + key)}</button>`
         }).join('')
       }</nav>`
     }
@@ -323,26 +352,26 @@ export default {
           ${statCard(T('dashboard.templates'), counts.templates ?? 0, 'templates')}
           ${statCard(T('dashboard.entries'), counts.candidates ?? 0, 'entries')}
         </div>
-        <div class="rounded-lg border dark:border-gray-700 p-4 bg-white dark:bg-gray-800">
+        <div class="tx-card p-4">
           <h3 class="font-medium mb-2">${T('dashboard.quickstart')}</h3>
-          <ol class="list-decimal list-inside text-sm text-gray-600 dark:text-gray-400 space-y-1">
-            <li>${T('dashboard.step1')} <button data-nav="forms" class="text-blue-500 hover:underline">${T('nav.forms')}</button></li>
-            <li>${T('dashboard.step2')} <button data-nav="templates" class="text-blue-500 hover:underline">${T('nav.templates')}</button></li>
-            <li>${T('dashboard.step3')} <button data-nav="entries" class="text-blue-500 hover:underline">${T('nav.entries')}</button></li>
+          <ol class="list-decimal list-inside text-sm tx-secondary space-y-1">
+            <li>${T('dashboard.step1')} <button data-nav="forms" class="tx-link">${T('nav.forms')}</button></li>
+            <li>${T('dashboard.step2')} <button data-nav="templates" class="tx-link">${T('nav.templates')}</button></li>
+            <li>${T('dashboard.step3')} <button data-nav="entries" class="tx-link">${T('nav.entries')}</button></li>
             <li>${T('dashboard.step4')}</li>
           </ol>
         </div>
         <div class="flex items-center gap-2">
-          <span class="inline-block w-2 h-2 rounded-full bg-green-500"></span>
-          <span class="text-xs text-gray-400">${T('dashboard.plugin_active')} · ${T('dashboard.language_label')}: ${escHtml(cfg.default_language || '—')} · ${T('dashboard.company_label')}: ${escHtml(cfg.company_name || T('dashboard.not_set'))}</span>
+          <span class="inline-block w-2 h-2 rounded-full" style="background:var(--status-success)"></span>
+          <span class="text-xs tx-secondary">${T('dashboard.plugin_active')} · ${T('dashboard.language_label')}: ${escHtml(cfg.default_language || '—')} · ${T('dashboard.company_label')}: ${escHtml(cfg.company_name || T('dashboard.not_set'))}</span>
         </div>
       </div>`
     }
 
     function statCard(label, count, navTarget) {
-      return `<button data-nav="${navTarget}" class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-4 text-center hover:shadow-md transition-shadow cursor-pointer w-full">
+      return `<button data-nav="${navTarget}" class="tx-row p-4 text-center cursor-pointer w-full">
         <div class="text-3xl font-bold">${count}</div>
-        <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">${label}</div>
+        <div class="text-sm tx-secondary mt-1">${label}</div>
       </button>`
     }
 
@@ -525,36 +554,36 @@ export default {
       ).join('')
 
       const fieldRows = fields.map((fd, idx) => `
-        <div class="flex items-start gap-2 p-3 rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700" data-field-idx="${idx}">
+        <div class="tx-row flex items-start gap-2 p-3" data-field-idx="${idx}">
           <div class="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <input name="fk_${idx}" value="${escHtml(fd.key || '')}" placeholder="${T('forms.field_key')}" class="rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 px-2 py-1 text-sm outline-none focus:ring-1 focus:ring-blue-500" />
-            <input name="fl_${idx}" value="${escHtml(fd.label || '')}" placeholder="${T('forms.field_label')}" class="rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 px-2 py-1 text-sm outline-none focus:ring-1 focus:ring-blue-500" />
-            <select name="ft_${idx}" class="rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-2 py-1 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+            <input name="fk_${idx}" value="${escHtml(fd.key || '')}" placeholder="${T('forms.field_key')}" class="tx-input" style="padding:.375rem .5rem" />
+            <input name="fl_${idx}" value="${escHtml(fd.label || '')}" placeholder="${T('forms.field_label')}" class="tx-input" style="padding:.375rem .5rem" />
+            <select name="ft_${idx}" class="tx-select" style="padding:.375rem .5rem">
               ${['text', 'textarea', 'select', 'list', 'date', 'number', 'checkbox'].map(tp =>
                 `<option value="${tp}"${fd.type === tp ? ' selected' : ''}>${tp}</option>`
               ).join('')}
             </select>
-            <label class="flex items-center gap-1.5 text-sm text-gray-900 dark:text-gray-100">
-              <input type="checkbox" name="fr_${idx}" ${fd.required ? 'checked' : ''} class="rounded border-gray-300 dark:border-gray-500 text-blue-600 h-4 w-4" />
+            <label class="flex items-center gap-1.5 text-sm" style="color:var(--txt-primary)">
+              <input type="checkbox" name="fr_${idx}" ${fd.required ? 'checked' : ''} class="h-4 w-4" style="accent-color:var(--brand)" />
               <span>${T('forms.field_required')}</span>
             </label>
           </div>
-          <button data-action="remove-form-field" data-idx="${idx}" class="p-1 text-gray-400 hover:text-red-500 transition-colors mt-1" title="${T('forms.remove_field')}">${ICONS.trash}</button>
+          <button data-action="remove-form-field" data-idx="${idx}" class="p-1 transition-colors mt-1" style="color:var(--txt-secondary)" title="${T('forms.remove_field')}">${ICONS.trash}</button>
         </div>`).join('')
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-forms" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">${ICONS.back} ${T('app.back')}</button>
-        <div class="rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-800 p-6">
+        <button data-action="back-forms" class="tx-btn-ghost tx-btn-sm flex items-center gap-1 text-sm" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <div class="tx-card p-6">
           <h3 class="text-lg font-medium mb-4">${isNew ? T('forms.new') : T('app.edit')}</h3>
           <form id="tx-form-editor" class="space-y-4">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg">
               <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">${T('app.name')}</label>
-                <input name="form_name" value="${escHtml(name)}" class="w-full rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" required />
+                <label class="tx-label">${T('app.name')}</label>
+                <input name="form_name" value="${escHtml(name)}" class="tx-input" required />
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">${T('app.language')}</label>
-                <select name="form_language" class="w-full rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500">
+                <label class="tx-label">${T('app.language')}</label>
+                <select name="form_language" class="tx-select">
                   <option value="de" ${language === 'de' ? 'selected' : ''}>${T('settings.lang_de')}</option>
                   <option value="en" ${language === 'en' ? 'selected' : ''}>${T('settings.lang_en')}</option>
                 </select>
@@ -563,11 +592,11 @@ export default {
             <div>
               <div class="flex items-center justify-between mb-2">
                 <h4 class="text-sm font-medium">${T('forms.fields')}</h4>
-                <button type="button" data-action="add-form-field" class="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 transition-colors">${ICONS.plus} ${T('forms.add_field')}</button>
+                <button type="button" data-action="add-form-field" class="tx-link flex items-center gap-1 text-sm">${ICONS.plus} ${T('forms.add_field')}</button>
               </div>
               <div id="tx-form-fields" class="space-y-2">${fieldRows}</div>
             </div>
-            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm font-medium transition-colors">${T('app.save')}</button>
+            <button type="submit" class="tx-btn">${T('app.save')}</button>
           </form>
         </div>
       </div>`
