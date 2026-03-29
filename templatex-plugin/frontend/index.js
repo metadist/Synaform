@@ -1,4 +1,4 @@
-const TX_VERSION = 'v0.1.0'
+const TX_VERSION = 'v0.2.1'
 
 export default {
   mount(el, context) {
@@ -16,7 +16,7 @@ export default {
     let _pendingTemplateFile = null
 
     let state = {
-      view: 'dashboard',
+      view: 'overview',
       loading: true,
       status: null,
       error: null,
@@ -183,10 +183,10 @@ export default {
     // Router
     // =========================================================================
 
-    const NAV_KEYS = ['dashboard', 'entries', 'templates', 'forms', 'settings']
+    const NAV_KEYS = ['overview', 'records', 'questionnaires', 'documents', 'settings']
     const NAV_ICONS = {
-      dashboard: 'grid', entries: 'users', templates: 'file',
-      forms: 'clipboard', settings: 'gear',
+      overview: 'grid', records: 'users', questionnaires: 'clipboard',
+      documents: 'file', settings: 'gear',
     }
 
     async function navigate(view) {
@@ -318,12 +318,12 @@ export default {
       if (state.loading) return renderLoading()
       if (state.error) return renderError(state.error)
       switch (state.view) {
-        case 'dashboard':  return renderDashboard()
-        case 'entries':    return renderEntries()
-        case 'templates':  return renderTemplates()
-        case 'forms':      return renderForms()
-        case 'settings':   return renderSettings()
-        default:           return renderDashboard()
+        case 'overview':        return renderOverview()
+        case 'records':         return renderProfiles()
+        case 'documents':       return renderDocuments()
+        case 'questionnaires':  return renderQuestionnaires()
+        case 'settings':        return renderSettings()
+        default:                return renderOverview()
       }
     }
 
@@ -353,45 +353,98 @@ export default {
     // Dashboard
     // =========================================================================
 
-    function renderDashboard() {
+    function renderOverview() {
       const s = state.status
       if (!s) return renderLoading()
-      const counts = s.counts || {}
       const cfg = s.config || {}
+      const hasQuestionnaires = state.forms.length > 0
+      const hasDocuments = state.templates.length > 0
+      const hasProfiles = state.entries.length > 0
+
       return `<div class="space-y-6 mt-4">
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          ${statCard(T('dashboard.forms'), counts.forms ?? 0, 'forms')}
-          ${statCard(T('dashboard.templates'), counts.templates ?? 0, 'templates')}
-          ${statCard(T('dashboard.entries'), counts.candidates ?? 0, 'entries')}
+        <!-- Workflow header -->
+        <div>
+          <h2 class="text-lg font-semibold mb-1">${T('overview.workflow_title')}</h2>
+          <p class="text-sm tx-secondary">${T('overview.workflow_subtitle')}</p>
         </div>
-        <div class="tx-card p-4">
-          <h3 class="font-medium mb-2">${T('dashboard.quickstart')}</h3>
-          <ol class="list-decimal list-inside text-sm tx-secondary space-y-1">
-            <li>${T('dashboard.step1')} <button data-nav="forms" class="tx-link">${T('nav.forms')}</button></li>
-            <li>${T('dashboard.step2')} <button data-nav="templates" class="tx-link">${T('nav.templates')}</button></li>
-            <li>${T('dashboard.step3')} <button data-nav="entries" class="tx-link">${T('nav.entries')}</button></li>
-            <li>${T('dashboard.step4')}</li>
-          </ol>
+
+        <!-- 3-step workflow pipeline -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          ${workflowStep(1, hasQuestionnaires && hasDocuments, T('overview.step_prepare'), T('overview.step_prepare_desc'), ICONS.clipboard, 'questionnaires', T('overview.go_questionnaires'))}
+          ${workflowStep(2, hasProfiles, T('overview.step_collect'), T('overview.step_collect_desc'), ICONS.sparkle, 'records', T('overview.go_records'))}
+          ${workflowStep(3, false, T('overview.step_generate'), T('overview.step_generate_desc'), ICONS.doc, 'records', T('overview.go_records'))}
         </div>
+
+        <!-- Content overview: all three categories with actual items -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          ${overviewSection(T('overview.questionnaires'), state.forms, 'questionnaires', ICONS.clipboard,
+            T('questionnaires.new'), T('questionnaires.empty'),
+            f => `<div class="flex items-center justify-between py-1.5" style="border-bottom:1px solid var(--divider)">
+              <span class="text-sm truncate">${escHtml(f.name)}${f.is_default || f.id === 'default' ? ` <span class="text-xs tx-secondary">(${T('questionnaires.default_form')})</span>` : ''}</span>
+              <span class="text-xs tx-secondary whitespace-nowrap ml-2">${f.fields?.length ?? 0} ${T('questionnaires.field_count')}</span>
+            </div>`)}
+          ${overviewSection(T('overview.documents'), state.templates, 'documents', ICONS.file,
+            T('documents.upload'), T('documents.empty'),
+            tpl => `<div class="flex items-center justify-between py-1.5" style="border-bottom:1px solid var(--divider)">
+              <span class="text-sm truncate">${escHtml(tpl.name)}</span>
+              <span class="text-xs tx-secondary whitespace-nowrap ml-2">${tpl.placeholder_count ?? '—'} ${T('documents.placeholders')}</span>
+            </div>`)}
+          ${overviewSection(T('overview.records'), state.entries, 'records', ICONS.users,
+            T('records.new'), T('records.empty'),
+            e => `<div class="flex items-center justify-between py-1.5" style="border-bottom:1px solid var(--divider)">
+              <span class="text-sm truncate">${escHtml(entryDisplayName(e))}</span>
+              ${statusBadge(e.status || 'draft')}
+            </div>`, 5)}
+        </div>
+
+        <!-- Status bar -->
         <div class="flex items-center gap-2">
           <span class="inline-block w-2 h-2 rounded-full" style="background:var(--status-success)"></span>
-          <span class="text-xs tx-secondary">${T('dashboard.plugin_active')} · ${T('dashboard.language_label')}: ${escHtml(cfg.default_language || '—')} · ${T('dashboard.company_label')}: ${escHtml(cfg.company_name || T('dashboard.not_set'))}</span>
+          <span class="text-xs tx-secondary">${T('overview.plugin_active')} · ${T('overview.language_label')}: ${escHtml(cfg.default_language || '—')} · ${T('overview.company_label')}: ${escHtml(cfg.company_name || T('overview.not_set'))}</span>
         </div>
       </div>`
     }
 
-    function statCard(label, count, navTarget) {
-      return `<button data-nav="${navTarget}" class="tx-row p-4 text-center cursor-pointer w-full">
-        <div class="text-3xl font-bold">${count}</div>
-        <div class="text-sm tx-secondary mt-1">${label}</div>
-      </button>`
+    function overviewSection(title, items, navTarget, icon, newLabel, emptyLabel, renderItem, limit) {
+      const shown = limit ? items.slice(0, limit) : items
+      const hasMore = limit && items.length > limit
+      return `<div class="tx-card p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <span style="color:var(--txt-secondary)">${icon}</span>
+            <h3 class="text-sm font-semibold">${title}</h3>
+            <span class="text-xs tx-secondary">(${items.length})</span>
+          </div>
+          <button data-nav="${navTarget}" class="text-xs tx-link flex items-center gap-1">${ICONS.chevRight}</button>
+        </div>
+        ${items.length > 0
+          ? `<div class="space-y-0">${shown.map(renderItem).join('')}</div>
+             ${hasMore ? `<button data-nav="${navTarget}" class="text-xs tx-link mt-2">${items.length - limit} more &rarr;</button>` : ''}`
+          : `<p class="text-xs tx-secondary py-2">${emptyLabel}</p>
+             <button data-nav="${navTarget}" class="tx-btn tx-btn-sm mt-1" style="font-size:.75rem;padding:.25rem .5rem">${ICONS.plus} ${newLabel}</button>`}
+      </div>`
+    }
+
+    function workflowStep(num, done, title, desc, icon, navTarget, cta) {
+      const borderColor = done ? 'var(--brand)' : 'var(--divider)'
+      const numBg = done ? 'background:var(--brand);color:#fff;' : 'background:var(--bg-chip);color:var(--txt-secondary);'
+      const check = done ? ` <span style="color:var(--brand);margin-left:4px">${ICONS.check}</span>` : ''
+      return `<div class="tx-card p-5 relative" style="border-left:3px solid ${borderColor}">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold" style="${numBg}">${num}</span>
+          <span class="font-semibold text-sm">${title}</span>
+          ${check}
+        </div>
+        <p class="text-xs tx-secondary leading-relaxed mb-3">${desc}</p>
+        <button data-nav="${navTarget}" class="text-xs tx-link flex items-center gap-1">${icon} ${cta}</button>
+      </div>`
     }
 
     // =========================================================================
     // Templates view
     // =========================================================================
 
-    function renderTemplates() {
+    function renderDocuments() {
       if (state.selectedTemplate) return renderTemplateDetail()
 
       const rows = state.templates.length > 0
@@ -400,7 +453,7 @@ export default {
             <div class="flex items-center justify-between">
               <div>
                 <div class="font-medium">${escHtml(tpl.name)}</div>
-                <div class="text-xs tx-secondary mt-0.5">${formatDate(tpl.created_at)}${tpl.placeholder_count != null ? ` · ${tpl.placeholder_count} ${T('templates.placeholders')}` : ''}</div>
+                <div class="text-xs tx-secondary mt-0.5">${formatDate(tpl.created_at)}${tpl.placeholder_count != null ? ` · ${tpl.placeholder_count} ${T('documents.placeholders')}` : ''}</div>
               </div>
               <div class="flex items-center gap-1">
                 <button data-download-template="${tpl.id}" class="p-1.5 text-gray-400 hover:text-blue-500 rounded transition-colors" title="${T('app.download')}">${ICONS.download}</button>
@@ -408,23 +461,23 @@ export default {
               </div>
             </div>
           </div>`).join('')
-        : emptyState(ICONS.file, T('templates.title'), T('templates.empty'), T('templates.empty_hint'))
+        : emptyState(ICONS.file, T('documents.title'), T('documents.empty'), T('documents.empty_hint'))
 
       return `<div class="mt-4 space-y-4">
         <div class="flex items-center justify-between">
-          <h3 class="text-lg font-medium">${T('templates.title')}</h3>
+          <h3 class="text-lg font-medium">${T('documents.title')}</h3>
           <label class="tx-btn tx-btn-sm cursor-pointer">
-            ${ICONS.upload} ${T('templates.upload')}
+            ${ICONS.upload} ${T('documents.upload')}
             <input type="file" id="tx-template-file-btn" accept=".docx" class="hidden" />
           </label>
         </div>
         <div id="tx-template-drop" class="tx-drop">
-          <p class="text-sm tx-secondary">${T('templates.drop_hint')}</p>
+          <p class="text-sm tx-secondary">${T('documents.drop_hint')}</p>
           <input type="file" id="tx-template-file" accept=".docx" class="hidden" />
           <div id="tx-template-upload-form" class="mt-3 hidden">
             <div class="flex items-center gap-2 max-w-md mx-auto">
-              <input type="text" id="tx-template-name" placeholder="${T('templates.name_label')}" class="tx-input" style="flex:1" />
-              <button id="tx-upload-template-btn" class="tx-btn tx-btn-sm">${ICONS.upload} ${T('templates.upload')}</button>
+              <input type="text" id="tx-template-name" placeholder="${T('documents.name_label')}" class="tx-input" style="flex:1" />
+              <button id="tx-upload-template-btn" class="tx-btn tx-btn-sm">${ICONS.upload} ${T('documents.upload')}</button>
             </div>
           </div>
         </div>
@@ -443,7 +496,7 @@ export default {
         </tr>`).join('')
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-templates" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <button data-action="back-documents" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
         <div class="tx-card p-6">
           <div class="flex items-center justify-between mb-4">
             <div>
@@ -456,20 +509,20 @@ export default {
             </div>
           </div>
           ${phs.length > 0 ? `
-            <h4 class="text-sm font-medium mb-2">${T('templates.placeholders')} (${phs.length})</h4>
+            <h4 class="text-sm font-medium mb-2">${T('documents.placeholders')} (${phs.length})</h4>
             <div class="overflow-x-auto">
               <table class="w-full text-left">
                 <thead>
                   <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
-                    <th class="py-2 px-3">${T('forms.field_key')}</th>
+                    <th class="py-2 px-3">${T('questionnaires.field_key')}</th>
                     <th class="py-2 px-3">${T('app.type')}</th>
-                    <th class="py-2 px-3 text-center">${T('templates.occurrences')}</th>
+                    <th class="py-2 px-3 text-center">${T('documents.occurrences')}</th>
                   </tr>
                 </thead>
                 <tbody>${phRows}</tbody>
               </table>
             </div>
-          ` : `<p class="text-sm tx-secondary">${T('templates.placeholder_count')}: 0</p>`}
+          ` : `<p class="text-sm tx-secondary">${T('documents.placeholder_count')}: 0</p>`}
         </div>
       </div>`
     }
@@ -478,7 +531,7 @@ export default {
     // Forms view
     // =========================================================================
 
-    function renderForms() {
+    function renderQuestionnaires() {
       if (state.selectedForm) return renderFormDetail()
       if (state.showNewForm || state.editingForm) return renderFormEditor()
 
@@ -490,8 +543,8 @@ export default {
             <div data-select-form="${f.id}" class="tx-row p-4 cursor-pointer">
               <div class="flex items-center justify-between">
                 <div>
-                  <div class="font-medium">${escHtml(f.name)}${isDefault ? ` <span class="text-xs text-gray-400 dark:text-gray-500">(${T('forms.default_form')})</span>` : ''}</div>
-                  <div class="text-xs tx-secondary mt-0.5">${count} ${T('forms.field_count')} · ${T('app.language')}: ${escHtml(f.language || '—')}</div>
+                  <div class="font-medium">${escHtml(f.name)}${isDefault ? ` <span class="text-xs text-gray-400 dark:text-gray-500">(${T('questionnaires.default_form')})</span>` : ''}</div>
+                  <div class="text-xs tx-secondary mt-0.5">${count} ${T('questionnaires.field_count')} · ${T('app.language')}: ${escHtml(f.language || '—')}</div>
                 </div>
                 <div class="flex items-center gap-1">
                   ${!isDefault ? `<button data-delete-form="${f.id}" class="p-1.5 text-gray-400 hover:text-red-500 rounded transition-colors" title="${T('app.delete')}">${ICONS.trash}</button>` : ''}
@@ -499,12 +552,12 @@ export default {
               </div>
             </div>`
         }).join('')
-        : emptyState(ICONS.clipboard, T('forms.title'), T('forms.empty'))
+        : emptyState(ICONS.clipboard, T('questionnaires.title'), T('questionnaires.empty'))
 
       return `<div class="mt-4 space-y-4">
         <div class="flex items-center justify-between">
-          <h3 class="text-lg font-medium">${T('forms.title')}</h3>
-          <button data-action="new-form" class="tx-btn tx-btn-sm">${ICONS.plus} ${T('forms.new')}</button>
+          <h3 class="text-lg font-medium">${T('questionnaires.title')}</h3>
+          <button data-action="new-form" class="tx-btn tx-btn-sm">${ICONS.plus} ${T('questionnaires.new')}</button>
         </div>
         <div class="space-y-2">${rows}</div>
       </div>`
@@ -523,11 +576,11 @@ export default {
         </tr>`).join('')
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-forms" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <button data-action="back-questionnaires" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
         <div class="tx-card p-6">
           <div class="flex items-center justify-between mb-4">
             <div>
-              <h3 class="text-lg font-medium mb-1">${escHtml(f.name)}${isDefault ? ` <span class="text-xs text-gray-400">(${T('forms.default_form')})</span>` : ''}</h3>
+              <h3 class="text-lg font-medium mb-1">${escHtml(f.name)}${isDefault ? ` <span class="text-xs text-gray-400">(${T('questionnaires.default_form')})</span>` : ''}</h3>
               <div class="text-xs tx-secondary">${T('app.language')}: ${escHtml(f.language || '—')}</div>
             </div>
             <div class="flex items-center gap-2">
@@ -536,21 +589,21 @@ export default {
             </div>
           </div>
           ${fields.length > 0 ? `
-            <h4 class="text-sm font-medium mb-2">${T('forms.fields')} (${fields.length})</h4>
+            <h4 class="text-sm font-medium mb-2">${T('questionnaires.fields')} (${fields.length})</h4>
             <div class="overflow-x-auto">
               <table class="w-full text-left">
                 <thead>
                   <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
-                    <th class="py-2 px-3">${T('forms.field_key')}</th>
-                    <th class="py-2 px-3">${T('forms.field_label')}</th>
-                    <th class="py-2 px-3">${T('forms.field_type')}</th>
-                    <th class="py-2 px-3 text-center">${T('forms.field_required')}</th>
+                    <th class="py-2 px-3">${T('questionnaires.field_key')}</th>
+                    <th class="py-2 px-3">${T('questionnaires.field_label')}</th>
+                    <th class="py-2 px-3">${T('questionnaires.field_type')}</th>
+                    <th class="py-2 px-3 text-center">${T('questionnaires.field_required')}</th>
                   </tr>
                 </thead>
                 <tbody>${rows}</tbody>
               </table>
             </div>
-          ` : `<p class="text-sm tx-secondary">${T('forms.fields')}: 0</p>`}
+          ` : `<p class="text-sm tx-secondary">${T('questionnaires.fields')}: 0</p>`}
         </div>
       </div>`
     }
@@ -571,8 +624,8 @@ export default {
         <div class="tx-row p-3" data-field-idx="${idx}">
           <div class="flex items-start gap-2">
             <div class="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <input name="fk_${idx}" value="${escHtml(fd.key || '')}" placeholder="${T('forms.field_key')}" class="tx-input" style="padding:.375rem .5rem" />
-              <input name="fl_${idx}" value="${escHtml(fd.label || '')}" placeholder="${T('forms.field_label')}" class="tx-input" style="padding:.375rem .5rem" />
+              <input name="fk_${idx}" value="${escHtml(fd.key || '')}" placeholder="${T('questionnaires.field_key')}" class="tx-input" style="padding:.375rem .5rem" />
+              <input name="fl_${idx}" value="${escHtml(fd.label || '')}" placeholder="${T('questionnaires.field_label')}" class="tx-input" style="padding:.375rem .5rem" />
               <select name="ft_${idx}" class="tx-select" style="padding:.375rem .5rem">
                 ${['text', 'textarea', 'select', 'list', 'date', 'number', 'checkbox'].map(tp =>
                   `<option value="${tp}"${fd.type === tp ? ' selected' : ''}>${tp}</option>`
@@ -580,20 +633,20 @@ export default {
               </select>
               <label class="flex items-center gap-1.5 text-sm" style="color:var(--txt-primary)">
                 <input type="checkbox" name="fr_${idx}" ${fd.required ? 'checked' : ''} class="h-4 w-4" style="accent-color:var(--brand)" />
-                <span>${T('forms.field_required')}</span>
+                <span>${T('questionnaires.field_required')}</span>
               </label>
             </div>
-            <button data-action="remove-form-field" data-idx="${idx}" class="p-1 transition-colors mt-1" style="color:var(--txt-secondary)" title="${T('forms.remove_field')}">${ICONS.trash}</button>
+            <button data-action="remove-form-field" data-idx="${idx}" class="p-1 transition-colors mt-1" style="color:var(--txt-secondary)" title="${T('questionnaires.remove_field')}">${ICONS.trash}</button>
           </div>
-          ${fd.type === 'select' ? `<div class="mt-1.5 ml-0"><input name="fo_${idx}" value="${escHtml(optsStr)}" placeholder="${T('forms.field_options_hint')}" class="tx-input text-xs" style="padding:.25rem .5rem" /></div>` : ''}
-          <div class="mt-1.5 ml-0"><input name="fh_${idx}" value="${escHtml(fd.hint || '')}" placeholder="${T('forms.field_hint')}" class="tx-input text-xs" style="padding:.25rem .5rem" /></div>
+          ${fd.type === 'select' ? `<div class="mt-1.5 ml-0"><input name="fo_${idx}" value="${escHtml(optsStr)}" placeholder="${T('questionnaires.field_options_hint')}" class="tx-input text-xs" style="padding:.25rem .5rem" /></div>` : ''}
+          <div class="mt-1.5 ml-0"><input name="fh_${idx}" value="${escHtml(fd.hint || '')}" placeholder="${T('questionnaires.field_hint')}" class="tx-input text-xs" style="padding:.25rem .5rem" /></div>
         </div>`
       }).join('')
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-forms" class="tx-btn-ghost tx-btn-sm flex items-center gap-1 text-sm" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <button data-action="back-questionnaires" class="tx-btn-ghost tx-btn-sm flex items-center gap-1 text-sm" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
         <div class="tx-card p-6">
-          <h3 class="text-lg font-medium mb-4">${isNew ? T('forms.new') : T('app.edit')}</h3>
+          <h3 class="text-lg font-medium mb-4">${isNew ? T('questionnaires.new') : T('app.edit')}</h3>
           <form id="tx-form-editor" class="space-y-4">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg">
               <div>
@@ -610,8 +663,8 @@ export default {
             </div>
             <div>
               <div class="flex items-center justify-between mb-2">
-                <h4 class="text-sm font-medium">${T('forms.fields')}</h4>
-                <button type="button" data-action="add-form-field" class="tx-link flex items-center gap-1 text-sm">${ICONS.plus} ${T('forms.add_field')}</button>
+                <h4 class="text-sm font-medium">${T('questionnaires.fields')}</h4>
+                <button type="button" data-action="add-form-field" class="tx-link flex items-center gap-1 text-sm">${ICONS.plus} ${T('questionnaires.add_field')}</button>
               </div>
               <div id="tx-form-fields" class="space-y-2">${fieldRows}</div>
             </div>
@@ -659,7 +712,7 @@ export default {
 
     const ENTRIES_PER_PAGE = 30
 
-    function renderEntries() {
+    function renderProfiles() {
       if (state.selectedEntry) return renderEntryDetail()
       if (state.showNewEntry) return renderNewEntry()
 
@@ -667,7 +720,7 @@ export default {
       const hasEntries = state.entries.length > 0
       const hasResults = filtered.length > 0
       const sortIcon = state.entriesSortNewest ? ICONS.sortDown : ICONS.sortUp
-      const sortLabel = state.entriesSortNewest ? T('entries.sort_newest') : T('entries.sort_oldest')
+      const sortLabel = state.entriesSortNewest ? T('records.sort_newest') : T('records.sort_oldest')
 
       const totalPages = Math.max(1, Math.ceil(filtered.length / ENTRIES_PER_PAGE))
       if (state.entriesPage >= totalPages) state.entriesPage = Math.max(0, totalPages - 1)
@@ -680,38 +733,38 @@ export default {
             <div class="flex items-center justify-between">
               <div>
                 <div class="font-medium">${escHtml(entryDisplayName(e))}</div>
-                <div class="text-xs tx-secondary mt-0.5">${T('entries.form')}: ${escHtml(formNameById(e.form_id))} · ${formatDate(e.created_at)}</div>
+                <div class="text-xs tx-secondary mt-0.5">${T('records.questionnaire')}: ${escHtml(formNameById(e.form_id))} · ${formatDate(e.created_at)}</div>
               </div>
               <div class="flex items-center gap-3">
                 ${statusBadge(e.status || 'draft')}
-                <span class="text-xs ${entryHasDoc(e) ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}">${entryHasDoc(e) ? T('entries.doc_uploaded') : T('entries.doc_missing')}</span>
+                <span class="text-xs ${entryHasDoc(e) ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}">${entryHasDoc(e) ? T('records.doc_uploaded') : T('records.doc_missing')}</span>
                 <button data-delete-entry="${e.id}" class="p-1.5 text-gray-400 hover:text-red-500 rounded transition-colors" title="${T('app.delete')}">${ICONS.trash}</button>
               </div>
             </div>
           </div>`).join('')
         : (hasEntries
-          ? `<div class="text-center py-8 tx-secondary text-sm">${T('entries.no_results')}</div>`
-          : emptyState(ICONS.users, T('entries.title'), T('entries.empty'), T('entries.empty_hint')))
+          ? `<div class="text-center py-8 tx-secondary text-sm">${T('records.no_results')}</div>`
+          : emptyState(ICONS.users, T('records.title'), T('records.empty'), T('records.empty_hint')))
 
       const toolbar = hasEntries ? `
         <div class="flex items-center gap-2">
           <div class="relative flex-1">
             <span class="absolute top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" style="left:12px">${ICONS.search}</span>
-            <input id="tx-entries-search" type="text" value="${escHtml(state.entriesSearch)}" placeholder="${T('entries.search_placeholder')}" class="tx-input" style="padding-left:36px" />
+            <input id="tx-entries-search" type="text" value="${escHtml(state.entriesSearch)}" placeholder="${T('records.search_placeholder')}" class="tx-input" style="padding-left:36px" />
           </div>
           <button id="tx-entries-sort" class="tx-btn-ghost tx-btn-sm flex items-center gap-1 whitespace-nowrap" title="${sortLabel}" style="border:1px solid var(--divider);border-radius:.375rem;padding:.5rem .75rem">
             ${sortIcon} <span class="text-xs">${sortLabel}</span>
           </button>
         </div>
-        ${hasResults ? `<div class="text-xs tx-secondary">${filtered.length} / ${state.entries.length} ${T('entries.title').toLowerCase()}</div>` : ''}
+        ${hasResults ? `<div class="text-xs tx-secondary">${filtered.length} / ${state.entries.length} ${T('records.title').toLowerCase()}</div>` : ''}
       ` : ''
 
       const pagination = (hasResults && totalPages > 1) ? renderPagination(state.entriesPage, totalPages, filtered.length) : ''
 
       return `<div class="mt-4 space-y-4">
         <div class="flex items-center justify-between">
-          <h3 class="text-lg font-medium">${T('entries.title')}</h3>
-          <button data-action="new-entry" class="tx-btn tx-btn-sm">${ICONS.plus} ${T('entries.new')}</button>
+          <h3 class="text-lg font-medium">${T('records.title')}</h3>
+          <button data-action="new-entry" class="tx-btn tx-btn-sm">${ICONS.plus} ${T('records.new')}</button>
         </div>
         ${toolbar}
         <div class="space-y-2">${rows}</div>
@@ -769,22 +822,22 @@ export default {
       ).join('')
 
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-entries" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <button data-action="back-profiles" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
         <div class="tx-card p-6">
-          <h3 class="text-lg font-medium mb-4">${T('entries.new')}</h3>
+          <h3 class="text-lg font-medium mb-4">${T('records.new')}</h3>
           <form id="tx-new-entry-form" class="space-y-4 max-w-md">
             <div>
               <label class="tx-label">${T('app.name')}</label>
-              <input name="entry_name" class="tx-input" placeholder="${T('entries.name_placeholder')}" required />
+              <input name="entry_name" class="tx-input" placeholder="${T('records.name_placeholder')}" required />
             </div>
             <div>
-              <label class="tx-label">${T('entries.form')}</label>
+              <label class="tx-label">${T('records.questionnaire')}</label>
               <select id="tx-entry-form-select" name="entry_form" class="tx-select">
                 ${formOptions}
               </select>
             </div>
-            <p class="text-xs tx-secondary">${T('entries.new_hint')}</p>
-            <button type="submit" class="tx-btn">${T('entries.create_and_open')}</button>
+            <p class="text-xs tx-secondary">${T('records.new_hint')}</p>
+            <button type="submit" class="tx-btn">${T('records.create_and_open')}</button>
           </form>
         </div>
       </div>`
@@ -823,7 +876,7 @@ export default {
           break
         }
         case 'list':
-          input = `<textarea id="${fid}" name="${escHtml(field.key)}" class="${inputCls}" rows="3" placeholder="${T('forms.list_placeholder')}" ${req}></textarea>`
+          input = `<textarea id="${fid}" name="${escHtml(field.key)}" class="${inputCls}" rows="3" placeholder="${T('questionnaires.list_placeholder')}" ${req}></textarea>`
           break
         case 'date':
           input = `<input type="date" id="${fid}" name="${escHtml(field.key)}" class="${inputCls}" ${req} />`
@@ -841,12 +894,12 @@ export default {
     function renderEntryDetail() {
       const e = state.selectedEntry
       return `<div class="mt-4 space-y-4">
-        <button data-action="back-entries" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
+        <button data-action="back-profiles" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T('app.back')}</button>
         <div class="tx-card p-6">
           <div class="flex items-center justify-between">
             <div>
               <h3 class="text-lg font-medium">${escHtml(entryDisplayName(e))}</h3>
-              <div class="text-xs tx-secondary mt-0.5">${T('entries.form')}: ${escHtml(formNameById(e.form_id))} · ${T('app.created')}: ${formatDate(e.created_at)}</div>
+              <div class="text-xs tx-secondary mt-0.5">${T('records.questionnaire')}: ${escHtml(formNameById(e.form_id))} · ${T('app.created')}: ${formatDate(e.created_at)}</div>
             </div>
             <div class="flex items-center gap-3">
               ${statusBadge(e.status || 'draft')}
@@ -890,7 +943,7 @@ export default {
       }
 
       return `<div class="tx-card p-6">
-        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_data')}</h4>
+        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('records.section_data')}</h4>
         ${fields.length > 0
           ? `<form id="tx-entry-data-form" class="space-y-3 max-w-lg">${fieldsHtml}
               <button type="submit" class="tx-btn tx-btn-sm">${T('app.save')}</button>
@@ -936,7 +989,7 @@ export default {
         }
         case 'list': {
           const listVal = Array.isArray(value) ? value.join('\n') : String(value ?? '')
-          input = `<textarea id="${fid}" name="${escHtml(field.key)}" class="tx-input" rows="3" placeholder="${T('forms.list_placeholder')}" ${req}>${escHtml(listVal)}</textarea>`
+          input = `<textarea id="${fid}" name="${escHtml(field.key)}" class="tx-input" rows="3" placeholder="${T('questionnaires.list_placeholder')}" ${req}>${escHtml(listVal)}</textarea>`
           break
         }
         case 'date':
@@ -960,21 +1013,21 @@ export default {
       const cvInfo = hasCv ? entry.files.cv : null
       const hasAnyFile = hasCv || additionalDocs.length > 0
       const parseStatus = state.parsing
-        ? `<div class="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400"><div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div> ${T('entries.parse_running')}</div>`
+        ? `<div class="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400"><div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div> ${T('records.parse_running')}</div>`
         : ''
       return `<div class="tx-card p-6">
-        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.file} ${T('entries.section_files')}</h4>
+        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.file} ${T('records.section_files')}</h4>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div class="rounded border dark:border-gray-700 p-3">
-            <div class="text-xs font-medium mb-2">${T('entries.upload_doc')}</div>
+            <div class="text-xs font-medium mb-2">${T('records.upload_doc')}</div>
             ${hasCv ? `<p class="text-xs text-green-600 dark:text-green-400 mb-2">${ICONS.check} ${escHtml(cvInfo.filename || 'cv.pdf')}</p>` : ''}
             <label class="flex items-center justify-center gap-1.5 cursor-pointer text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 border border-dashed border-gray-300 dark:border-gray-600 rounded p-2 transition-colors hover:border-blue-400">
-              ${ICONS.upload} ${hasCv ? T('entries.re_upload') || T('app.upload') : T('app.upload')}
+              ${ICONS.upload} ${hasCv ? T('records.re_upload') || T('app.upload') : T('app.upload')}
               <input type="file" id="tx-cv-upload" accept=".pdf" class="hidden" />
             </label>
           </div>
           <div class="rounded border dark:border-gray-700 p-3">
-            <div class="text-xs font-medium mb-2">${T('entries.upload_extra')}</div>
+            <div class="text-xs font-medium mb-2">${T('records.upload_extra')}</div>
             ${additionalDocs.length > 0 ? additionalDocs.map(d => `<p class="text-xs text-green-600 dark:text-green-400 mb-1">${ICONS.check} ${escHtml(d.filename)}</p>`).join('') : ''}
             <label class="flex items-center justify-center gap-1.5 cursor-pointer text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 border border-dashed border-gray-300 dark:border-gray-600 rounded p-2 transition-colors hover:border-blue-400">
               ${ICONS.upload} ${T('app.upload')}
@@ -986,9 +1039,9 @@ export default {
         <div class="mt-3 pt-3 border-t dark:border-gray-700">
           ${parseStatus}
           ${!state.parsing ? `<button data-action="parse-documents" class="tx-btn tx-btn-sm flex items-center gap-1.5" ${!hasAnyFile ? 'disabled' : ''}>
-            ${ICONS.sparkle} ${T('entries.parse_btn')}
+            ${ICONS.sparkle} ${T('records.parse_btn')}
           </button>
-          <p class="text-xs tx-secondary mt-1.5">${T('entries.parse_hint')}</p>` : ''}
+          <p class="text-xs tx-secondary mt-1.5">${T('records.parse_hint')}</p>` : ''}
         </div>` : ''}
       </div>`
     }
@@ -1003,22 +1056,22 @@ export default {
       if (state.extracting) {
         statusLine = `<div class="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
           <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-          ${T('entries.extract_running')}
+          ${T('records.extract_running')}
         </div>`
       } else if (isExtracted) {
         statusLine = `<div class="flex items-center gap-2 text-sm text-green-600 dark:text-green-400">
-          ${ICONS.check} ${T('entries.extract_done')}
-          ${extractInfo.model_used ? ` · ${T('entries.extract_model')}: <span class="font-mono text-xs">${escHtml(extractInfo.model_used)}</span>` : ''}
+          ${ICONS.check} ${T('records.extract_done')}
+          ${extractInfo.model_used ? ` · ${T('records.extract_model')}: <span class="font-mono text-xs">${escHtml(extractInfo.model_used)}</span>` : ''}
         </div>`
       } else {
-        statusLine = `<div class="text-sm tx-secondary">${hasDoc ? '' : T('entries.extract_no_cv')}</div>`
+        statusLine = `<div class="text-sm tx-secondary">${hasDoc ? '' : T('records.extract_no_cv')}</div>`
       }
       return `<div class="tx-card p-6">
-        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.sparkle} ${T('entries.section_extraction')}</h4>
+        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.sparkle} ${T('records.section_extraction')}</h4>
         <div class="flex items-center justify-between">
           ${statusLine}
           <button data-action="extract" data-entry-id="${entry.id}" class="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors ${hasDoc && !state.extracting ? 'bg-purple-600 hover:bg-purple-700 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-400 cursor-not-allowed'}" ${!hasDoc || state.extracting ? 'disabled' : ''}>
-            ${ICONS.sparkle} ${state.extracting ? T('entries.extract_running') : (isExtracted ? T('entries.re_extract') : T('entries.extract_btn'))}
+            ${ICONS.sparkle} ${state.extracting ? T('records.extract_running') : (isExtracted ? T('records.re_extract') : T('records.extract_btn'))}
           </button>
         </div>
       </div>`
@@ -1032,7 +1085,7 @@ export default {
       if (!isExtracted && !state.entryVariables) return ''
       if (state.entryVariablesLoading) {
         return `<div class="tx-card p-6">
-          <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_variables')}</h4>
+          <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('records.section_variables')}</h4>
           <div class="flex items-center gap-2 py-4">
             <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
             <span class="text-sm text-gray-500">${T('app.loading')}</span>
@@ -1042,7 +1095,7 @@ export default {
       const vars = state.entryVariables
       if (!vars || vars.length === 0) {
         return `<div class="tx-card p-6">
-          <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_variables')}</h4>
+          <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('records.section_variables')}</h4>
           <p class="text-sm tx-secondary">${T('app.no_data')}</p>
         </div>`
       }
@@ -1051,14 +1104,14 @@ export default {
       const rows = regularVars.map(v => renderVariableRow(v, e.id)).join('')
       const stationRows = stationVars.map(v => renderStationGroup(v)).join('')
       return `<div class="tx-card p-6">
-        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('entries.section_variables')}</h4>
+        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T('records.section_variables')}</h4>
         <div class="overflow-x-auto">
           <table class="w-full text-left">
             <thead>
               <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
-                <th class="py-2 px-3">${T('entries.var_key')}</th>
-                <th class="py-2 px-3">${T('entries.var_value')}</th>
-                <th class="py-2 px-3">${T('entries.var_source')}</th>
+                <th class="py-2 px-3">${T('records.var_key')}</th>
+                <th class="py-2 px-3">${T('records.var_value')}</th>
+                <th class="py-2 px-3">${T('records.var_source')}</th>
                 <th class="py-2 px-3 text-right"></th>
               </tr>
             </thead>
@@ -1071,9 +1124,9 @@ export default {
 
     function renderVariableRow(v, entryId) {
       const isEditing = state.editingVarKey === v.key
-      const sourceLabel = v.source === 'ai' ? T('entries.source_ai')
-        : v.source === 'override' ? T('entries.source_override')
-        : T('entries.source_form')
+      const sourceLabel = v.source === 'ai' ? T('records.source_ai')
+        : v.source === 'override' ? T('records.source_override')
+        : T('records.source_form')
       const sourceCls = v.source === 'ai' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
         : v.source === 'override' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
         : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
@@ -1081,7 +1134,7 @@ export default {
       if (Array.isArray(v.value)) {
         displayValue = v.value.map(item => escHtml(String(item))).join('<br>')
       } else {
-        displayValue = v.value != null && v.value !== '' ? escHtml(String(v.value)) : `<span class="text-gray-400 italic">${T('entries.var_not_set')}</span>`
+        displayValue = v.value != null && v.value !== '' ? escHtml(String(v.value)) : `<span class="text-gray-400 italic">${T('records.var_not_set')}</span>`
       }
       if (isEditing) {
         const editVal = escHtml(Array.isArray(v.value) ? v.value.join('\n') : String(v.value ?? ''))
@@ -1103,7 +1156,7 @@ export default {
         <td class="py-2 px-3 text-sm">${displayValue}</td>
         <td class="py-2 px-3"><span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${sourceCls}">${sourceLabel}</span></td>
         <td class="py-2 px-3 text-right">
-          <button data-action="override-var" data-var-key="${escHtml(v.key)}" class="text-xs tx-link flex items-center gap-1 ml-auto">${ICONS.edit} ${T('entries.override')}</button>
+          <button data-action="override-var" data-var-key="${escHtml(v.key)}" class="text-xs tx-link flex items-center gap-1 ml-auto">${ICONS.edit} ${T('records.override')}</button>
         </td>
       </tr>`
     }
@@ -1123,7 +1176,7 @@ export default {
           ${fields}
         </div>`
       }).join('')
-      const srcLabel = v.source === 'ai' ? T('entries.source_ai') : T('entries.source_form')
+      const srcLabel = v.source === 'ai' ? T('records.source_ai') : T('records.source_form')
       return `<div class="mt-4">
         <button data-action="toggle-station" data-station-key="${escHtml(v.key)}" class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
           <span class="tx-station-chevron" data-key="${escHtml(v.key)}">${ICONS.chevDown}</span>
@@ -1148,31 +1201,31 @@ export default {
       const docRows = docs.map(doc => `
         <div class="flex items-center justify-between py-2 tx-divider border-b last:border-0">
           <div>
-            <span class="text-sm font-medium">${escHtml(doc.template_name || doc.name || T('entries.document'))}</span>
+            <span class="text-sm font-medium">${escHtml(doc.template_name || doc.name || T('records.document'))}</span>
             <span class="text-xs tx-secondary ml-2">${formatDate(doc.created_at || doc.generated_at)}</span>
           </div>
-          <button data-action="download-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm tx-link">${ICONS.download} ${T('entries.download_doc')}</button>
+          <button data-action="download-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm tx-link">${ICONS.download} ${T('records.download_doc')}</button>
         </div>`).join('')
       return `<div class="tx-card p-6">
-        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.doc} ${T('entries.section_generate')}</h4>
+        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.doc} ${T('records.section_generate')}</h4>
         ${hasTpls ? `
           <div class="flex items-center gap-3 mb-4">
             <select id="tx-generate-template" class="flex-1 tx-input">
-              <option value="">— ${T('entries.generate_select_tpl')} —</option>
+              <option value="">— ${T('records.generate_select_tpl')} —</option>
               ${tplOptions}
             </select>
             <button data-action="generate" data-entry-id="${entry.id}" class="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors ${state.selectedGenerateTemplate && !state.generating ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-400 cursor-not-allowed'}" ${!state.selectedGenerateTemplate || state.generating ? 'disabled' : ''}>
               ${state.generating
-                ? `<div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div> ${T('entries.generate_running')}`
-                : `${ICONS.doc} ${T('entries.generate_btn')}`}
+                ? `<div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div> ${T('records.generate_running')}`
+                : `${ICONS.doc} ${T('records.generate_btn')}`}
             </button>
           </div>
-        ` : `<p class="text-sm tx-secondary mb-4">${T('templates.empty')}</p>`}
+        ` : `<p class="text-sm tx-secondary mb-4">${T('documents.empty')}</p>`}
         <div>
-          <h5 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">${T('entries.generated_docs')}</h5>
+          <h5 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">${T('records.generated_docs')}</h5>
           ${docs.length > 0
             ? `<div class="rounded border dark:border-gray-700 divide-y dark:divide-gray-700 px-3">${docRows}</div>`
-            : `<p class="text-sm tx-secondary">${T('entries.no_generated_docs')}</p>`}
+            : `<p class="text-sm tx-secondary">${T('records.no_generated_docs')}</p>`}
         </div>
       </div>`
     }
@@ -1217,7 +1270,7 @@ export default {
             </div>
             <div class="flex justify-between py-1.5 tx-divider border-b">
               <span class="text-gray-500 dark:text-gray-400">${T('settings.company_name')}</span>
-              <span class="font-medium text-gray-900 dark:text-gray-100">${escHtml(cfg.company_name || T('dashboard.not_set'))}</span>
+              <span class="font-medium text-gray-900 dark:text-gray-100">${escHtml(cfg.company_name || T('overview.not_set'))}</span>
             </div>
             <div class="flex justify-between py-1.5">
               <span class="text-gray-500 dark:text-gray-400">${T('settings.ui_language')}</span>
@@ -1267,7 +1320,7 @@ export default {
       el.querySelectorAll('[data-delete-template]').forEach(btn =>
         btn.addEventListener('click', async e => {
           e.stopPropagation()
-          if (!confirm(T('templates.confirm_delete'))) return
+          if (!confirm(T('documents.confirm_delete'))) return
           try {
             await api(`/templates/${btn.dataset.deleteTemplate}`, { method: 'DELETE' })
             state.selectedTemplate = null
@@ -1314,7 +1367,7 @@ export default {
           if (!file || !name) return
           try {
             uploadBtn.disabled = true
-            uploadBtn.textContent = T('templates.uploading')
+            uploadBtn.textContent = T('documents.uploading')
             await apiUpload('/templates', file, { name })
             _pendingTemplateFile = null
             showToast(T('app.saved'))
@@ -1323,7 +1376,7 @@ export default {
           } catch (err) {
             showToast(err.message, 'error')
             uploadBtn.disabled = false
-            uploadBtn.innerHTML = `${ICONS.upload} ${T('templates.upload')}`
+            uploadBtn.innerHTML = `${ICONS.upload} ${T('documents.upload')}`
           }
         })
       }
@@ -1362,7 +1415,7 @@ export default {
       el.querySelectorAll('[data-delete-form]').forEach(btn =>
         btn.addEventListener('click', async e => {
           e.stopPropagation()
-          if (!confirm(T('forms.confirm_delete'))) return
+          if (!confirm(T('questionnaires.confirm_delete'))) return
           try {
             await api(`/forms/${btn.dataset.deleteForm}`, { method: 'DELETE' })
             state.selectedForm = null
@@ -1493,7 +1546,7 @@ export default {
       el.querySelectorAll('[data-delete-entry]').forEach(btn =>
         btn.addEventListener('click', async e => {
           e.stopPropagation()
-          if (!confirm(T('entries.confirm_delete'))) return
+          if (!confirm(T('records.confirm_delete'))) return
           try {
             await api(`/candidates/${btn.dataset.deleteEntry}`, { method: 'DELETE' })
             state.selectedEntry = null
@@ -1595,7 +1648,7 @@ export default {
           if (!file || !state.selectedEntry) return
           try {
             await apiUpload(`/candidates/${state.selectedEntry.id}/upload-cv`, file)
-            showToast(T('entries.doc_uploaded'))
+            showToast(T('records.doc_uploaded'))
             await handleSelectEntry(state.selectedEntry.id)
           } catch (err) { showToast(err.message, 'error') }
         })
@@ -1607,7 +1660,7 @@ export default {
           if (!file || !state.selectedEntry) return
           try {
             await apiUpload(`/candidates/${state.selectedEntry.id}/upload-doc`, file)
-            showToast(T('entries.doc_uploaded'))
+            showToast(T('records.doc_uploaded'))
             await handleSelectEntry(state.selectedEntry.id)
           } catch (err) { showToast(err.message, 'error') }
         })
@@ -1685,13 +1738,13 @@ export default {
       )
 
       // --- Back buttons ---
-      el.querySelector('[data-action="back-templates"]')
+      el.querySelector('[data-action="back-documents"]')
         ?.addEventListener('click', () => { state.selectedTemplate = null; render() })
 
-      el.querySelector('[data-action="back-forms"]')
+      el.querySelector('[data-action="back-questionnaires"]')
         ?.addEventListener('click', () => { state.selectedForm = null; state.showNewForm = false; state.editingForm = null; render() })
 
-      el.querySelector('[data-action="back-entries"]')
+      el.querySelector('[data-action="back-profiles"]')
         ?.addEventListener('click', () => {
           state.selectedEntry = null
           state.showNewEntry = false
@@ -1802,7 +1855,7 @@ export default {
           })
           const updated = await api(`/candidates/${entryId}`)
           state.selectedEntry = updated.candidate
-          showToast(T('entries.parse_done', `Parsed ${d.documents_parsed} document(s)`), 'success')
+          showToast(T('records.parse_done', `Parsed ${d.documents_parsed} document(s)`), 'success')
         }
       } catch (err) { showToast(err.message, 'error') }
       state.parsing = false
@@ -1850,7 +1903,7 @@ export default {
         await api(`/candidates/${entryId}/generate/${templateId}`, { method: 'POST' })
         const d = await api(`/candidates/${entryId}`)
         state.selectedEntry = d.candidate
-        showToast(T('entries.generate_done'), 'success')
+        showToast(T('records.generate_done'), 'success')
       } catch (err) { showToast(err.message, 'error') }
       state.generating = false
       render()
@@ -1882,9 +1935,10 @@ export default {
 
     async function loadViewData(view) {
       switch (view) {
-        case 'templates': await fetchTemplates(); break
-        case 'forms':     await fetchForms(); break
-        case 'entries':   await Promise.all([fetchEntries(), fetchForms()]); break
+        case 'overview':        await Promise.all([fetchForms(), fetchTemplates(), fetchEntries()]); break
+        case 'documents':       await fetchTemplates(); break
+        case 'questionnaires':  await fetchForms(); break
+        case 'records':         await Promise.all([fetchEntries(), fetchForms()]); break
       }
       render()
     }
