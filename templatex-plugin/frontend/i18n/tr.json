@@ -139,7 +139,8 @@
     "no_generated_docs": "Henüz belge oluşturulmadı",
     "download_doc": "İndir",
     "generate_no_vars": "Belge oluşturma değişkenlerini doldurmak için anketi doldurun veya yapay zeka çıkartmasını çalıştırın.",
-    "extract_hint": "Birincil özgeçmişten yapılandırılmış profil verilerini (kariyer geçmişi, iletişim bilgileri) şablon değişkenlerine çıkartır."
+    "extract_hint": "Birincil özgeçmişten yapılandırılmış profil verilerini (kariyer geçmişi, iletişim bilgileri) şablon değişkenlerine çıkartır.",
+    "confirm_delete_doc": "Bu oluşturulan belge silinsin mi?"
   },
   "documents": {
     "title": "Belge Şablonları",

@@ -139,7 +139,8 @@
     "no_generated_docs": "Aún no hay documentos generados",
     "download_doc": "Descargar",
     "generate_no_vars": "Complete el cuestionario o ejecute la extracción con IA para llenar las variables de generación de documentos.",
-    "extract_hint": "Extrae datos de perfil estructurados (historial laboral, datos de contacto) del CV principal en variables de plantilla."
+    "extract_hint": "Extrae datos de perfil estructurados (historial laboral, datos de contacto) del CV principal en variables de plantilla.",
+    "confirm_delete_doc": "¿Eliminar este documento generado?"
   },
   "documents": {
     "title": "Plantillas de Documento",

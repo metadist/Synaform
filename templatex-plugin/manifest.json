@@ -39,7 +39,8 @@
     {"path": "/templates/{templateId}/download", "method": "GET", "description": "Download original template"},
     {"path": "/candidates/{candidateId}/generate/{templateId}", "method": "POST", "description": "Generate filled document"},
     {"path": "/candidates/{candidateId}/documents", "method": "GET", "description": "List generated documents"},
-    {"path": "/candidates/{candidateId}/documents/{documentId}/download", "method": "GET", "description": "Download generated DOCX"}
+    {"path": "/candidates/{candidateId}/documents/{documentId}/download", "method": "GET", "description": "Download generated DOCX"},
+    {"path": "/candidates/{candidateId}/documents/{documentId}", "method": "DELETE", "description": "Delete generated document"}
   ],
   "migrations": [
     "001_setup.sql"

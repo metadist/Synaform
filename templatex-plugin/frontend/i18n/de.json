@@ -139,7 +139,8 @@
     "no_generated_docs": "Noch keine Dokumente generiert",
     "download_doc": "Herunterladen",
     "generate_no_vars": "Füllen Sie den Fragebogen aus oder starten Sie die KI-Extraktion, um Variablen für die Dokumentgenerierung zu befüllen.",
-    "extract_hint": "Extrahiert strukturierte Profildaten (Werdegang, Kontaktdaten) aus dem Lebenslauf in Vorlagen-Variablen."
+    "extract_hint": "Extrahiert strukturierte Profildaten (Werdegang, Kontaktdaten) aus dem Lebenslauf in Vorlagen-Variablen.",
+    "confirm_delete_doc": "Dieses generierte Dokument wirklich löschen?"
   },
   "documents": {
     "title": "Zielvorlagen",

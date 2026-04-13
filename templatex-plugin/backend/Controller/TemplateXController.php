@@ -1334,6 +1334,42 @@ class TemplateXController extends AbstractController
         return $response;
     }
 
+    #[Route('/candidates/{candidateId}/documents/{documentId}', name: 'candidates_documents_delete', methods: ['DELETE'])]
+    #[OA\Delete(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}',
+        summary: 'Delete a generated document',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Document deleted')]
+    public function candidatesDocumentDelete(int $userId, string $candidateId, string $documentId, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $docMeta = $entry['documents'][$documentId] ?? null;
+        if (!$docMeta) {
+            return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $filePath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        if (is_file($filePath)) {
+            unlink($filePath);
+        }
+
+        unset($entry['documents'][$documentId]);
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+
+        return $this->json(['success' => true, 'message' => 'Document deleted']);
+    }
+
     // =========================================================================
     // Assets (frontend)
     // =========================================================================
@@ -1994,6 +2030,7 @@ class TemplateXController extends AbstractController
                 foreach (array_keys($uniqueFieldSuffixes) as $suffix) {
                     $cleanSuffix = str_replace('.N', '', $suffix);
                     $value = $row[$cleanSuffix] ?? '';
+                    $value = htmlspecialchars($value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
                     if (str_contains($value, "\n")) {
                         $value = str_replace("\n", '</w:t><w:br/><w:t>', $value);
                     }
@@ -2036,6 +2073,7 @@ class TemplateXController extends AbstractController
                 $row = is_array($data[$i]) ? $data[$i] : ['value' => (string) $data[$i]];
                 foreach ($row as $field => $value) {
                     $value = (string) ($value ?? '');
+                    $value = htmlspecialchars($value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
                     if (str_contains($value, "\n")) {
                         $value = str_replace("\n", '</w:t><w:br/><w:t>', $value);
                     }
@@ -2072,6 +2110,7 @@ class TemplateXController extends AbstractController
         foreach ($listKeys as $key) {
             $val = $variables[$key] ?? null;
             $text = is_array($val) ? implode("\n", array_map('strval', $val)) : (string) ($val ?? '');
+            $text = htmlspecialchars($text, ENT_XML1 | ENT_QUOTES, 'UTF-8');
             $text = str_replace("\n", '</w:t><w:br/><w:t>', $text);
             $tp->setValue($key, $text);
         }
@@ -2084,7 +2123,8 @@ class TemplateXController extends AbstractController
     {
         foreach ($scalarKeys as $key) {
             $value = $variables[$key] ?? null;
-            $tp->setValue($key, (string) ($value ?? ''));
+            $value = htmlspecialchars((string) ($value ?? ''), ENT_XML1 | ENT_QUOTES, 'UTF-8');
+            $tp->setValue($key, $value);
         }
     }
 

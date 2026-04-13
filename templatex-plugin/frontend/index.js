@@ -1609,7 +1609,10 @@ export default {
             <span class="text-sm font-medium">${escHtml(doc.template_name || doc.name || T("records.document"))}</span>
             <span class="text-xs tx-secondary ml-2">${formatDate(doc.created_at || doc.generated_at)}</span>
           </div>
-          <button data-action="download-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm tx-link">${ICONS.download} ${T("records.download_doc")}</button>
+          <div class="flex items-center gap-2">
+            <button data-action="download-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm tx-link">${ICONS.download} ${T("records.download_doc")}</button>
+            <button data-action="delete-doc" data-entry-id="${entry.id}" data-doc-id="${doc.id}" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--status-error)">${ICONS.trash}</button>
+          </div>
         </div>`,
         )
         .join("");
@@ -2345,6 +2348,22 @@ export default {
         btn.addEventListener("click", () =>
           handleDownloadDoc(btn.dataset.entryId, btn.dataset.docId),
         ),
+      );
+
+      el.querySelectorAll('[data-action="delete-doc"]').forEach((btn) =>
+        btn.addEventListener("click", async () => {
+          if (!confirm(T("records.confirm_delete_doc"))) return;
+          try {
+            await api(
+              `/candidates/${btn.dataset.entryId}/documents/${btn.dataset.docId}`,
+              { method: "DELETE" },
+            );
+            showToast(T("app.saved"));
+            await handleSelectEntry(btn.dataset.entryId);
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        }),
       );
 
       // --- Entry detail: override variable ---
