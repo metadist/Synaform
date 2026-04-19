@@ -52,6 +52,7 @@ export default {
       matchingFormId: null,
       matchingForm: null,
       addingFieldKey: null,
+      reorderingFields: false,
     };
 
     // =========================================================================
@@ -298,6 +299,7 @@ export default {
       state.generating = false;
       state.editingVarKey = null;
       state.selectedGenerateTemplate = null;
+      state.reorderingFields = false;
       _pendingTemplateFile = null;
       state.view = view;
       window.location.hash = `#tx-${view}`;
@@ -353,6 +355,11 @@ export default {
         '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h9m5-4v12m0-12l4-4m-4 4l-4-4"/></svg>',
       search:
         '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>',
+      grip: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 6h.01M12 6h.01M8 12h.01M12 12h.01M8 18h.01M12 18h.01"/></svg>',
+      arrowUp:
+        '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>',
+      arrowDown:
+        '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>',
     };
 
     // =========================================================================
@@ -1524,12 +1531,27 @@ export default {
       const formData = entry.field_values || {};
       const formDef = state.forms.find((f) => f.id === entry.form_id);
       const fields = formDef?.fields || [];
+      const isReordering = state.reorderingFields;
 
       let fieldsHtml = "";
       if (fields.length > 0) {
         fieldsHtml = fields
-          .map((field) => {
+          .map((field, idx) => {
             const val = formData[field.key];
+            const wideTypes = ["textarea", "list", "table"];
+            const isWide = wideTypes.includes(field.type);
+            if (isReordering) {
+              return `<div class="tx-field-sortable ${isWide ? "sm:col-span-2" : ""} flex items-start gap-1.5 group rounded-lg p-2 transition-colors" style="border:1px dashed var(--divider);background:var(--bg-secondary)" data-field-idx="${idx}">
+                <div class="flex flex-col gap-0.5 mt-1 shrink-0">
+                  <button type="button" data-action="move-field-up" data-field-idx="${idx}" class="p-0.5 rounded transition-colors" style="color:var(--txt-secondary)${idx === 0 ? ";opacity:0.3" : ""}" ${idx === 0 ? "disabled" : ""}>${ICONS.arrowUp}</button>
+                  <button type="button" data-action="move-field-down" data-field-idx="${idx}" class="p-0.5 rounded transition-colors" style="color:var(--txt-secondary)${idx === fields.length - 1 ? ";opacity:0.3" : ""}" ${idx === fields.length - 1 ? "disabled" : ""}>${ICONS.arrowDown}</button>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <span class="text-sm font-medium">${escHtml(field.label || field.key)}</span>
+                  <span class="text-xs tx-secondary ml-1">(${escHtml(field.type || "text")})</span>
+                </div>
+              </div>`;
+            }
             return renderFormFieldWithValue(field, val);
           })
           .join("");
@@ -1550,11 +1572,17 @@ export default {
           .join("");
       }
 
+      const reorderToggle = fields.length > 1
+        ? `<button data-action="toggle-reorder-fields" class="ml-auto text-xs tx-link flex items-center gap-1" title="${T("records.reorder_fields")}">${ICONS.grip} ${isReordering ? T("records.reorder_done") : T("records.reorder_fields")}</button>`
+        : "";
+
       return `<div class="tx-card p-6">
-        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T("records.section_data")}</h4>
+        <h4 class="text-sm font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3 flex items-center gap-2">${ICONS.clipboard} ${T("records.section_data")}${reorderToggle}</h4>
         ${
           fields.length > 0
-            ? `<form id="tx-entry-data-form" class="grid grid-cols-1 sm:grid-cols-2 gap-3">${fieldsHtml}
+            ? isReordering
+              ? `<div id="tx-entry-data-form" class="grid grid-cols-1 sm:grid-cols-2 gap-2">${fieldsHtml}</div>`
+              : `<form id="tx-entry-data-form" class="grid grid-cols-1 sm:grid-cols-2 gap-3">${fieldsHtml}
               <div class="sm:col-span-2"><button type="submit" class="tx-btn tx-btn-sm">${T("app.save")}</button></div>
             </form>`
             : Object.keys(formData).length > 0
@@ -1661,15 +1689,16 @@ export default {
       const additionalDocs = entry.files?.additional || [];
       const cvInfo = hasCv ? entry.files.cv : null;
       const allFiles = [];
-      if (cvInfo) allFiles.push({ ...cvInfo, slot: "cv" });
-      for (const d of additionalDocs) allFiles.push({ ...d, slot: "additional" });
+      if (cvInfo) allFiles.push({ ...cvInfo, slot: "cv", slotIndex: 0 });
+      for (let i = 0; i < additionalDocs.length; i++) allFiles.push({ ...additionalDocs[i], slot: "additional", slotIndex: i });
       const hasAnyFile = allFiles.length > 0;
 
       const fileListHtml = allFiles.length > 0
-        ? allFiles.map((f) => `<div class="flex items-center gap-2 py-1">
+        ? allFiles.map((f) => `<div class="flex items-center gap-2 py-1.5 group">
             <span style="color:var(--status-success)">${ICONS.check}</span>
             <span class="text-xs flex-1 truncate">${escHtml(f.filename)}</span>
             <span class="text-xs tx-secondary">${f.size ? (f.size / 1024 > 1024 ? (f.size / 1048576).toFixed(1) + " MB" : Math.round(f.size / 1024) + " KB") : ""}</span>
+            <button data-action="delete-source-file" data-slot="${escHtml(f.slot)}" data-slot-index="${f.slotIndex}" class="p-1 rounded transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100" style="color:var(--txt-secondary)" title="${T("app.delete")}">${ICONS.trash}</button>
           </div>`).join("")
         : `<p class="text-xs tx-secondary py-2">${T("records.no_files")}</p>`;
 
@@ -2700,7 +2729,6 @@ export default {
             const d = await api(`/candidates/${eid}`);
             state.selectedEntry = d.candidate;
             render();
-            handleUploadAndParse(eid);
           } catch (err) {
             showToast(err.message, "error");
           }
@@ -2724,6 +2752,72 @@ export default {
           const eid = state.selectedEntry?.id;
           if (eid) handleParseDocuments(eid);
         },
+      );
+
+      // --- Entry detail: delete source file ---
+      el.querySelectorAll('[data-action="delete-source-file"]').forEach(
+        (btn) =>
+          btn.addEventListener("click", async () => {
+            if (!confirm(T("records.confirm_delete_source_file"))) return;
+            const entry = state.selectedEntry;
+            if (!entry) return;
+            const slot = btn.dataset.slot;
+            const slotIndex = btn.dataset.slotIndex;
+            try {
+              const d = await api(
+                `/candidates/${entry.id}/files/${slot}/${slotIndex}`,
+                { method: "DELETE" },
+              );
+              state.selectedEntry = d.candidate;
+              showToast(T("records.source_file_deleted"));
+              render();
+            } catch (err) {
+              showToast(err.message, "error");
+            }
+          }),
+      );
+
+      // --- Entry detail: toggle field reordering ---
+      el.querySelector('[data-action="toggle-reorder-fields"]')?.addEventListener(
+        "click",
+        async () => {
+          if (state.reorderingFields) {
+            const entry = state.selectedEntry;
+            const formDef = state.forms.find((f) => f.id === entry?.form_id);
+            if (formDef) {
+              try {
+                await api(`/forms/${formDef.id}`, {
+                  method: "PUT",
+                  body: JSON.stringify({ fields: formDef.fields }),
+                });
+                showToast(T("records.reorder_saved"));
+              } catch (err) {
+                showToast(err.message, "error");
+              }
+            }
+          }
+          state.reorderingFields = !state.reorderingFields;
+          render();
+        },
+      );
+
+      // --- Entry detail: move field up/down ---
+      el.querySelectorAll('[data-action="move-field-up"], [data-action="move-field-down"]').forEach(
+        (btn) =>
+          btn.addEventListener("click", () => {
+            const entry = state.selectedEntry;
+            if (!entry) return;
+            const formDef = state.forms.find((f) => f.id === entry.form_id);
+            if (!formDef?.fields) return;
+            const idx = parseInt(btn.dataset.fieldIdx);
+            const direction = btn.dataset.action === "move-field-up" ? -1 : 1;
+            const newIdx = idx + direction;
+            if (newIdx < 0 || newIdx >= formDef.fields.length) return;
+            const tmp = formDef.fields[idx];
+            formDef.fields[idx] = formDef.fields[newIdx];
+            formDef.fields[newIdx] = tmp;
+            render();
+          }),
       );
 
       // --- Entry detail: generate template selector ---
@@ -2954,6 +3048,7 @@ export default {
           state.generating = false;
           state.editingVarKey = null;
           state.selectedGenerateTemplate = null;
+          state.reorderingFields = false;
           render();
         },
       );

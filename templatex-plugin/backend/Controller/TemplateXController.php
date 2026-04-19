@@ -901,6 +901,57 @@ class TemplateXController extends AbstractController
         ]);
     }
 
+    #[Route('/candidates/{candidateId}/files/{slot}/{fileIndex}', name: 'candidates_file_delete', methods: ['DELETE'], requirements: ['fileIndex' => '\d+'])]
+    #[OA\Delete(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/files/{slot}/{fileIndex}',
+        summary: 'Delete a source file (CV or additional document) from an entry',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'File deleted')]
+    public function candidatesFileDelete(int $userId, string $candidateId, string $slot, int $fileIndex, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+
+        if ($slot === 'cv') {
+            $cvFile = $entry['files']['cv'] ?? null;
+            if (!$cvFile) {
+                return $this->json(['success' => false, 'error' => 'No CV file found'], Response::HTTP_NOT_FOUND);
+            }
+            $storedAs = $cvFile['stored_as'] ?? '';
+            if ($storedAs && is_file($dir . '/' . $storedAs)) {
+                unlink($dir . '/' . $storedAs);
+            }
+            unset($entry['files']['cv']);
+        } elseif ($slot === 'additional') {
+            $additionalDocs = $entry['files']['additional'] ?? [];
+            if (!isset($additionalDocs[$fileIndex])) {
+                return $this->json(['success' => false, 'error' => 'File not found at index'], Response::HTTP_NOT_FOUND);
+            }
+            $storedAs = $additionalDocs[$fileIndex]['stored_as'] ?? '';
+            if ($storedAs && is_file($dir . '/' . $storedAs)) {
+                unlink($dir . '/' . $storedAs);
+            }
+            array_splice($entry['files']['additional'], $fileIndex, 1);
+        } else {
+            return $this->json(['success' => false, 'error' => 'Invalid slot. Use "cv" or "additional"'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+
+        return $this->json(['success' => true, 'candidate' => $entry]);
+    }
+
     // =========================================================================
     // AI Extraction & Variable Resolution
     // =========================================================================

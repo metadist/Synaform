@@ -149,7 +149,12 @@
     "confirm_delete_doc": "Bu oluşturulan belge silinsin mi?",
     "add_row": "Satır ekle",
     "remove_row": "Kaldır",
-    "table_empty": "Henüz satır yok"
+    "table_empty": "Henüz satır yok",
+    "confirm_delete_source_file": "Bu kaynak dosyayı kaldırmak istiyor musunuz? Çıkarılan veriler korunacaktır.",
+    "source_file_deleted": "Dosya kaldırıldı",
+    "reorder_fields": "Sırala",
+    "reorder_done": "Tamam",
+    "reorder_saved": "Alan sırası kaydedildi"
   },
   "documents": {
     "title": "Belge Şablonları",

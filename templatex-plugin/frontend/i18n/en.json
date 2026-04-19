@@ -149,7 +149,12 @@
     "confirm_delete_doc": "Delete this generated document?",
     "add_row": "Add Row",
     "remove_row": "Remove",
-    "table_empty": "No rows yet"
+    "table_empty": "No rows yet",
+    "confirm_delete_source_file": "Remove this source file? Extracted data will be kept.",
+    "source_file_deleted": "File removed",
+    "reorder_fields": "Reorder",
+    "reorder_done": "Done",
+    "reorder_saved": "Field order saved"
   },
   "documents": {
     "title": "Document Templates",

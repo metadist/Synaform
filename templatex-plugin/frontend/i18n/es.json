@@ -149,7 +149,12 @@
     "confirm_delete_doc": "¿Eliminar este documento generado?",
     "add_row": "Añadir fila",
     "remove_row": "Eliminar",
-    "table_empty": "Sin filas aún"
+    "table_empty": "Sin filas aún",
+    "confirm_delete_source_file": "¿Eliminar este archivo fuente? Los datos extraídos se conservarán.",
+    "source_file_deleted": "Archivo eliminado",
+    "reorder_fields": "Reordenar",
+    "reorder_done": "Listo",
+    "reorder_saved": "Orden de campos guardado"
   },
   "documents": {
     "title": "Plantillas de Documento",

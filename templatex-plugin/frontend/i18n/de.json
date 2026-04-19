@@ -149,7 +149,12 @@
     "confirm_delete_doc": "Dieses generierte Dokument wirklich löschen?",
     "add_row": "Zeile hinzufügen",
     "remove_row": "Entfernen",
-    "table_empty": "Noch keine Einträge"
+    "table_empty": "Noch keine Einträge",
+    "confirm_delete_source_file": "Diese Quelldatei entfernen? Extrahierte Daten bleiben erhalten.",
+    "source_file_deleted": "Datei entfernt",
+    "reorder_fields": "Sortieren",
+    "reorder_done": "Fertig",
+    "reorder_saved": "Feldreihenfolge gespeichert"
   },
   "documents": {
     "title": "Zielvorlagen",
