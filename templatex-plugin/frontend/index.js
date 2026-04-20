@@ -498,8 +498,9 @@ export default {
       .tx-tab.active { color: var(--brand); border-bottom-color: var(--brand); }
       .tx-tab.danger { color: var(--status-error); opacity: .85; }
       .tx-tab.danger.active { border-bottom-color: var(--status-error); }
-      .tx-collection-card { position: relative; padding: 1.25rem; background: var(--bg-card); border-radius: .75rem; box-shadow: inset 0 0 0 1px var(--border-light); transition: box-shadow .15s, transform .15s; cursor: pointer; display: flex; flex-direction: column; gap: .75rem; }
+      .tx-collection-card { position: relative; padding: 1.25rem; background: var(--bg-card); color: var(--txt-primary); border: none; border-radius: .75rem; box-shadow: inset 0 0 0 1px var(--border-light); transition: box-shadow .15s, transform .15s; cursor: pointer; display: flex; flex-direction: column; gap: .75rem; width: 100%; font: inherit; text-align: left; }
       .tx-collection-card:hover { box-shadow: inset 0 0 0 1px var(--brand-alpha-light), 0 6px 16px rgba(0,0,0,.08); transform: translateY(-1px); }
+      .tx-collection-card:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
       .tx-callout { padding: .75rem 1rem; border-radius: .5rem; background: var(--brand-alpha-light); color: var(--txt-primary); font-size: .8125rem; }
       .tx-danger-zone { border: 1px solid color-mix(in srgb, var(--status-error) 40%, transparent); border-radius: .75rem; padding: 1.25rem; background: color-mix(in srgb, var(--status-error) 6%, var(--bg-card)); }
     `;
@@ -627,7 +628,7 @@ export default {
           const datasets = datasetsForCollection(c.id);
           const templates = collectionTemplates(c);
           const vars = c.fields?.length || 0;
-          return `<div data-open-collection="${c.id}" class="tx-collection-card">
+          return `<button type="button" data-open-collection="${c.id}" class="tx-collection-card text-left" aria-label="${T("collections.card_open")}: ${escHtml(c.name)}">
             <div class="flex items-start gap-3">
               <span class="inline-flex items-center justify-center w-9 h-9 rounded-full flex-shrink-0" style="background:var(--brand-alpha-light);color:var(--brand)">${ICONS.folder}</span>
               <div class="min-w-0 flex-1">
@@ -648,7 +649,7 @@ export default {
               <span class="text-xs tx-secondary">${formatDate(c.created_at)}</span>
               <span class="text-sm tx-link font-medium">${T("collections.card_open")} →</span>
             </div>
-          </div>`;
+          </button>`;
         })
         .join("");
 
