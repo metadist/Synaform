@@ -34,21 +34,24 @@ $xml = str_replace('{{stations.details.N}}', '{{stations.details.N#1}}', $xml);
 $zip->addFromString('word/document.xml', $xml);
 $zip->close();
 
-// --- Synthetic station detail mirroring the structure in the planning doc
+// --- Fully synthetic station detail exercising every block type the renderer
+//     understands: a date header, a role title, and a bullet list — twice —
+//     with an empty-line separator between the two sub-positions. No domain-
+//     specific phrasing; the strings here are arbitrary test markers.
 $station = [
-    'employer' => 'ACME GmbH',
+    'employer' => 'Acme Industries GmbH',
     'time'     => '02/2021 -- heute',
     'details'  => <<<DETAILS
 04/2024 -- heute
-Business Unit Director Sport, Fashion & Daily Underwear
-- Leitung der Teams für Produktmanagement und -entwicklung
-- Verantwortlich für das Lieferkettenmanagement
-- People Management
+Senior Director Alpha
+- Led a cross-functional team of twelve across three locations
+- Owned annual budget of fifty million euros
+- Launched two new product lines in the reporting period
 
 02/2021 -- 04/2024
-Leitung Marketing Sport / Fashion / Underwear
-- Globale Verantwortung für die Marketingstrategie
-- Go-to-Market-Strategie
+Team Lead Beta
+- Drove process automation and tooling standardisation
+- Grew the unit from eight to fifteen engineers
 DETAILS,
 ];
 
@@ -189,13 +192,13 @@ if (str_contains($finalXml, '{{stations.details')) {
 
 $expectedSubstrings = [
     '04/2024 -- heute',
-    'Business Unit Director',
-    'Leitung der Teams',
-    'Lieferkettenmanagement',
-    'People Management',
+    'Senior Director Alpha',
+    'Led a cross-functional team of twelve',
+    'fifty million euros',
+    'Launched two new product lines',
     '02/2021 -- 04/2024',
-    'Leitung Marketing',
-    'Go-to-Market',
+    'Team Lead Beta',
+    'Drove process automation',
 ];
 $foundCount = 0;
 foreach ($expectedSubstrings as $needle) {

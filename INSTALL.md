@@ -125,8 +125,8 @@ The user can upload `.docx` templates through the UI (Zielvorlagen tab), or you 
 ```bash
 curl -X POST \
   -H "X-API-Key: <API_KEY>" \
-  -F "file=@template-v2_de.docx" \
-  -F "name=Kandidatenprofil v2" \
+  -F "file=@my-template.docx" \
+  -F "name=My Template" \
   https://web.synaplan.com/api/v1/user/<USER_ID>/plugins/templatex/templates
 ```
 

@@ -185,7 +185,7 @@ test.describe('@api Document uploads', () => {
   })
 
   test('upload JPG as additional doc succeeds', async ({ request }) => {
-    const imgPath = path.join(FIXTURES_DIR, 'IMG_2116.JPG')
+    const imgPath = path.join(FIXTURES_DIR, 'test_scan_placeholder.jpg')
     if (!fs.existsSync(imgPath)) { test.skip(); return }
     const res = await uploadFile(request, cookie, `/candidates/${recordId}/upload-doc`, imgPath, 'image/jpeg')
     expect(res.ok()).toBeTruthy()

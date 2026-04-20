@@ -66,20 +66,20 @@ createCV(__dirname + '/cv_mueller_fashion.pdf', {
   skills: ['SAP S/4HANA', 'Adobe Creative Suite', 'Google Analytics / Data Studio', 'Microsoft Office 365', 'Jira / Confluence', 'Social Media Management (Meta Business Suite, TikTok Ads)'],
   stations: [
     {
-      employer: 'Hugo Boss AG',
+      employer: 'Nordstil Mode AG',
       time: '04/2021 -- heute',
       details: `Vice President Marketing DACH
 - Gesamtverantwortung fuer Marketingstrategie Deutschland, Oesterreich, Schweiz
 - Fuehrung eines Teams von 35 Mitarbeitern
 - Budget: EUR 12 Mio. jaehrlich
-- Relaunch der Markenstrategie "BOSS" mit +18% Markenbekanntheit
+- Relaunch der Markenstrategie mit +18% Markenbekanntheit
 - Aufbau des Direct-to-Consumer-Digitalmarketings
 - Enge Zusammenarbeit mit Global Creative Director`
     },
     {
-      employer: 'Falke KGaA',
+      employer: 'Rhein Textil KGaA',
       time: '02/2017 -- 03/2021',
-      details: `Leiterin Marketing Sport / Fashion / Underwear
+      details: `Leiterin Marketing DACH
 - Globale Verantwortung fuer die Marketingstrategie (Budget EUR 5 Mio.)
 - Neupositionierung der Marke im Premium-Segment
 - Einfuehrung nachhaltiger Kampagnen (+25% Engagement)

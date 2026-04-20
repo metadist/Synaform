@@ -194,7 +194,7 @@ test.describe('TemplateX API Tests', () => {
         'currentansalary': '135.000 EUR',
         'expectedansalary': '150.000 EUR',
         'workinghours': '40h/Woche',
-        'relevantposlist': ['VP Marketing DACH (Hugo Boss)', 'Leiterin Marketing (Falke)'],
+        'relevantposlist': ['VP Marketing DACH (Nordstil Mode)', 'Leiterin Marketing (Rhein Textil)'],
         'languageslist': ['Deutsch (Muttersprache)', 'Englisch (C2)'],
         'otherskillslist': ['SAP', 'Adobe Creative Suite'],
         'benefits': ['Firmenwagen', 'Bonus'],
@@ -230,8 +230,8 @@ test.describe('TemplateX API Tests', () => {
     // Verify extraction quality
     const stations = extractBody.extracted.stations
     const employers = stations.map((s: { employer: string }) => s.employer)
-    expect(employers.some((e: string) => e.includes('Hugo Boss'))).toBeTruthy()
-    expect(employers.some((e: string) => e.includes('Falke'))).toBeTruthy()
+    expect(employers.some((e: string) => e.includes('Nordstil'))).toBeTruthy()
+    expect(employers.some((e: string) => e.includes('Rhein Textil'))).toBeTruthy()
 
     // Resolve variables
     const varsRes = await api(request, cookie, 'GET', `/candidates/${candidateId}/variables`)
