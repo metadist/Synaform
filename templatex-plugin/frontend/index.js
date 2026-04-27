@@ -1,4 +1,4 @@
-const TX_VERSION = "v1.0.0-collections";
+const TX_VERSION = "v2.0.0";
 
 export default {
   mount(el, context) {
@@ -53,6 +53,9 @@ export default {
       selectedGenerateTemplate: null,
       editingVarKey: null,
       reorderingFields: false,
+      urlFormOpen: false,
+      urlAdding: false,
+      urlAddError: null,
 
       // Variables editing state
       variablesDraft: null,
@@ -62,6 +65,7 @@ export default {
       variablesImportFields: null,
       variablesImportError: null,
       variablesImportText: "",
+      expandedDesignerIdx: null,
 
       // Template management state
       selectedTemplateDetail: null,
@@ -456,6 +460,9 @@ export default {
         '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093M12 17h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
       close:
         '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>',
+      link: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>',
+      refresh:
+        '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>',
     };
 
     // =========================================================================
@@ -805,12 +812,92 @@ export default {
       const vars = c.fields?.length || 0;
       const hasVars = vars > 0;
       const hasTpls = templates.length > 0;
+      const hasDatasets = datasets.length > 0;
+      const hasGenerated = datasets.some(
+        (d) =>
+          d.status === "generated" ||
+          (d.documents && Object.keys(d.documents).length > 0),
+      );
 
       const stats = `<div class="grid grid-cols-3 gap-3">
         ${statCard(T("collection.overview_stats_variables"), vars, ICONS.variable, "variables")}
         ${statCard(T("collection.overview_stats_templates"), templates.length, ICONS.file, "templates")}
         ${statCard(T("collection.overview_stats_datasets"), datasets.length, ICONS.database, "datasets")}
       </div>`;
+
+      // 4-step wizard. Each step advertises its "current" status based on
+      // the first unfinished prerequisite and exposes a CTA that navigates
+      // to the relevant tab.
+      const steps = [
+        {
+          key: "variables",
+          num: 1,
+          done: hasVars,
+          icon: ICONS.variable,
+          title: T("collection.overview_step1_title"),
+          text: T("collection.overview_step1"),
+          cta: T("collection.goto_variables"),
+          tab: "variables",
+        },
+        {
+          key: "templates",
+          num: 2,
+          done: hasTpls,
+          icon: ICONS.file,
+          title: T("collection.overview_step2_title"),
+          text: T("collection.overview_step2"),
+          cta: T("collection.goto_templates"),
+          tab: "templates",
+        },
+        {
+          key: "datasets",
+          num: 3,
+          done: hasDatasets,
+          icon: ICONS.database,
+          title: T("collection.overview_step3_title"),
+          text: T("collection.overview_step3"),
+          cta: T("collection.goto_datasets"),
+          tab: "datasets",
+        },
+        {
+          key: "generate",
+          num: 4,
+          done: hasGenerated,
+          icon: ICONS.doc,
+          title: T("collection.overview_step4_title"),
+          text: T("collection.overview_step4"),
+          cta: T("collection.goto_datasets"),
+          tab: "datasets",
+        },
+      ];
+      const activeStepIdx = steps.findIndex((s) => !s.done);
+
+      const stepsMarkup = steps
+        .map((s, i) => {
+          const active = i === activeStepIdx;
+          const prevDone = i === 0 || steps[i - 1].done;
+          const disabled = !s.done && !prevDone;
+          const bg = s.done
+            ? "background:var(--status-success);color:#fff"
+            : active
+              ? "background:var(--brand);color:#fff"
+              : "background:var(--bg-chip);color:var(--txt-secondary)";
+          const cardStyle = active
+            ? "box-shadow:inset 0 0 0 2px var(--brand), 0 4px 12px rgba(0,0,0,.06);"
+            : "";
+          return `<button type="button" data-tab="${s.tab}"${disabled ? " disabled" : ""} class="tx-row text-left p-4 flex items-start gap-3 transition-all" style="${cardStyle}${disabled ? "opacity:.55;pointer-events:none;" : ""}">
+            <span class="inline-flex items-center justify-center w-8 h-8 rounded-full text-sm font-bold flex-shrink-0" style="${bg}">${s.done ? "✓" : s.num}</span>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-1.5 text-sm font-semibold">
+                <span>${s.icon}</span>
+                <span>${s.title}</span>
+              </div>
+              <div class="text-xs tx-secondary mt-1">${s.text}</div>
+              ${!disabled ? `<div class="text-xs mt-2 font-medium" style="color:var(--brand)">${s.cta} →</div>` : ""}
+            </div>
+          </button>`;
+        })
+        .join("");
 
       let callout = "";
       if (!hasVars) {
@@ -846,37 +933,19 @@ export default {
               .join("")
           : `<p class="text-sm tx-secondary py-2">${T("collection.overview_datasets_empty")}</p>`;
 
-      const steps = `<div class="tx-card p-5">
-        <h3 class="text-sm font-semibold mb-3">${T("collection.overview_steps_title")}</h3>
-        <ol class="space-y-2 text-sm" style="padding-left:0;list-style:none">
-          ${[
-            { done: hasVars, text: T("collection.overview_step1") },
-            { done: hasTpls, text: T("collection.overview_step2") },
-            { done: datasets.length > 0, text: T("collection.overview_step3") },
-          ]
-            .map(
-              (s, i) =>
-                `<li class="flex items-start gap-2">
-                  <span class="inline-flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold flex-shrink-0 mt-0.5" style="${s.done ? "background:var(--status-success);color:#fff" : "background:var(--bg-chip);color:var(--txt-secondary)"}">${s.done ? "✓" : i + 1}</span>
-                  <span class="${s.done ? "tx-secondary" : ""}">${s.text}</span>
-                </li>`,
-            )
-            .join("")}
-        </ol>
-      </div>`;
-
       return `<div class="space-y-4">
         ${stats}
         ${callout}
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          ${steps}
-          <div class="tx-card p-5">
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="text-sm font-semibold">${T("collection.overview_datasets_title")}</h3>
-              ${hasVars ? `<button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("collection.overview_add_dataset")}</button>` : ""}
-            </div>
-            <div class="space-y-1.5">${recentRows}</div>
+        <div class="tx-card p-5">
+          <h3 class="text-sm font-semibold mb-3">${T("collection.overview_steps_title")}</h3>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${stepsMarkup}</div>
+        </div>
+        <div class="tx-card p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold">${T("collection.overview_datasets_title")}</h3>
+            ${hasVars ? `<button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("collection.overview_add_dataset")}</button>` : ""}
           </div>
+          <div class="space-y-1.5">${recentRows}</div>
         </div>
       </div>`;
     }
@@ -946,6 +1015,8 @@ export default {
         "checkbox",
         "table",
       ];
+      const showDesigner = ["list", "table", "checkbox"].includes(fd.type);
+      const designerOpen = state.expandedDesignerIdx === idx;
       return `<div class="tx-row p-3 space-y-2" data-field-idx="${idx}">
         <div class="flex items-start gap-2">
           <div class="flex flex-col gap-0.5 pt-1 flex-shrink-0">
@@ -976,7 +1047,79 @@ export default {
           <input name="fh_${idx}" value="${escHtml(fd.hint || "")}" placeholder="${T("variables.field_hint")}" class="tx-input text-xs" />
           <button type="button" class="tx-help-trigger mt-1" title="${T("variables.field_hint_info")}">${ICONS.question}</button>
         </div>
+        ${
+          showDesigner
+            ? `<div style="border-top:1px dashed var(--divider);padding-top:.5rem">
+                <button type="button" data-action="var-designer-toggle" data-idx="${idx}" class="flex items-center gap-1 text-xs tx-link">
+                  ${designerOpen ? ICONS.chevDown : ICONS.chevRight}
+                  ${T("variables.designer_title")}
+                </button>
+                ${designerOpen ? renderVariableDesigner(idx, fd) : ""}
+              </div>`
+            : ""
+        }
       </div>`;
+    }
+
+    function renderVariableDesigner(idx, fd) {
+      const d = fd.designer || {};
+      if (fd.type === "list") {
+        const style = d.list_style || "ul";
+        return `<div class="mt-2 p-3 rounded space-y-3" style="background:var(--bg-app)">
+          <p class="text-xs tx-secondary">${T("variables.designer_list_hint")}</p>
+          <div>
+            <label class="tx-label">${T("variables.designer_list_style")}</label>
+            <div class="flex items-center gap-3 text-sm">
+              <label class="flex items-center gap-1.5">
+                <input type="radio" name="fd_${idx}_style" value="ul" ${style === "ul" ? "checked" : ""} />
+                <span>${T("variables.designer_style_ul")}</span>
+              </label>
+              <label class="flex items-center gap-1.5">
+                <input type="radio" name="fd_${idx}_style" value="ol" ${style === "ol" ? "checked" : ""} />
+                <span>${T("variables.designer_style_ol")}</span>
+              </label>
+            </div>
+          </div>
+          <label class="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" name="fd_${idx}_prevent_orphans" ${d.prevent_orphans ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+            <span>${T("variables.designer_prevent_orphans")}</span>
+          </label>
+          <p class="text-xs tx-secondary">${T("variables.designer_prevent_orphans_hint")}</p>
+        </div>`;
+      }
+      if (fd.type === "table") {
+        return `<div class="mt-2 p-3 rounded space-y-2" style="background:var(--bg-app)">
+          <p class="text-xs tx-secondary">${T("variables.designer_table_hint")}</p>
+          <label class="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" name="fd_${idx}_repeat_header" ${d.repeat_header !== false ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+            <span>${T("variables.designer_repeat_header")}</span>
+          </label>
+          <label class="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" name="fd_${idx}_prevent_row_break" ${d.prevent_row_break !== false ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+            <span>${T("variables.designer_prevent_row_break")}</span>
+          </label>
+          <label class="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" name="fd_${idx}_keep_with_prev" ${d.keep_with_prev ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+            <span>${T("variables.designer_keep_with_prev")}</span>
+          </label>
+        </div>`;
+      }
+      if (fd.type === "checkbox") {
+        return `<div class="mt-2 p-3 rounded space-y-2" style="background:var(--bg-app)">
+          <p class="text-xs tx-secondary">${T("variables.designer_checkbox_hint")}</p>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="tx-label">${T("variables.designer_checked_glyph")}</label>
+              <input name="fd_${idx}_checked_glyph" value="${escHtml(d.checked_glyph || "☒")}" class="tx-input text-center" maxlength="4" style="max-width:4rem" />
+            </div>
+            <div>
+              <label class="tx-label">${T("variables.designer_unchecked_glyph")}</label>
+              <input name="fd_${idx}_unchecked_glyph" value="${escHtml(d.unchecked_glyph || "☐")}" class="tx-input text-center" maxlength="4" style="max-width:4rem" />
+            </div>
+          </div>
+        </div>`;
+      }
+      return "";
     }
 
     function renderVariableColumnEditor(fieldIdx, columns) {
@@ -1569,24 +1712,49 @@ export default {
     function renderDatasetFilesSection(d) {
       const cv = d.files?.cv;
       const additional = d.files?.additional || [];
+      const urls = d.files?.urls || [];
       const all = [];
       if (cv) all.push({ ...cv, slot: "cv", slotIndex: 0 });
       for (let i = 0; i < additional.length; i++)
         all.push({ ...additional[i], slot: "additional", slotIndex: i });
 
-      const list = all.length
-        ? all
-            .map(
-              (f) =>
-                `<div class="flex items-center gap-2 py-1.5 group">
+      const urlRows = urls
+        .map((u, i) => {
+          const ok = u.text_snippet && !u.fetch_error;
+          const warning = u.fetch_error && !u.text_snippet;
+          const statusIcon = ok
+            ? `<span style="color:var(--status-success)" title="${T("datasets.url_fetched")}">${ICONS.check}</span>`
+            : warning
+              ? `<span style="color:var(--status-error)" title="${escHtml(u.fetch_error || "")}">${ICONS.warning}</span>`
+              : `<span style="color:var(--status-warning,#d97706)" title="${escHtml(u.fetch_error || "")}">${ICONS.warning}</span>`;
+          const kindBadge = u.kind
+            ? `<span class="tx-badge" style="background:var(--bg-chip);color:var(--txt-secondary)">${escHtml(u.kind)}</span>`
+            : "";
+          return `<div class="flex items-center gap-2 py-1.5 group">
+            ${statusIcon}
+            <a href="${escHtml(u.url)}" target="_blank" rel="noopener noreferrer" class="text-xs flex-1 truncate tx-link" title="${escHtml(u.url)}">${escHtml(u.label || u.host || u.url)}</a>
+            ${kindBadge}
+            ${u.text_snippet ? `<span class="text-xs tx-secondary">${u.text_snippet.length.toLocaleString()} chars</span>` : ""}
+            <button data-action="refresh-url" data-url-index="${i}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)" title="${T("datasets.url_refetch")}">${ICONS.refresh || ICONS.sparkle}</button>
+            <button data-action="delete-source-file" data-slot="urls" data-slot-index="${i}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)">${ICONS.trash}</button>
+          </div>`;
+        })
+        .join("");
+
+      const list =
+        all.length || urls.length
+          ? all
+              .map(
+                (f) =>
+                  `<div class="flex items-center gap-2 py-1.5 group">
                   <span style="color:var(--status-success)">${ICONS.check}</span>
                   <span class="text-xs flex-1 truncate">${escHtml(f.filename)}</span>
                   <span class="text-xs tx-secondary">${f.size ? (f.size / 1024 > 1024 ? (f.size / 1048576).toFixed(1) + " MB" : Math.round(f.size / 1024) + " KB") : ""}</span>
                   <button data-action="delete-source-file" data-slot="${escHtml(f.slot)}" data-slot-index="${f.slotIndex}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)">${ICONS.trash}</button>
                 </div>`,
-            )
-            .join("")
-        : `<p class="text-xs tx-secondary py-2">${T("datasets.no_files")}</p>`;
+              )
+              .join("") + urlRows
+          : `<p class="text-xs tx-secondary py-2">${T("datasets.no_files")}</p>`;
 
       let progress = "";
       if (state.datasetParsing) {
@@ -1612,6 +1780,25 @@ export default {
         </div>`;
       }
 
+      const hasAnySource = all.length > 0 || urls.length > 0;
+      const urlFormOpen = state.urlFormOpen;
+      const urlFormMarkup = urlFormOpen
+        ? `<div class="mt-2 p-3 rounded tx-card space-y-2" style="background:var(--bg-app)">
+            <label class="tx-label">${T("datasets.url_add_label")}</label>
+            <input id="tx-url-input" type="url" class="tx-input" placeholder="${T("datasets.url_add_placeholder")}" />
+            <input id="tx-url-label" type="text" class="tx-input" placeholder="${T("datasets.url_label_placeholder")}" />
+            <div class="flex items-center gap-2">
+              <button data-action="save-url" class="tx-btn tx-btn-sm"${state.urlAdding ? " disabled" : ""}>
+                ${state.urlAdding ? `<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full"></span>` : ICONS.upload}
+                ${state.urlAdding ? T("datasets.url_adding") : T("datasets.url_add_btn")}
+              </button>
+              <button data-action="cancel-url" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.cancel")}</button>
+              ${state.urlAddError ? `<span class="text-xs" style="color:var(--status-error)">${escHtml(state.urlAddError)}</span>` : ""}
+            </div>
+            <p class="text-xs tx-secondary">${T("datasets.url_add_hint")}</p>
+          </div>`
+        : "";
+
       return `<div class="tx-card p-5">
         <div class="flex items-center gap-2 mb-3">
           <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2">${ICONS.file} ${T("datasets.section_files")}</h4>
@@ -1623,13 +1810,17 @@ export default {
             ${ICONS.upload} ${all.length ? T("datasets.upload_more") : T("datasets.upload_doc")}
             <input type="file" id="tx-doc-upload" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.tiff,.tif,.bmp,.txt,.rtf,.odt,.xls,.xlsx,.pptx" multiple class="hidden" />
           </label>
+          <button data-action="toggle-url-form" class="tx-btn tx-btn-sm tx-btn-ghost">
+            ${ICONS.link || ICONS.sparkle} ${T("datasets.url_add_btn")}
+          </button>
           ${
-            all.length && !state.datasetParsing
+            hasAnySource && !state.datasetParsing
               ? `<button data-action="parse-documents" class="tx-btn tx-btn-sm">${ICONS.sparkle} ${T("datasets.parse_btn")}</button>
                  <button type="button" class="tx-help-trigger" title="${T("datasets.parse_hint")}">${ICONS.question}</button>`
               : ""
           }
         </div>
+        ${urlFormMarkup}
         ${progress}
       </div>`;
     }
@@ -2285,6 +2476,23 @@ export default {
               }
             }
           }
+          // Designer config (collapsible per-field block).
+          const designer = fields[idx].designer || {};
+          if (fields[idx].type === "list") {
+            const style = fd.get(`fd_${idx}_style`)?.toString();
+            if (style === "ol" || style === "ul") designer.list_style = style;
+            designer.prevent_orphans = fd.has(`fd_${idx}_prevent_orphans`);
+          } else if (fields[idx].type === "table") {
+            designer.repeat_header = fd.has(`fd_${idx}_repeat_header`);
+            designer.prevent_row_break = fd.has(`fd_${idx}_prevent_row_break`);
+            designer.keep_with_prev = fd.has(`fd_${idx}_keep_with_prev`);
+          } else if (fields[idx].type === "checkbox") {
+            const ch = fd.get(`fd_${idx}_checked_glyph`)?.toString().trim();
+            const un = fd.get(`fd_${idx}_unchecked_glyph`)?.toString().trim();
+            if (ch) designer.checked_glyph = ch;
+            if (un) designer.unchecked_glyph = un;
+          }
+          if (Object.keys(designer).length > 0) fields[idx].designer = designer;
         }
       }
 
@@ -2362,6 +2570,18 @@ export default {
           state.variablesDirty = true;
           render();
         }),
+      );
+
+      el.querySelectorAll('[data-action="var-designer-toggle"]').forEach(
+        (btn) =>
+          btn.addEventListener("click", () => {
+            ensureDraft();
+            collectForm();
+            const idx = parseInt(btn.dataset.idx);
+            state.expandedDesignerIdx =
+              state.expandedDesignerIdx === idx ? null : idx;
+            render();
+          }),
       );
 
       const vForm = el.querySelector("#tx-variables-form");
@@ -2981,6 +3201,83 @@ export default {
             );
             state.selectedDataset = upd.candidate;
             showToast(T("datasets.source_file_deleted"));
+            render();
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        }),
+      );
+
+      // URL source actions
+      el.querySelector('[data-action="toggle-url-form"]')?.addEventListener(
+        "click",
+        () => {
+          state.urlFormOpen = !state.urlFormOpen;
+          state.urlAddError = null;
+          render();
+          if (state.urlFormOpen) {
+            setTimeout(() => el.querySelector("#tx-url-input")?.focus(), 50);
+          }
+        },
+      );
+      el.querySelector('[data-action="cancel-url"]')?.addEventListener(
+        "click",
+        () => {
+          state.urlFormOpen = false;
+          state.urlAddError = null;
+          render();
+        },
+      );
+      el.querySelector('[data-action="save-url"]')?.addEventListener(
+        "click",
+        async () => {
+          const urlInput = el.querySelector("#tx-url-input");
+          const labelInput = el.querySelector("#tx-url-label");
+          const url = urlInput?.value?.trim();
+          const label = labelInput?.value?.trim() || "";
+          if (!url) {
+            state.urlAddError = T("datasets.url_add_required");
+            render();
+            return;
+          }
+          state.urlAdding = true;
+          state.urlAddError = null;
+          render();
+          try {
+            const res = await api(`/candidates/${d.id}/urls`, {
+              method: "POST",
+              body: JSON.stringify({ url, label }),
+            });
+            state.selectedDataset = res.candidate;
+            state.urlFormOpen = false;
+            state.urlAddError = null;
+            showToast(T("datasets.url_added"));
+            const hasSnippet = res.url?.text_snippet;
+            if (!hasSnippet && res.url?.fetch_error) {
+              showToast(
+                Tf("datasets.url_fetch_warning", {
+                  error: res.url.fetch_error,
+                }),
+                "error",
+              );
+            }
+          } catch (err) {
+            state.urlAddError = err.message;
+          }
+          state.urlAdding = false;
+          render();
+        },
+      );
+      el.querySelectorAll('[data-action="refresh-url"]').forEach((btn) =>
+        btn.addEventListener("click", async () => {
+          const urlIndex = parseInt(btn.dataset.urlIndex);
+          try {
+            await api(`/candidates/${d.id}/urls/${urlIndex}/refresh`, {
+              method: "POST",
+            });
+            const upd = await api(`/candidates/${d.id}`);
+            state.selectedDataset = upd.candidate;
+            showToast(T("datasets.url_refreshed"));
             render();
           } catch (err) {
             showToast(err.message, "error");

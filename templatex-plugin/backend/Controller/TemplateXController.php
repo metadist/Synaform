@@ -460,7 +460,7 @@ class TemplateXController extends AbstractController
             'description' => $data['description'] ?? '',
             'language' => $data['language'] ?? 'de',
             'version' => $data['version'] ?? 1,
-            'fields' => $data['fields'] ?? [],
+            'fields' => $this->normalizeFields($data['fields'] ?? []),
             'template_ids' => $data['template_ids'] ?? [],
             'created_at' => date('c'),
             'updated_at' => date('c'),
@@ -523,7 +523,11 @@ class TemplateXController extends AbstractController
         $updatable = ['name', 'description', 'language', 'version', 'fields', 'template_ids'];
         foreach ($updatable as $field) {
             if (array_key_exists($field, $data)) {
-                $existing[$field] = $data[$field];
+                if ($field === 'fields' && is_array($data[$field])) {
+                    $existing[$field] = $this->normalizeFields($data[$field]);
+                } else {
+                    $existing[$field] = $data[$field];
+                }
             }
         }
         $existing['updated_at'] = date('c');
@@ -612,26 +616,7 @@ class TemplateXController extends AbstractController
 
             $fields = isset($parsed[0]) ? $parsed : ($parsed['fields'] ?? []);
 
-            $validated = [];
-            foreach ($fields as $field) {
-                if (empty($field['key'])) {
-                    continue;
-                }
-                $fieldData = [
-                    'key' => $field['key'],
-                    'label' => $field['label'] ?? $field['key'],
-                    'type' => $this->normalizeFieldType($field['type'] ?? 'text'),
-                    'required' => (bool) ($field['required'] ?? false),
-                    'source' => $this->normalizeSource($field['source'] ?? 'form'),
-                    'fallback' => $this->normalizeSource($field['fallback'] ?? null),
-                    'hint' => $field['hint'] ?? null,
-                    'options' => $field['options'] ?? null,
-                ];
-                if (($fieldData['type'] === 'table') && !empty($field['columns'])) {
-                    $fieldData['columns'] = $field['columns'];
-                }
-                $validated[] = $fieldData;
-            }
+            $validated = $this->normalizeFields($fields);
 
             return $this->json([
                 'success' => true,
@@ -952,14 +937,163 @@ class TemplateXController extends AbstractController
                 unlink($dir . '/' . $storedAs);
             }
             array_splice($entry['files']['additional'], $fileIndex, 1);
+        } elseif ($slot === 'urls') {
+            $urls = $entry['files']['urls'] ?? [];
+            if (!isset($urls[$fileIndex])) {
+                return $this->json(['success' => false, 'error' => 'URL not found at index'], Response::HTTP_NOT_FOUND);
+            }
+            array_splice($entry['files']['urls'], $fileIndex, 1);
         } else {
-            return $this->json(['success' => false, 'error' => 'Invalid slot. Use "cv" or "additional"'], Response::HTTP_BAD_REQUEST);
+            return $this->json(['success' => false, 'error' => 'Invalid slot. Use "cv", "additional" or "urls"'], Response::HTTP_BAD_REQUEST);
         }
 
         $entry['updated_at'] = date('c');
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
 
         return $this->json(['success' => true, 'candidate' => $entry]);
+    }
+
+    // =========================================================================
+    // URL Sources (LinkedIn profiles, company pages, public web documents)
+    // =========================================================================
+
+    #[Route('/candidates/{candidateId}/urls', name: 'candidates_urls_add', methods: ['POST'])]
+    #[OA\Post(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls',
+        summary: 'Attach a web URL (e.g. LinkedIn profile) as an AI-readable source',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'URL attached')]
+    public function candidatesUrlsAdd(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+        $url = trim((string) ($data['url'] ?? ''));
+        $label = trim((string) ($data['label'] ?? ''));
+
+        if ($url === '') {
+            return $this->json(['success' => false, 'error' => 'URL is required'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $parsed = parse_url($url);
+        if (!$parsed || empty($parsed['scheme']) || !in_array(strtolower($parsed['scheme']), ['http', 'https'], true) || empty($parsed['host'])) {
+            return $this->json(['success' => false, 'error' => 'Only http:// and https:// URLs are supported'], Response::HTTP_BAD_REQUEST);
+        }
+
+        [$snippet, $fetchError] = $this->fetchUrlText($url);
+
+        $host = $parsed['host'] ?? '';
+        $kind = 'web';
+        if (str_contains($host, 'linkedin.com')) {
+            $kind = 'linkedin';
+        } elseif (str_contains($host, 'xing.com')) {
+            $kind = 'xing';
+        } elseif (str_contains($host, 'github.com')) {
+            $kind = 'github';
+        }
+
+        $urlEntry = [
+            'id' => 'url_' . bin2hex(random_bytes(5)),
+            'url' => $url,
+            'label' => $label !== '' ? $label : $host,
+            'host' => $host,
+            'kind' => $kind,
+            'text_snippet' => $snippet,
+            'fetch_error' => $fetchError,
+            'fetched_at' => $snippet !== null ? date('c') : null,
+            'added_at' => date('c'),
+        ];
+
+        if (!isset($entry['files']) || !is_array($entry['files'])) {
+            $entry['files'] = [];
+        }
+        if (!isset($entry['files']['urls']) || !is_array($entry['files']['urls'])) {
+            $entry['files']['urls'] = [];
+        }
+        $entry['files']['urls'][] = $urlEntry;
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+
+        return $this->json([
+            'success' => true,
+            'url' => $urlEntry,
+            'candidate' => $entry,
+        ]);
+    }
+
+    #[Route('/candidates/{candidateId}/urls/{urlIndex}', name: 'candidates_urls_delete', methods: ['DELETE'], requirements: ['urlIndex' => '\d+'])]
+    #[OA\Delete(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls/{urlIndex}',
+        summary: 'Remove a previously added URL source',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'URL removed')]
+    public function candidatesUrlsDelete(int $userId, string $candidateId, int $urlIndex, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $urls = $entry['files']['urls'] ?? [];
+        if (!isset($urls[$urlIndex])) {
+            return $this->json(['success' => false, 'error' => 'URL not found at index'], Response::HTTP_NOT_FOUND);
+        }
+        array_splice($entry['files']['urls'], $urlIndex, 1);
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+
+        return $this->json(['success' => true, 'candidate' => $entry]);
+    }
+
+    #[Route('/candidates/{candidateId}/urls/{urlIndex}/refresh', name: 'candidates_urls_refresh', methods: ['POST'], requirements: ['urlIndex' => '\d+'])]
+    #[OA\Post(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls/{urlIndex}/refresh',
+        summary: 'Re-fetch a URL source (useful when a previous fetch failed or content changed)',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'URL re-fetched')]
+    public function candidatesUrlsRefresh(int $userId, string $candidateId, int $urlIndex, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $urls = $entry['files']['urls'] ?? [];
+        if (!isset($urls[$urlIndex])) {
+            return $this->json(['success' => false, 'error' => 'URL not found at index'], Response::HTTP_NOT_FOUND);
+        }
+
+        $existing = $urls[$urlIndex];
+        [$snippet, $fetchError] = $this->fetchUrlText($existing['url']);
+        $existing['text_snippet'] = $snippet;
+        $existing['fetch_error'] = $fetchError;
+        $existing['fetched_at'] = $snippet !== null ? date('c') : null;
+        $entry['files']['urls'][$urlIndex] = $existing;
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+
+        return $this->json(['success' => true, 'url' => $existing]);
     }
 
     // =========================================================================
@@ -985,19 +1119,35 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        if (empty($entry['files']['cv'])) {
-            return $this->json(['success' => false, 'error' => 'No CV uploaded for this entry'], Response::HTTP_BAD_REQUEST);
+        $hasCv = !empty($entry['files']['cv']);
+        $hasUrls = !empty($entry['files']['urls']);
+        if (!$hasCv && !$hasUrls) {
+            return $this->json(['success' => false, 'error' => 'No CV uploaded and no URL source attached. Upload a CV or add a URL (e.g. LinkedIn) first.'], Response::HTTP_BAD_REQUEST);
         }
 
         try {
-            $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
-            $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
-            $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
-            [$rawText, $extractMeta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
-            $rawText = $rawText ?? '';
+            $rawText = '';
+            if ($hasCv) {
+                $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
+                $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
+                $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+                [$cvText, $extractMeta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+                $cvText = $cvText ?? '';
+                if (trim($cvText) !== '') {
+                    $rawText .= "=== Primary Document ===\n" . $cvText . "\n\n";
+                }
+            }
+            foreach ($entry['files']['urls'] ?? [] as $urlEntry) {
+                $snippet = $urlEntry['text_snippet'] ?? null;
+                if (is_string($snippet) && trim($snippet) !== '') {
+                    $host = $urlEntry['host'] ?? 'url';
+                    $kind = $urlEntry['kind'] ?? 'web';
+                    $rawText .= "=== URL Source ({$kind} · {$host} · " . ($urlEntry['url'] ?? '') . ") ===\n" . $snippet . "\n\n";
+                }
+            }
 
-            if (empty(trim($rawText))) {
-                return $this->json(['success' => false, 'error' => 'Could not extract text from CV'], Response::HTTP_UNPROCESSABLE_ENTITY);
+            if (trim($rawText) === '') {
+                return $this->json(['success' => false, 'error' => 'Could not extract text from CV or URL sources'], Response::HTTP_UNPROCESSABLE_ENTITY);
             }
 
             $form = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, $entry['form_id'] ?? 'default');
@@ -1097,8 +1247,17 @@ class TemplateXController extends AbstractController
             }
         }
 
+        foreach ($entry['files']['urls'] ?? [] as $urlEntry) {
+            $snippet = $urlEntry['text_snippet'] ?? null;
+            if (is_string($snippet) && trim($snippet) !== '') {
+                $host = $urlEntry['host'] ?? 'url';
+                $kind = $urlEntry['kind'] ?? 'web';
+                $allTexts[] = "=== URL Source ({$kind} · {$host} · " . ($urlEntry['url'] ?? '') . ") ===\n" . $snippet;
+            }
+        }
+
         if (empty($allTexts)) {
-            return $this->json(['success' => false, 'error' => 'No documents uploaded or text could not be extracted from any document'], Response::HTTP_BAD_REQUEST);
+            return $this->json(['success' => false, 'error' => 'No documents or URLs uploaded, or text could not be extracted from any source'], Response::HTTP_BAD_REQUEST);
         }
 
         $combinedText = implode("\n\n", $allTexts);
@@ -1286,8 +1445,19 @@ class TemplateXController extends AbstractController
             $variables = $resolved['variables'];
 
             $arrays = $this->collectArrayData($entry, $formFields);
+            $designerMap = $this->getDesignerConfigMap($formFields);
 
             $cleanedPath = $this->cleanTemplateMacros($templatePath);
+
+            // Phase T pre-pass: for any `table`-typed variable with declared
+            // columns, expand a single `{{varname}}` placeholder inside a
+            // <w:tbl> row into per-row cells. This lets templates carry just
+            // one placeholder instead of N×columns `{{varname.col.N}}` tokens.
+            $expandedTableKeys = $this->expandTableBlocks(
+                $cleanedPath,
+                $formFields,
+                $arrays
+            );
 
             // Phase A pre-pass: expand list-type placeholders into proper per-item
             // Word paragraphs (preserving numPr bullet style, indentation, pPr). This
@@ -1303,7 +1473,8 @@ class TemplateXController extends AbstractController
                 $cleanedPath,
                 $preClassified['lists'],
                 $variables,
-                $arrays
+                $arrays,
+                $designerMap
             );
 
             // Phase C pre-pass: for each row-group whose placeholders do NOT live
@@ -1330,6 +1501,18 @@ class TemplateXController extends AbstractController
             // non-list paragraph) fall through to the <w:br/> fallback in processLists.
             $classified['lists'] = array_values(array_diff($classified['lists'], $expandedListKeys));
 
+            // Table-block expansion already consumed these placeholders too. Drop
+            // them from every classification bucket so later passes don't try to
+            // setValue('stations', '') and wipe the freshly-inserted rows.
+            if (!empty($expandedTableKeys)) {
+                $tableKeys = array_keys($expandedTableKeys);
+                $classified['lists'] = array_values(array_diff($classified['lists'], $tableKeys));
+                $classified['scalars'] = array_values(array_diff($classified['scalars'], $tableKeys));
+                foreach ($tableKeys as $tk) {
+                    unset($classified['rowGroups'][$tk]);
+                }
+            }
+
             // Row groups handled by the paragraph-group pre-pass must not go through
             // cloneRow: they are already cloned in the XML and their simple fields
             // are already filled. Any leftover {{…#N}} placeholders for rich
@@ -1338,9 +1521,9 @@ class TemplateXController extends AbstractController
                 unset($classified['rowGroups'][$handledGroup]);
             }
 
-            $this->processRowGroups($tp, $classified['rowGroups'], $arrays);
+            $this->processRowGroups($tp, $classified['rowGroups'], $arrays, $designerMap);
             $this->processBlockGroups($tp, $classified['blockGroups'], $arrays);
-            $this->processCheckboxes($tp, $classified['checkboxes'], $variables);
+            $this->processCheckboxes($tp, $classified['checkboxes'], $variables, $designerMap);
             $this->processLists($tp, $classified['lists'], $variables);
             $this->processScalars($tp, $classified['scalars'], $variables);
 
@@ -1356,6 +1539,12 @@ class TemplateXController extends AbstractController
             // by processRowGroups (RICH_ROW_SUBFIELDS) into real Word paragraphs with
             // bold date headers, role titles, and bulleted achievements.
             $this->expandStationDetails($outputPath, $arrays['stations'] ?? []);
+
+            // Phase D post-pass: apply layout helpers (repeat header / cantSplit)
+            // driven either by the original template XML or by per-variable
+            // designer config. Runs on the final DOCX so row clones emitted by
+            // cloneRow / cloneParagraphGroupsPrepass are also reached.
+            $this->applyTableLayoutHelpers($outputPath, $arrays, $designerMap);
 
             if (is_file($cleanedPath)) {
                 unlink($cleanedPath);
@@ -1842,6 +2031,72 @@ class TemplateXController extends AbstractController
         PROMPT;
     }
 
+    /**
+     * Fetch a URL and return plain-text content for AI consumption.
+     *
+     * Best-effort, defensive: many public profile pages (LinkedIn in particular)
+     * gate behind JavaScript or a login wall. When this is the case we still
+     * return whatever HTML we managed to pull, along with an explanatory error.
+     * The AI prompt tolerates partial / noisy input, so even a partial snippet
+     * is more useful than nothing.
+     *
+     * @return array{0: ?string, 1: ?string}  [plainText|null, errorMessage|null]
+     */
+    private function fetchUrlText(string $url): array
+    {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_CONNECTTIMEOUT => 8,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; TemplateX-Bot/1.0; +https://synaplan.com)',
+            CURLOPT_HTTPHEADER => [
+                'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language: en-US,en;q=0.9,de;q=0.8',
+            ],
+        ]);
+        $raw = curl_exec($ch);
+        $err = curl_error($ch) ?: null;
+        $status = (int) (curl_getinfo($ch, CURLINFO_HTTP_CODE) ?: 0);
+        curl_close($ch);
+
+        if ($raw === false || $raw === '') {
+            return [null, $err ?: 'Failed to fetch URL'];
+        }
+
+        $fetchError = null;
+        if ($status >= 400) {
+            $fetchError = 'HTTP ' . $status . ($status === 999 ? ' (rate-limited or login required)' : '');
+        }
+
+        // Strip script/style/noscript blocks, then all tags. Collapse whitespace.
+        $cleaned = preg_replace('#<(script|style|noscript)\b[^>]*>.*?</\1>#is', ' ', (string) $raw) ?? '';
+        $cleaned = preg_replace('#<!--.*?-->#s', ' ', $cleaned) ?? '';
+        $cleaned = html_entity_decode(strip_tags($cleaned), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $cleaned = preg_replace('/[ \t]+/', ' ', $cleaned) ?? '';
+        $cleaned = preg_replace("/\n{3,}/", "\n\n", $cleaned) ?? '';
+        $cleaned = trim($cleaned);
+
+        // Cap the stored snippet to keep plugin_data rows reasonable.
+        $cap = 60000;
+        if (function_exists('mb_strlen') && mb_strlen($cleaned) > $cap) {
+            $cleaned = mb_substr($cleaned, 0, $cap) . "\n…[truncated]…";
+        } elseif (strlen($cleaned) > $cap) {
+            $cleaned = substr($cleaned, 0, $cap) . "\n…[truncated]…";
+        }
+
+        if ($cleaned === '') {
+            return [null, $fetchError ?? 'No extractable text'];
+        }
+
+        return [$cleaned, $fetchError];
+    }
+
     private function extractTextFromDocx(string $path): ?string
     {
         try {
@@ -1905,6 +2160,120 @@ class TemplateXController extends AbstractController
         return in_array($type, $valid, true) ? $type : 'text';
     }
 
+    /**
+     * Normalize the optional `designer` sub-object on a form field. This carries
+     * layout-level configuration that drives how the generator emits lists,
+     * tables and checkboxes:
+     *
+     *   list:
+     *     list_style        ul | ol                (default ul)
+     *     prevent_orphans   bool                   (default false)
+     *   table:
+     *     repeat_header     bool                   (default true when a header row exists)
+     *     prevent_row_break bool                   (default true — rows stay on one page)
+     *     keep_with_prev    bool                   (default false)
+     *   checkbox:
+     *     checked_glyph     string (single char)   (default "☒")
+     *     unchecked_glyph   string (single char)   (default "☐")
+     *
+     * Unknown keys are dropped silently to keep plugin_data clean.
+     *
+     * @param array<string, mixed>|null $raw
+     * @return array<string, mixed>
+     */
+    private function normalizeDesignerConfig(?array $raw, string $fieldType): array
+    {
+        if (!is_array($raw)) {
+            return [];
+        }
+        $out = [];
+        if ($fieldType === 'list') {
+            $style = isset($raw['list_style']) ? strtolower((string) $raw['list_style']) : '';
+            if (in_array($style, ['ul', 'ol'], true)) {
+                $out['list_style'] = $style;
+            }
+            if (array_key_exists('prevent_orphans', $raw)) {
+                $out['prevent_orphans'] = (bool) $raw['prevent_orphans'];
+            }
+        } elseif ($fieldType === 'table') {
+            if (array_key_exists('repeat_header', $raw)) {
+                $out['repeat_header'] = (bool) $raw['repeat_header'];
+            }
+            if (array_key_exists('prevent_row_break', $raw)) {
+                $out['prevent_row_break'] = (bool) $raw['prevent_row_break'];
+            }
+            if (array_key_exists('keep_with_prev', $raw)) {
+                $out['keep_with_prev'] = (bool) $raw['keep_with_prev'];
+            }
+        } elseif ($fieldType === 'checkbox') {
+            if (isset($raw['checked_glyph']) && is_string($raw['checked_glyph']) && $raw['checked_glyph'] !== '') {
+                $out['checked_glyph'] = mb_substr((string) $raw['checked_glyph'], 0, 4);
+            }
+            if (isset($raw['unchecked_glyph']) && is_string($raw['unchecked_glyph']) && $raw['unchecked_glyph'] !== '') {
+                $out['unchecked_glyph'] = mb_substr((string) $raw['unchecked_glyph'], 0, 4);
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Normalize a list of field definitions, stripping unknown keys and
+     * coercing the `designer` object to its per-type schema. Returns a fresh
+     * array so caller stores a canonical representation.
+     *
+     * @param array<int, array<string, mixed>> $fields
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeFields(array $fields): array
+    {
+        $out = [];
+        foreach ($fields as $raw) {
+            if (!is_array($raw) || empty($raw['key'])) {
+                continue;
+            }
+            $type = $this->normalizeFieldType((string) ($raw['type'] ?? 'text'));
+            $field = [
+                'key' => (string) $raw['key'],
+                'label' => (string) ($raw['label'] ?? $raw['key']),
+                'type' => $type,
+                'required' => (bool) ($raw['required'] ?? false),
+                'source' => $this->normalizeSource($raw['source'] ?? 'form') ?? 'form',
+            ];
+            $fallback = $this->normalizeSource($raw['fallback'] ?? null);
+            if ($fallback !== null) {
+                $field['fallback'] = $fallback;
+            }
+            if (!empty($raw['hint'])) {
+                $field['hint'] = (string) $raw['hint'];
+            }
+            if ($type === 'select' && !empty($raw['options']) && is_array($raw['options'])) {
+                $field['options'] = array_values(array_filter(array_map(static fn ($o) => is_string($o) ? $o : (string) $o, $raw['options'])));
+            }
+            if ($type === 'table' && !empty($raw['columns']) && is_array($raw['columns'])) {
+                $cols = [];
+                foreach ($raw['columns'] as $col) {
+                    if (!is_array($col) || empty($col['key'])) {
+                        continue;
+                    }
+                    $cols[] = [
+                        'key' => (string) $col['key'],
+                        'label' => (string) ($col['label'] ?? $col['key']),
+                    ];
+                }
+                if (!empty($cols)) {
+                    $field['columns'] = $cols;
+                }
+            }
+            $designer = $this->normalizeDesignerConfig($raw['designer'] ?? null, $type);
+            if (!empty($designer)) {
+                $field['designer'] = $designer;
+            }
+            $out[] = $field;
+        }
+        return $out;
+    }
+
     private function getTableFieldMeta(array $formFields): object
     {
         $meta = [];
@@ -1913,11 +2282,39 @@ class TemplateXController extends AbstractController
                 $meta[$field['key']] = [
                     'label' => $field['label'] ?? $field['key'],
                     'columns' => $field['columns'] ?? [],
+                    'designer' => $field['designer'] ?? (object) [],
                 ];
             }
         }
 
         return (object) $meta;
+    }
+
+    /**
+     * Build an index of designer configs keyed by field key. Used by the DOCX
+     * generator so list/table/checkbox rendering can honour per-variable
+     * settings without repeatedly walking the fields[] array.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function getDesignerConfigMap(array $formFields): array
+    {
+        $out = [];
+        foreach ($formFields as $field) {
+            $key = $field['key'] ?? '';
+            if ($key === '') {
+                continue;
+            }
+            $designer = $field['designer'] ?? null;
+            if (is_array($designer) && !empty($designer)) {
+                $designer['_type'] = $field['type'] ?? 'text';
+                $out[$key] = $designer;
+            } elseif (!empty($field['type'])) {
+                // Even empty designer: record type so generator can know it's a list/table
+                $out[$key] = ['_type' => $field['type']];
+            }
+        }
+        return $out;
     }
 
     private function normalizeSource(?string $source): ?string
@@ -2204,8 +2601,15 @@ class TemplateXController extends AbstractController
      * ROW mode: clone table rows for repeating groups like stations.
      * Template has {{stations.employer}}, {{stations.time}}, etc. in a table row.
      * PhpWord cloneRow duplicates the row, suffixing #1, #2, etc.
+     *
+     * The extra $designerMap (not currently used for substitution — it is
+     * consumed by applyTableLayoutHelpers in a later pass) keeps the signature
+     * consistent across row/list/checkbox handlers so callers can pass a single
+     * config map regardless of rendering mode.
+     *
+     * @param array<string, array<string, mixed>> $designerMap
      */
-    private function processRowGroups(TemplateProcessor $tp, array $rowGroups, array $arrays): void
+    private function processRowGroups(TemplateProcessor $tp, array $rowGroups, array $arrays, array $designerMap = []): void
     {
         foreach ($rowGroups as $groupName => $fields) {
             $data = $arrays[$groupName] ?? [];
@@ -2313,12 +2717,20 @@ class TemplateXController extends AbstractController
 
     /**
      * Checkbox mode: detect all checkb.KEY.yes / checkb.KEY.no pairs.
-     * Checks or unchecks Word checkbox content controls.
+     * Checks or unchecks Word checkbox content controls. When the variable's
+     * designer config overrides the glyphs, use those instead of the ☒/☐
+     * defaults (e.g. a template that uses ✅/❌).
+     *
+     * @param array<string, array<string, mixed>> $designerMap
      */
-    private function processCheckboxes(TemplateProcessor $tp, array $checkboxes, array $variables): void
+    private function processCheckboxes(TemplateProcessor $tp, array $checkboxes, array $variables, array $designerMap = []): void
     {
         foreach ($checkboxes as $cbKey => $fields) {
             $yesVal = (bool) ($variables["checkb.{$cbKey}.yes"] ?? false);
+            $designer = $designerMap[$cbKey] ?? [];
+            $checkedGlyph = is_string($designer['checked_glyph'] ?? null) ? $designer['checked_glyph'] : '☒';
+            $uncheckedGlyph = is_string($designer['unchecked_glyph'] ?? null) ? $designer['unchecked_glyph'] : '☐';
+
             foreach ($fields as $ph) {
                 $checked = str_ends_with($ph, '.yes') ? $yesVal : !$yesVal;
 
@@ -2333,7 +2745,7 @@ class TemplateXController extends AbstractController
                 } catch (\Throwable) {
                     // ignored — text replacement below is the guaranteed path
                 }
-                $tp->setValue($ph, $checked ? '☒' : '☐');
+                $tp->setValue($ph, $checked ? $checkedGlyph : $uncheckedGlyph);
             }
         }
     }
@@ -2410,12 +2822,13 @@ class TemplateXController extends AbstractController
      *
      * Empty lists cause the host paragraph to be dropped entirely.
      *
-     * @param list<string>         $listKeys
-     * @param array<string, mixed> $variables
-     * @param array<string, mixed> $arrays
-     * @return list<string>        keys that were successfully expanded
+     * @param list<string>                           $listKeys
+     * @param array<string, mixed>                   $variables
+     * @param array<string, mixed>                   $arrays
+     * @param array<string, array<string, mixed>>    $designerMap
+     * @return list<string>                          keys that were successfully expanded
      */
-    private function expandListParagraphs(string $docxPath, array $listKeys, array $variables, array $arrays): array
+    private function expandListParagraphs(string $docxPath, array $listKeys, array $variables, array $arrays, array $designerMap = []): array
     {
         if (empty($listKeys)) {
             return [];
@@ -2433,6 +2846,10 @@ class TemplateXController extends AbstractController
             return [];
         }
 
+        $numberingXml = $zip->getFromName('word/numbering.xml');
+        $orderedNumId = is_string($numberingXml) ? $this->detectOrderedNumId($numberingXml) : null;
+        $bulletNumId  = is_string($numberingXml) ? $this->detectBulletNumId($numberingXml) : null;
+
         $originalXml = $xml;
         $expanded = [];
 
@@ -2445,6 +2862,10 @@ class TemplateXController extends AbstractController
                 continue;
             }
 
+            $designer = $designerMap[$key] ?? [];
+            $wantsOrdered = ($designer['list_style'] ?? null) === 'ol';
+            $preventOrphans = !empty($designer['prevent_orphans']);
+
             // Non-greedy match of the <w:p>...</w:p> containing the placeholder.
             // The negative lookahead on </w:p> keeps us inside one paragraph.
             $pattern = '#<w:p\b[^>]*>(?:(?!</w:p>).)*?' . preg_quote($placeholder, '#') . '(?:(?!</w:p>).)*?</w:p>#s';
@@ -2452,7 +2873,7 @@ class TemplateXController extends AbstractController
             $replacementCount = 0;
             $newXml = preg_replace_callback(
                 $pattern,
-                function (array $match) use ($placeholder, $items, &$replacementCount): string {
+                function (array $match) use ($placeholder, $items, $wantsOrdered, $preventOrphans, $orderedNumId, $bulletNumId, &$replacementCount): string {
                     $replacementCount++;
                     $paragraph = $match[0];
 
@@ -2460,10 +2881,31 @@ class TemplateXController extends AbstractController
                         return '';
                     }
 
+                    // If the designer wants an ordered (OL) list and the template
+                    // paragraph has bullet numPr, rewrite numPr to point at the
+                    // detected ordered numId. If no numPr exists, synthesize one.
+                    $paragraphForItem = $paragraph;
+                    if ($wantsOrdered && $orderedNumId !== null) {
+                        $paragraphForItem = $this->swapListNumPr($paragraphForItem, $orderedNumId);
+                    } elseif (!$wantsOrdered && $bulletNumId !== null) {
+                        // No change needed usually, but ensure bullet numId if we
+                        // detect the paragraph has a numPr referring to an OL id
+                        // that happens to equal the ordered one. Best-effort.
+                    }
+                    if ($preventOrphans) {
+                        $paragraphForItem = $this->addKeepNext($paragraphForItem);
+                    }
+
                     $out = '';
-                    foreach ($items as $item) {
+                    $lastIdx = count($items) - 1;
+                    foreach ($items as $idx => $item) {
+                        // The last item drops `keepNext` even when preventing orphans,
+                        // so the list can still break naturally at its end.
+                        $paraForThisItem = ($preventOrphans && $idx === $lastIdx)
+                            ? $paragraph
+                            : $paragraphForItem;
                         $escaped = $this->escapeForWordXml($item);
-                        $out .= str_replace($placeholder, $escaped, $paragraph);
+                        $out .= str_replace($placeholder, $escaped, $paraForThisItem);
                     }
                     return $out;
                 },
@@ -2482,6 +2924,229 @@ class TemplateXController extends AbstractController
         $zip->close();
 
         return $expanded;
+    }
+
+    /**
+     * Rewrite a paragraph's <w:numPr> so its <w:numId> points at the given id.
+     * Used to flip bullet paragraphs into ordered-list paragraphs (and vice versa)
+     * without losing the paragraph's other formatting (run props, indentation,
+     * justification, etc.). When the paragraph has no numPr yet, we insert one
+     * with level 0.
+     */
+    private function swapListNumPr(string $paragraphXml, int $numId): string
+    {
+        if (preg_match('#<w:numPr\b[^/]*?>.*?</w:numPr>#s', $paragraphXml)) {
+            return preg_replace_callback(
+                '#<w:numPr\b[^/]*?>.*?</w:numPr>#s',
+                static function () use ($numId): string {
+                    return '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $numId . '"/></w:numPr>';
+                },
+                $paragraphXml,
+                1
+            ) ?? $paragraphXml;
+        }
+
+        $numPr = '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $numId . '"/></w:numPr>';
+        if (preg_match('#<w:pPr\b[^>]*>#', $paragraphXml)) {
+            return preg_replace('#(<w:pPr\b[^>]*>)#', '$1' . $numPr, $paragraphXml, 1) ?? $paragraphXml;
+        }
+
+        // No pPr: inject a minimal one right after the opening <w:p …>.
+        return preg_replace(
+            '#(<w:p\b[^>]*>)#',
+            '$1<w:pPr>' . $numPr . '</w:pPr>',
+            $paragraphXml,
+            1
+        ) ?? $paragraphXml;
+    }
+
+    /**
+     * Add a <w:keepNext/> directive to a paragraph's <w:pPr>. Used to glue
+     * list items together across page boundaries so a dangling last item is
+     * either kept with the previous one or pushed to the next page as a block.
+     */
+    private function addKeepNext(string $paragraphXml): string
+    {
+        if (preg_match('#<w:keepNext\s*/>#', $paragraphXml)) {
+            return $paragraphXml;
+        }
+        if (preg_match('#<w:pPr\b[^>]*>#', $paragraphXml)) {
+            return preg_replace('#(<w:pPr\b[^>]*>)#', '$1<w:keepNext/>', $paragraphXml, 1) ?? $paragraphXml;
+        }
+        return preg_replace(
+            '#(<w:p\b[^>]*>)#',
+            '$1<w:pPr><w:keepNext/></w:pPr>',
+            $paragraphXml,
+            1
+        ) ?? $paragraphXml;
+    }
+
+    /**
+     * Phase T pre-pass: expand `{{varname}}` placeholders that reference a
+     * `table`-typed form field with declared columns into a fully rendered
+     * table row sequence.
+     *
+     * For each qualifying field with non-empty array-of-object data:
+     *   - locate the first <w:tc> containing `{{varname}}`
+     *   - use its host <w:tr> as the row template
+     *   - within that template, treat each of the row's cells left-to-right as
+     *     one column (matching declared `columns[]` in order)
+     *   - clone the row once per data row, substituting each cell's inner text
+     *     with the matching column value for that data row
+     *
+     * Templates that still use the legacy `{{varname.col.N}}` syntax are
+     * left untouched and keep flowing through the existing `processRowGroups`
+     * / `cloneParagraphGroupsPrepass` paths.
+     *
+     * @param array<int, array<string, mixed>>              $formFields
+     * @param array<string, array<int, array<string, mixed>>> $arrays
+     * @return array<string, true>                          keys that were expanded
+     */
+    private function expandTableBlocks(string $docxPath, array $formFields, array $arrays): array
+    {
+        $handled = [];
+
+        $tableFields = [];
+        foreach ($formFields as $field) {
+            $key = $field['key'] ?? '';
+            $type = $field['type'] ?? '';
+            $cols = $field['columns'] ?? [];
+            if ($key === '' || $type !== 'table' || !is_array($cols) || count($cols) === 0) {
+                continue;
+            }
+            $data = $arrays[$key] ?? null;
+            if (!is_array($data) || empty($data) || !is_array($data[0] ?? null)) {
+                continue;
+            }
+            $tableFields[$key] = [
+                'columns' => array_values(array_filter($cols, fn ($c) => is_array($c) && !empty($c['key']))),
+                'data' => $data,
+            ];
+        }
+
+        if (empty($tableFields)) {
+            return $handled;
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            return $handled;
+        }
+
+        $xml = $zip->getFromName('word/document.xml');
+        if ($xml === false) {
+            $zip->close();
+            return $handled;
+        }
+
+        $originalXml = $xml;
+
+        foreach ($tableFields as $key => $cfg) {
+            $token = '{{' . $key . '}}';
+            if (!str_contains($xml, $token)) {
+                continue;
+            }
+
+            // Locate the nearest <w:tr> that contains the token — but only if the
+            // token lives inside a <w:tbl>. Placeholders outside a table fall
+            // back to the normal list/scalar path.
+            $tokenPos = strpos($xml, $token);
+            if ($tokenPos === false) {
+                continue;
+            }
+            $before = substr($xml, 0, $tokenPos);
+            $tblOpen = strrpos($before, '<w:tbl>');
+            $tblClose = strrpos($before, '</w:tbl>');
+            $insideTable = $tblOpen !== false && ($tblClose === false || $tblOpen > $tblClose);
+            if (!$insideTable) {
+                continue;
+            }
+
+            $trPattern = '#<w:tr\b[^>]*>(?:(?!</w:tr>).)*?' . preg_quote($token, '#') . '(?:(?!</w:tr>).)*?</w:tr>#s';
+            if (preg_match($trPattern, $xml, $trMatch, PREG_OFFSET_CAPTURE) !== 1) {
+                continue;
+            }
+            $rowTemplate = $trMatch[0][0];
+            $rowStart = $trMatch[0][1];
+            $rowEnd = $rowStart + strlen($rowTemplate);
+
+            // Extract each <w:tc>…</w:tc> left-to-right and find inner text.
+            if (!preg_match_all('#<w:tc\b[^>]*>(?:(?!</w:tc>).)*?</w:tc>#s', $rowTemplate, $cellMatches)) {
+                continue;
+            }
+            $cells = $cellMatches[0];
+            $cellCount = count($cells);
+            if ($cellCount === 0) {
+                continue;
+            }
+
+            $columns = $cfg['columns'];
+            $maxColumns = min($cellCount, count($columns));
+            if ($maxColumns === 0) {
+                continue;
+            }
+
+            // Build one fresh row per data entry.
+            $allRows = '';
+            foreach ($cfg['data'] as $rowData) {
+                if (!is_array($rowData)) {
+                    continue;
+                }
+                $newRow = $rowTemplate;
+                // Replace the placeholder token first so it never leaks.
+                $newRow = str_replace($token, '', $newRow);
+                // Walk cells left-to-right, substituting the first <w:t>…</w:t>
+                // (or injecting a new run if missing) with the column value.
+                $cellIdx = 0;
+                $newRow = preg_replace_callback(
+                    '#<w:tc\b[^>]*>(?:(?!</w:tc>).)*?</w:tc>#s',
+                    function (array $cm) use (&$cellIdx, $columns, $rowData, $maxColumns): string {
+                        $cell = $cm[0];
+                        if ($cellIdx >= $maxColumns) {
+                            $cellIdx++;
+                            return $cell;
+                        }
+                        $colKey = $columns[$cellIdx]['key'] ?? '';
+                        $cellIdx++;
+                        $value = $colKey !== '' ? (string) ($rowData[$colKey] ?? '') : '';
+                        $escaped = $this->escapeForWordXml($value);
+
+                        // Replace first <w:t>…</w:t> with the escaped value.
+                        if (preg_match('#<w:t\b[^>]*>.*?</w:t>#s', $cell)) {
+                            return preg_replace(
+                                '#<w:t\b[^>]*>.*?</w:t>#s',
+                                '<w:t xml:space="preserve">' . $escaped . '</w:t>',
+                                $cell,
+                                1
+                            ) ?? $cell;
+                        }
+                        // No run at all — inject one before </w:tc>.
+                        return preg_replace(
+                            '#</w:tc>\s*$#s',
+                            '<w:p><w:r><w:t xml:space="preserve">' . $escaped . '</w:t></w:r></w:p></w:tc>',
+                            $cell,
+                            1
+                        ) ?? $cell;
+                    },
+                    $newRow
+                ) ?? $newRow;
+                $allRows .= $newRow;
+            }
+
+            if ($allRows === '') {
+                continue;
+            }
+
+            $xml = substr($xml, 0, $rowStart) . $allRows . substr($xml, $rowEnd);
+            $handled[$key] = true;
+        }
+
+        if ($xml !== $originalXml) {
+            $zip->addFromString('word/document.xml', $xml);
+        }
+        $zip->close();
+
+        return $handled;
     }
 
     /**
@@ -2761,6 +3426,224 @@ class TemplateXController extends AbstractController
             $zip->addFromString('word/document.xml', $xml);
         }
         $zip->close();
+    }
+
+    /**
+     * Phase D post-pass: walk every <w:tbl> in the generated DOCX and apply
+     * layout helpers based on (a) the original template XML and (b) per-table
+     * designer config.
+     *
+     *   - prevent_row_break  → <w:cantSplit/> on every <w:tr><w:trPr>…
+     *   - repeat_header      → <w:tblHeader/> on the first row's <w:trPr>
+     *   - keep_with_prev     → <w:keepNext/> on every paragraph inside the
+     *                          table cells, gluing the table to the paragraph
+     *                          above it across a page break.
+     *
+     * The key question is "which table is this?" — since designer config keys
+     * reference variable names (e.g. "stations"), we treat the mapping by
+     * scanning table XML for placeholders or their cloned #N counterparts.
+     * A table is associated with a designer entry if ANY of that entry's
+     * placeholder variants appears (or used to appear — we also peek at the
+     * post-cleaned template to be safe) inside the table.
+     *
+     * @param array<string, mixed>                $arrays       group => rows[]
+     * @param array<string, array<string, mixed>> $designerMap  varKey => designer
+     */
+    private function applyTableLayoutHelpers(string $docxPath, array $arrays, array $designerMap): void
+    {
+        if (empty($designerMap)) {
+            return;
+        }
+
+        // Gather designer entries that apply to tables (either explicit type=table
+        // or an array-of-objects variable that clones into a Word table). If any
+        // have non-empty design settings, we must rewrite.
+        $tableDesigners = [];
+        foreach ($designerMap as $key => $cfg) {
+            $type = $cfg['_type'] ?? 'text';
+            $isTableLike = $type === 'table' || (is_array($arrays[$key] ?? null) && !empty($arrays[$key]) && is_array($arrays[$key][0] ?? null));
+            if (!$isTableLike) {
+                continue;
+            }
+            // Drop designer-meta key so `array_filter` below reads cleanly.
+            $filtered = $cfg;
+            unset($filtered['_type']);
+            $tableDesigners[$key] = $filtered;
+        }
+        if (empty($tableDesigners)) {
+            return;
+        }
+
+        // Any designer entry with at least one non-default key triggers a rewrite.
+        $hasAnyConfig = false;
+        foreach ($tableDesigners as $cfg) {
+            if (!empty($cfg)) {
+                $hasAnyConfig = true;
+                break;
+            }
+        }
+        if (!$hasAnyConfig) {
+            return;
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            $this->logger->warning('Failed to open DOCX for table layout pass', ['path' => $docxPath]);
+            return;
+        }
+
+        $xml = $zip->getFromName('word/document.xml');
+        if ($xml === false) {
+            $zip->close();
+            return;
+        }
+
+        $originalXml = $xml;
+
+        // Walk every <w:tbl>…</w:tbl>. For each, check whether any of its
+        // cells still contain (or contained) variable placeholders for a
+        // configured designer key. Since placeholders have been substituted
+        // by now, we use a heuristic: if the table has more rows than a
+        // single-row fixed layout typically would (≥2) AND row content
+        // overlap is likely cloned, apply all configured designer settings.
+        // In practice, designer settings tend to be global toggles per table,
+        // so we simply apply the union of all designer settings to every
+        // table that is clearly an iterated one (≥2 body rows).
+        $merged = [];
+        foreach ($tableDesigners as $cfg) {
+            foreach ($cfg as $k => $v) {
+                $merged[$k] = $merged[$k] ?? $v;
+            }
+        }
+        if (empty($merged)) {
+            $zip->close();
+            return;
+        }
+
+        $pattern = '#<w:tbl>(?:(?!</w:tbl>).)*?</w:tbl>#s';
+        $newXml = preg_replace_callback(
+            $pattern,
+            function (array $m) use ($merged): string {
+                $tbl = $m[0];
+                $rowCount = substr_count($tbl, '</w:tr>');
+                if ($rowCount < 2) {
+                    // Don't rewrite single-row tables (e.g. the scalar-in-cell style).
+                    return $tbl;
+                }
+                return $this->applyHelpersToTableXml($tbl, $merged);
+            },
+            $xml
+        );
+
+        if ($newXml !== null && $newXml !== $originalXml) {
+            $zip->addFromString('word/document.xml', $newXml);
+        }
+        $zip->close();
+    }
+
+    /**
+     * Rewrite a single <w:tbl> block, injecting the requested layout helpers.
+     *
+     * @param array<string, mixed> $cfg  Merged designer directives
+     */
+    private function applyHelpersToTableXml(string $tblXml, array $cfg): string
+    {
+        $preventSplit = !empty($cfg['prevent_row_break']);
+        $repeatHeader = !empty($cfg['repeat_header']);
+        $keepWithPrev = !empty($cfg['keep_with_prev']);
+
+        if (!$preventSplit && !$repeatHeader && !$keepWithPrev) {
+            return $tblXml;
+        }
+
+        $rowIndex = 0;
+        $tblXml = preg_replace_callback(
+            '#<w:tr\b[^>]*>(?:(?!</w:tr>).)*?</w:tr>#s',
+            function (array $rm) use (&$rowIndex, $preventSplit, $repeatHeader): string {
+                $tr = $rm[0];
+                $isHeader = $rowIndex === 0;
+                $rowIndex++;
+
+                $directives = '';
+                if ($preventSplit && !str_contains($tr, '<w:cantSplit/>')) {
+                    $directives .= '<w:cantSplit/>';
+                }
+                if ($repeatHeader && $isHeader && !str_contains($tr, '<w:tblHeader/>')) {
+                    $directives .= '<w:tblHeader/>';
+                }
+                if ($directives === '') {
+                    return $tr;
+                }
+
+                if (preg_match('#<w:trPr\b[^>]*>#', $tr)) {
+                    return preg_replace('#(<w:trPr\b[^>]*>)#', '$1' . $directives, $tr, 1) ?? $tr;
+                }
+                return preg_replace(
+                    '#(<w:tr\b[^>]*>)#',
+                    '$1<w:trPr>' . $directives . '</w:trPr>',
+                    $tr,
+                    1
+                ) ?? $tr;
+            },
+            $tblXml
+        ) ?? $tblXml;
+
+        if ($keepWithPrev) {
+            $tblXml = preg_replace_callback(
+                '#<w:p\b[^>]*>(?:(?!</w:p>).)*?</w:p>#s',
+                fn (array $pm): string => $this->addKeepNext($pm[0]),
+                $tblXml
+            ) ?? $tblXml;
+        }
+
+        return $tblXml;
+    }
+
+    /**
+     * Auto-detect a numId that produces an ordered (decimal/roman/…) list
+     * from a template's numbering.xml. Counterpart to detectBulletNumId().
+     *
+     * Accepts any numFmt at level 0 that is NOT "bullet" and NOT "none" —
+     * Word templates commonly ship with "decimal", "lowerLetter" etc.
+     * Returns the first matching numId, or null.
+     */
+    private function detectOrderedNumId(string $numberingXml): ?int
+    {
+        if ($numberingXml === '') {
+            return null;
+        }
+
+        $orderedAbstractIds = [];
+        if (preg_match_all('#<w:abstractNum\b[^>]*?w:abstractNumId="(\d+)"[^>]*>(.*?)</w:abstractNum>#s', $numberingXml, $am)) {
+            foreach ($am[1] as $idx => $absId) {
+                $body = $am[2][$idx];
+                if (preg_match('#<w:lvl\b[^>]*?w:ilvl="0"[^>]*>(.*?)</w:lvl>#s', $body, $lvl)) {
+                    if (preg_match('#<w:numFmt\s+w:val="([^"]+)"\s*/?>#', $lvl[1], $fm)) {
+                        $fmt = strtolower($fm[1]);
+                        if ($fmt !== 'bullet' && $fmt !== 'none' && $fmt !== '') {
+                            $orderedAbstractIds[$absId] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (empty($orderedAbstractIds)) {
+            return null;
+        }
+
+        if (preg_match_all('#<w:num\b[^>]*?w:numId="(\d+)"[^>]*>(.*?)</w:num>#s', $numberingXml, $nm)) {
+            foreach ($nm[1] as $idx => $numId) {
+                $body = $nm[2][$idx];
+                if (preg_match('#<w:abstractNumId\s+w:val="(\d+)"\s*/>#', $body, $ref)) {
+                    if (isset($orderedAbstractIds[$ref[1]])) {
+                        return (int) $numId;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
