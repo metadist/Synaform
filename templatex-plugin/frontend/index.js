@@ -334,9 +334,15 @@ export default {
       for (const [k, v] of Object.entries(d?.field_values || {})) {
         values[k] = v;
       }
-      const extracted = (state.datasetVariables && state.datasetVariables.variables) || {};
+      const extracted =
+        (state.datasetVariables && state.datasetVariables.variables) || {};
       for (const [k, ent] of Object.entries(extracted)) {
-        if (ent && ent.value !== undefined && ent.value !== null && ent.value !== "") {
+        if (
+          ent &&
+          ent.value !== undefined &&
+          ent.value !== null &&
+          ent.value !== ""
+        ) {
           values[k] = ent.value;
         }
       }
@@ -348,10 +354,14 @@ export default {
             const cols = f.columns || [];
             const rows = [];
             let ri = 0;
-            while (form.querySelector(`[name="${f.key}__${ri}__${cols[0]?.key}"]`)) {
+            while (
+              form.querySelector(`[name="${f.key}__${ri}__${cols[0]?.key}"]`)
+            ) {
               const row = {};
               for (const col of cols) {
-                const cell = form.querySelector(`[name="${f.key}__${ri}__${col.key}"]`);
+                const cell = form.querySelector(
+                  `[name="${f.key}__${ri}__${col.key}"]`,
+                );
                 const raw = cell?.value ?? "";
                 if ((col.type || "text") === "list") {
                   row[col.key] = raw
@@ -426,7 +436,10 @@ export default {
         return raw || "";
       }
       if (field && field.type === "checkbox") {
-        const yes = raw === true || String(raw).toLowerCase() === "true" || String(raw).toLowerCase() === "ja";
+        const yes =
+          raw === true ||
+          String(raw).toLowerCase() === "true" ||
+          String(raw).toLowerCase() === "ja";
         return yes ? "Ja" : "Nein";
       }
       if (raw === undefined || raw === null) return "";
@@ -454,7 +467,9 @@ export default {
         if (!parent) return;
 
         // Remove any previous clones (they carry data-tx-row-clone=group).
-        parent.querySelectorAll(`tr[data-tx-row-clone="${grp}"]`).forEach((n) => n.remove());
+        parent
+          .querySelectorAll(`tr[data-tx-row-clone="${grp}"]`)
+          .forEach((n) => n.remove());
 
         const rows = values[grp];
         if (!Array.isArray(rows) || rows.length === 0) {
@@ -491,13 +506,12 @@ export default {
               const items = Array.isArray(raw)
                 ? raw
                 : typeof raw === "string"
-                  ? raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+                  ? raw
+                      .split(/\r?\n/)
+                      .map((s) => s.trim())
+                      .filter(Boolean)
                   : [];
-              span.classList.remove(
-                "tx-empty-val",
-                "tx-cb-on",
-                "tx-cb-off",
-              );
+              span.classList.remove("tx-empty-val", "tx-cb-on", "tx-cb-off");
               if (items.length === 0) {
                 span.textContent = "(—)";
                 span.classList.add("tx-empty-val");
@@ -510,12 +524,10 @@ export default {
               return;
             }
 
-            const val = resolvePlaceholderValue(
-              span.dataset.txKey,
-              values,
-              c,
-              { group: grp, row },
-            );
+            const val = resolvePlaceholderValue(span.dataset.txKey, values, c, {
+              group: grp,
+              row,
+            });
             fillPlaceholderSpan(span, val);
           });
           parent.insertBefore(clone, insertAfter.nextSibling);
@@ -546,7 +558,12 @@ export default {
 
     function fillImagePlaceholderSpan(span, meta, field, rawKey) {
       const d = state.selectedDataset;
-      span.classList.remove("tx-filled", "tx-empty-val", "tx-cb-on", "tx-cb-off");
+      span.classList.remove(
+        "tx-filled",
+        "tx-empty-val",
+        "tx-cb-on",
+        "tx-cb-off",
+      );
       if (!meta || typeof meta !== "object" || !meta.mime || !d) {
         span.textContent = "{{" + rawKey + "}}";
         span.classList.add("tx-empty-val");
@@ -562,10 +579,16 @@ export default {
     }
 
     function fillPlaceholderSpan(span, val, opts) {
-      const rawKey = (opts && opts.rawKey) || span.dataset.txRaw || span.dataset.txKey;
+      const rawKey =
+        (opts && opts.rawKey) || span.dataset.txRaw || span.dataset.txKey;
       const isCb = opts && opts.isCheckbox;
 
-      span.classList.remove("tx-filled", "tx-empty-val", "tx-cb-on", "tx-cb-off");
+      span.classList.remove(
+        "tx-filled",
+        "tx-empty-val",
+        "tx-cb-on",
+        "tx-cb-off",
+      );
 
       if (val === undefined || val === null || val === "") {
         span.textContent = "{{" + rawKey + "}}";
@@ -611,11 +634,17 @@ export default {
       const force = !!(opts && opts.force);
 
       // De-dupe: if a fetch for the same template is already in flight, skip.
-      if (state.previewLoading && state.previewTemplateId === templateId) return;
+      if (state.previewLoading && state.previewTemplateId === templateId)
+        return;
 
       // Don't loop on a known failure for this template unless the caller explicitly
       // asked to retry (refresh button, template change).
-      if (!force && state.previewError && state.previewTemplateId === templateId) return;
+      if (
+        !force &&
+        state.previewError &&
+        state.previewTemplateId === templateId
+      )
+        return;
 
       state.previewTemplateId = templateId;
       state.previewLoading = true;
@@ -1395,7 +1424,9 @@ export default {
         "table",
         "image",
       ];
-      const showDesigner = ["list", "table", "checkbox", "image"].includes(fd.type);
+      const showDesigner = ["list", "table", "checkbox", "image"].includes(
+        fd.type,
+      );
       const designerOpen = state.expandedDesignerIdx === idx;
       return `<div class="tx-row p-3 space-y-2" data-field-idx="${idx}">
         <div class="flex items-start gap-2">
@@ -1590,7 +1621,7 @@ export default {
       const pickerOptions = templates
         .map(
           (t) =>
-            `<option value="${escHtml(t.id)}"${state.variablesTplImportTemplateId === t.id ? " selected" : ""}>${escHtml(t.name || t.id)} \u2014 ${(t.placeholder_count ?? (t.placeholders?.length || 0))} ${T("templates.placeholder_count")}</option>`,
+            `<option value="${escHtml(t.id)}"${state.variablesTplImportTemplateId === t.id ? " selected" : ""}>${escHtml(t.name || t.id)} \u2014 ${t.placeholder_count ?? (t.placeholders?.length || 0)} ${T("templates.placeholder_count")}</option>`,
         )
         .join("");
 
@@ -2123,7 +2154,8 @@ export default {
 
     function renderDatasetPreviewPanel(c, d, templates) {
       const currentId =
-        state.previewTemplateId && templates.some((t) => t.id === state.previewTemplateId)
+        state.previewTemplateId &&
+        templates.some((t) => t.id === state.previewTemplateId)
           ? state.previewTemplateId
           : templates[0].id;
 
@@ -2332,7 +2364,12 @@ export default {
                   if (colType === "textarea") {
                     return `<td class="py-1 px-1" style="vertical-align:top"><textarea name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" rows="2" class="tx-textarea text-xs" style="padding:.25rem .375rem;font-size:.75rem">${escHtml(String(rawVal ?? ""))}</textarea></td>`;
                   }
-                  const inputType = colType === "number" ? "number" : colType === "date" ? "date" : "text";
+                  const inputType =
+                    colType === "number"
+                      ? "number"
+                      : colType === "date"
+                        ? "date"
+                        : "text";
                   return `<td class="py-1 px-1"><input type="${inputType}" name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" value="${escHtml(String(rawVal ?? ""))}" class="tx-input text-xs" style="padding:.25rem .375rem" /></td>`;
                 })
                 .join("");
@@ -3115,7 +3152,13 @@ export default {
           }
           if (fields[idx].type === "table") {
             const cols = fields[idx].columns || [];
-            const validColTypes = ["text", "textarea", "list", "date", "number"];
+            const validColTypes = [
+              "text",
+              "textarea",
+              "list",
+              "date",
+              "number",
+            ];
             for (let ci = 0; ci < cols.length; ci++) {
               if (fd.has(`fc_${idx}_ck_${ci}`)) {
                 cols[ci].key =
@@ -3125,7 +3168,9 @@ export default {
                   fd.get(`fc_${idx}_cl_${ci}`)?.toString().trim() ||
                   cols[ci].label;
                 const ct = fd.get(`fc_${idx}_ct_${ci}`)?.toString();
-                cols[ci].type = validColTypes.includes(ct) ? ct : (cols[ci].type || "text");
+                cols[ci].type = validColTypes.includes(ct)
+                  ? ct
+                  : cols[ci].type || "text";
               }
             }
           }
@@ -3397,17 +3442,16 @@ export default {
         render();
       });
 
-      el.querySelectorAll(
-        '[data-action="variables-tplimport-close"]',
-      ).forEach((btn) =>
-        btn.addEventListener("click", () => {
-          state.variablesTplImportOpen = false;
-          state.variablesTplImportTemplateId = null;
-          state.variablesTplImportResult = null;
-          state.variablesTplImportError = null;
-          state.variablesTplImportSelection = {};
-          render();
-        }),
+      el.querySelectorAll('[data-action="variables-tplimport-close"]').forEach(
+        (btn) =>
+          btn.addEventListener("click", () => {
+            state.variablesTplImportOpen = false;
+            state.variablesTplImportTemplateId = null;
+            state.variablesTplImportResult = null;
+            state.variablesTplImportError = null;
+            state.variablesTplImportSelection = {};
+            render();
+          }),
       );
 
       el.querySelector(
@@ -3440,14 +3484,13 @@ export default {
         render();
       });
 
-      el.querySelectorAll(
-        '[data-action="variables-tplimport-toggle"]',
-      ).forEach((cb) =>
-        cb.addEventListener("change", () => {
-          const idx = parseInt(cb.dataset.idx);
-          state.variablesTplImportSelection[idx] = !!cb.checked;
-          render();
-        }),
+      el.querySelectorAll('[data-action="variables-tplimport-toggle"]').forEach(
+        (cb) =>
+          cb.addEventListener("change", () => {
+            const idx = parseInt(cb.dataset.idx);
+            state.variablesTplImportSelection[idx] = !!cb.checked;
+            render();
+          }),
       );
 
       el.querySelector(
@@ -4307,7 +4350,9 @@ export default {
       panel
         .querySelector('[data-action="preview-refresh"]')
         ?.addEventListener("click", () => {
-          loadPreviewSkeleton(state.previewTemplateId || targetId, { force: true });
+          loadPreviewSkeleton(state.previewTemplateId || targetId, {
+            force: true,
+          });
         });
 
       // Hide
@@ -4360,7 +4405,10 @@ export default {
         const form = el.querySelector("#tx-entry-data-form");
         if (form) {
           // Synthesise a submit (the existing handler writes field_values).
-          const submit = new Event("submit", { cancelable: true, bubbles: true });
+          const submit = new Event("submit", {
+            cancelable: true,
+            bubbles: true,
+          });
           form.dispatchEvent(submit);
           // Give the save + render a tick to complete
           await new Promise((r) => setTimeout(r, 150));
