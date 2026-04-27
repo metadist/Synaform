@@ -39,11 +39,17 @@
     {"path": "/templates/{templateId}", "method": "GET", "description": "Get template with placeholders"},
     {"path": "/templates/{templateId}", "method": "DELETE", "description": "Delete template"},
     {"path": "/templates/{templateId}/placeholders", "method": "GET", "description": "List detected placeholders"},
+    {"path": "/templates/{templateId}/variable-suggestions", "method": "GET", "description": "Turn placeholders into ready-to-apply form fields (deterministic)"},
+    {"path": "/templates/{templateId}/preview-html", "method": "GET", "description": "Cached HTML preview skeleton used by the live-preview panel"},
     {"path": "/templates/{templateId}/download", "method": "GET", "description": "Download original template"},
     {"path": "/candidates/{candidateId}/generate/{templateId}", "method": "POST", "description": "Generate filled document"},
     {"path": "/candidates/{candidateId}/documents", "method": "GET", "description": "List generated documents"},
     {"path": "/candidates/{candidateId}/documents/{documentId}/download", "method": "GET", "description": "Download generated DOCX"},
-    {"path": "/candidates/{candidateId}/documents/{documentId}", "method": "DELETE", "description": "Delete generated document"}
+    {"path": "/candidates/{candidateId}/documents/{documentId}/pdf", "method": "GET", "description": "Stream PDF rendering (requires libreoffice on backend)"},
+    {"path": "/candidates/{candidateId}/documents/{documentId}", "method": "DELETE", "description": "Delete generated document"},
+    {"path": "/candidates/{candidateId}/image/{key}", "method": "POST", "description": "Upload an image for an image-typed variable"},
+    {"path": "/candidates/{candidateId}/image/{key}", "method": "GET", "description": "Stream the stored image for a variable (thumbnail + preview)"},
+    {"path": "/candidates/{candidateId}/image/{key}", "method": "DELETE", "description": "Remove the stored image for a variable"}
   ],
   "migrations": [
     "001_setup.sql"

@@ -57,6 +57,18 @@ export default {
       urlAdding: false,
       urlAddError: null,
 
+      // Live preview
+      previewVisible: true,
+      previewTemplateId: null,
+      previewSkeleton: null,
+      previewLoading: false,
+      previewError: null,
+      previewDebounceTimer: null,
+      previewPdfUrl: null,
+      previewPdfLoading: false,
+      previewPdfError: null,
+      previewPdfUnavailable: false,
+
       // Variables editing state
       variablesDraft: null,
       variablesDirty: false,
@@ -66,6 +78,14 @@ export default {
       variablesImportError: null,
       variablesImportText: "",
       expandedDesignerIdx: null,
+
+      // Import from Target Template state
+      variablesTplImportOpen: false,
+      variablesTplImportTemplateId: null,
+      variablesTplImportLoading: false,
+      variablesTplImportError: null,
+      variablesTplImportResult: null,
+      variablesTplImportSelection: {},
 
       // Template management state
       selectedTemplateDetail: null,
@@ -300,6 +320,329 @@ export default {
     }
 
     // =========================================================================
+    // Live preview (Phase 4b)
+    // =========================================================================
+
+    /**
+     * Collect the current value map from the rendered dataset form PLUS the
+     * baseline from saved field_values and the last AI-extracted variables.
+     * Priority: form input > AI-extracted value > saved field_values.
+     */
+    function buildPreviewValueMap(c, d) {
+      const values = {};
+
+      for (const [k, v] of Object.entries(d?.field_values || {})) {
+        values[k] = v;
+      }
+      const extracted = (state.datasetVariables && state.datasetVariables.variables) || {};
+      for (const [k, ent] of Object.entries(extracted)) {
+        if (ent && ent.value !== undefined && ent.value !== null && ent.value !== "") {
+          values[k] = ent.value;
+        }
+      }
+
+      const form = el?.querySelector("#tx-entry-data-form");
+      if (form) {
+        for (const f of c.fields || []) {
+          if (f.type === "table") {
+            const cols = f.columns || [];
+            const rows = [];
+            let ri = 0;
+            while (form.querySelector(`[name="${f.key}__${ri}__${cols[0]?.key}"]`)) {
+              const row = {};
+              for (const col of cols) {
+                const cell = form.querySelector(`[name="${f.key}__${ri}__${col.key}"]`);
+                const raw = cell?.value ?? "";
+                if ((col.type || "text") === "list") {
+                  row[col.key] = raw
+                    .split(/\r?\n/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                } else {
+                  row[col.key] = raw;
+                }
+              }
+              rows.push(row);
+              ri++;
+            }
+            values[f.key] = rows;
+            continue;
+          }
+          const input = form.querySelector(`[name="${f.key}"]`);
+          if (!input) continue;
+          if (f.type === "checkbox") values[f.key] = input.checked;
+          else if (f.type === "list")
+            values[f.key] = input.value
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean);
+          else values[f.key] = input.value;
+        }
+      }
+
+      return values;
+    }
+
+    /**
+     * Resolve a single template placeholder key against the value map.
+     * Understands: lists (joined by new lines), checkboxes (as glyphs for
+     * checkb.X.yes / checkb.X.no, as "Ja"/"Nein" for plain checkbox keys),
+     * and the {group}.{col} two-segment pattern used in row-template cells.
+     */
+    function resolvePlaceholderValue(key, values, c, rowCtx) {
+      if (rowCtx && rowCtx.group) {
+        const parts = key.split(".");
+        if (parts.length === 2 && parts[0] === rowCtx.group && rowCtx.row) {
+          const v = rowCtx.row[parts[1]];
+          return v === undefined || v === null ? "" : String(v);
+        }
+      }
+
+      // checkb.KEY.yes / checkb.KEY.no pair
+      const mYes = /^checkb\.(.+)\.yes$/.exec(key);
+      const mNo = /^checkb\.(.+)\.no$/.exec(key);
+      if (mYes || mNo) {
+        const base = mYes ? mYes[1] : mNo[1];
+        const raw = values[base];
+        const yes =
+          raw === true ||
+          String(raw).toLowerCase() === "true" ||
+          String(raw).toLowerCase() === "ja" ||
+          String(raw).toLowerCase() === "yes" ||
+          raw === "on";
+        const field = (c.fields || []).find((f) => f.key === base);
+        const designer = (field && field.designer) || {};
+        const on = designer.checked_glyph || "\u2612";
+        const off = designer.unchecked_glyph || "\u2610";
+        if (mYes) return yes ? on : off;
+        return !yes ? on : off;
+      }
+
+      const field = (c.fields || []).find((f) => f.key === key);
+      const raw = values[key];
+
+      if (field && field.type === "list") {
+        if (Array.isArray(raw)) return raw.filter(Boolean).join("\n");
+        return raw || "";
+      }
+      if (field && field.type === "checkbox") {
+        const yes = raw === true || String(raw).toLowerCase() === "true" || String(raw).toLowerCase() === "ja";
+        return yes ? "Ja" : "Nein";
+      }
+      if (raw === undefined || raw === null) return "";
+      if (Array.isArray(raw)) return raw.join(", ");
+      if (typeof raw === "object") return JSON.stringify(raw);
+      return String(raw);
+    }
+
+    /**
+     * Rewrite the HTML skeleton in #tx-preview-root to reflect the current
+     * value map. Runs entirely on the client — no server call.
+     *
+     * Repeating rows (data-tx-row-template="X") are cloned once per dataset
+     * row, with each clone's [data-tx-key] filled from that row's column
+     * values. The original template row is hidden; if there are no rows yet,
+     * the original stays visible so the user sees placeholders.
+     */
+    function applyPreviewValues(rootEl, c, values) {
+      if (!rootEl) return;
+
+      // Pass 1: row-template expansion
+      rootEl.querySelectorAll("tr[data-tx-row-template]").forEach((tmpl) => {
+        const grp = tmpl.dataset.txRowTemplate;
+        const parent = tmpl.parentElement;
+        if (!parent) return;
+
+        // Remove any previous clones (they carry data-tx-row-clone=group).
+        parent.querySelectorAll(`tr[data-tx-row-clone="${grp}"]`).forEach((n) => n.remove());
+
+        const rows = values[grp];
+        if (!Array.isArray(rows) || rows.length === 0) {
+          tmpl.style.display = "";
+          return;
+        }
+        tmpl.style.display = "none";
+
+        // Resolve the table variable's columns, so we can tell which cell is a
+        // list-typed column and needs to render as bullets inside the preview.
+        const tableField = (c.fields || []).find(
+          (f) => f.type === "table" && f.key === grp,
+        );
+        const columnTypeByKey = {};
+        for (const col of tableField?.columns || []) {
+          columnTypeByKey[col.key] = col.type || "text";
+        }
+
+        let insertAfter = tmpl;
+        rows.forEach((row) => {
+          const clone = tmpl.cloneNode(true);
+          clone.removeAttribute("data-tx-row-template");
+          clone.setAttribute("data-tx-row-clone", grp);
+          clone.style.display = "";
+          clone.querySelectorAll(".tx-ph[data-tx-key]").forEach((span) => {
+            const parts = span.dataset.txKey.split(".");
+            const colKey = parts.length === 2 ? parts[1] : null;
+            const colType = colKey ? columnTypeByKey[colKey] : null;
+
+            // List-typed cells render as a proper <ul> so the preview matches
+            // the final .docx (one bullet per item).
+            if (colType === "list" && colKey) {
+              const raw = row[colKey];
+              const items = Array.isArray(raw)
+                ? raw
+                : typeof raw === "string"
+                  ? raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+                  : [];
+              span.classList.remove(
+                "tx-empty-val",
+                "tx-cb-on",
+                "tx-cb-off",
+              );
+              if (items.length === 0) {
+                span.textContent = "(—)";
+                span.classList.add("tx-empty-val");
+                return;
+              }
+              span.classList.add("tx-filled");
+              span.innerHTML = `<ul class="tx-preview-bullets">${items
+                .map((it) => `<li>${escHtml(String(it))}</li>`)
+                .join("")}</ul>`;
+              return;
+            }
+
+            const val = resolvePlaceholderValue(
+              span.dataset.txKey,
+              values,
+              c,
+              { group: grp, row },
+            );
+            fillPlaceholderSpan(span, val);
+          });
+          parent.insertBefore(clone, insertAfter.nextSibling);
+          insertAfter = clone;
+        });
+      });
+
+      // Pass 2: every non-row placeholder not inside a template/clone
+      rootEl.querySelectorAll(".tx-ph[data-tx-key]").forEach((span) => {
+        if (span.closest("tr[data-tx-row-template]")) return;
+        if (span.closest("tr[data-tx-row-clone]")) return;
+        const raw = span.dataset.txRaw || span.dataset.txKey;
+        const key = span.dataset.txKey;
+        const field = (c.fields || []).find((f) => f.key === key);
+
+        // Image-typed placeholders get an actual <img> tag so the preview looks
+        // like the final document.
+        if (field && field.type === "image") {
+          fillImagePlaceholderSpan(span, values[key], field, raw);
+          return;
+        }
+
+        const isCb = /^checkb\./.test(raw);
+        const val = resolvePlaceholderValue(key, values, c, null);
+        fillPlaceholderSpan(span, val, { rawKey: raw, isCheckbox: isCb });
+      });
+    }
+
+    function fillImagePlaceholderSpan(span, meta, field, rawKey) {
+      const d = state.selectedDataset;
+      span.classList.remove("tx-filled", "tx-empty-val", "tx-cb-on", "tx-cb-off");
+      if (!meta || typeof meta !== "object" || !meta.mime || !d) {
+        span.textContent = "{{" + rawKey + "}}";
+        span.classList.add("tx-empty-val");
+        span.title = T("preview.missing_value");
+        return;
+      }
+      const url = `${BASE}/candidates/${d.id}/image/${encodeURIComponent(field.key)}?v=${encodeURIComponent(meta.uploaded_at || "")}`;
+      const w = (field.designer && field.designer.width) || 140;
+      const h = (field.designer && field.designer.height) || 180;
+      span.innerHTML = `<img src="${escHtml(url)}" alt="${escHtml(field.label || field.key)}" style="width:${w}px;height:${h}px;object-fit:cover;display:inline-block" />`;
+      span.classList.add("tx-filled");
+      span.title = meta.original_name || "";
+    }
+
+    function fillPlaceholderSpan(span, val, opts) {
+      const rawKey = (opts && opts.rawKey) || span.dataset.txRaw || span.dataset.txKey;
+      const isCb = opts && opts.isCheckbox;
+
+      span.classList.remove("tx-filled", "tx-empty-val", "tx-cb-on", "tx-cb-off");
+
+      if (val === undefined || val === null || val === "") {
+        span.textContent = "{{" + rawKey + "}}";
+        span.classList.add("tx-empty-val");
+        span.title = T("preview.missing_value");
+        return;
+      }
+
+      span.textContent = val;
+      span.title = "";
+      if (isCb) {
+        // checked glyph vs unchecked
+        if (val === "\u2612" || /^(x|y|yes|true|ja)$/i.test(val)) {
+          span.classList.add("tx-cb-on");
+        } else {
+          span.classList.add("tx-cb-off");
+        }
+      } else {
+        span.classList.add("tx-filled");
+      }
+    }
+
+    function updatePreviewNow() {
+      if (!state.selectedDataset) return;
+      const c = collectionById(state.collectionId);
+      if (!c) return;
+      const rootEl = el?.querySelector("#tx-preview-root");
+      if (!rootEl) return;
+      const values = buildPreviewValueMap(c, state.selectedDataset);
+      applyPreviewValues(rootEl, c, values);
+    }
+
+    function schedulePreviewUpdate() {
+      if (state.previewDebounceTimer) clearTimeout(state.previewDebounceTimer);
+      state.previewDebounceTimer = setTimeout(() => {
+        state.previewDebounceTimer = null;
+        updatePreviewNow();
+      }, 150);
+    }
+
+    async function loadPreviewSkeleton(templateId, opts) {
+      if (!templateId) return;
+      const force = !!(opts && opts.force);
+
+      // De-dupe: if a fetch for the same template is already in flight, skip.
+      if (state.previewLoading && state.previewTemplateId === templateId) return;
+
+      // Don't loop on a known failure for this template unless the caller explicitly
+      // asked to retry (refresh button, template change).
+      if (!force && state.previewError && state.previewTemplateId === templateId) return;
+
+      state.previewTemplateId = templateId;
+      state.previewLoading = true;
+      state.previewError = null;
+      state.previewSkeleton = null;
+      render();
+      try {
+        await refreshAccessToken();
+        const res = await api(
+          `/templates/${encodeURIComponent(templateId)}/preview-html`,
+        );
+        state.previewSkeleton = {
+          html: res.html || "",
+          row_groups: res.row_groups || [],
+          placeholders: res.placeholders || [],
+          schema: res.schema_version || 0,
+        };
+      } catch (err) {
+        state.previewError = err.message || String(err);
+      }
+      state.previewLoading = false;
+      render();
+      // After render, prime the preview with current values
+      setTimeout(updatePreviewNow, 0);
+    }
+
+    // =========================================================================
     // Router
     // =========================================================================
 
@@ -510,6 +853,34 @@ export default {
       .tx-collection-card:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
       .tx-callout { padding: .75rem 1rem; border-radius: .5rem; background: var(--brand-alpha-light); color: var(--txt-primary); font-size: .8125rem; }
       .tx-danger-zone { border: 1px solid color-mix(in srgb, var(--status-error) 40%, transparent); border-radius: .75rem; padding: 1.25rem; background: color-mix(in srgb, var(--status-error) 6%, var(--bg-card)); }
+
+      /* Live preview (Phase 4b) */
+      .tx-split { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+      @media (min-width: 1100px) { .tx-split.has-preview { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; } }
+      .tx-preview-panel { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: hidden; display: flex; flex-direction: column; }
+      .tx-preview-panel .tx-preview-toolbar { display: flex; align-items: center; gap: .5rem; padding: .5rem .75rem; border-bottom: 1px solid var(--divider); background: var(--bg-card); }
+      .tx-preview-panel .tx-preview-viewport { flex: 1; overflow: auto; padding: 1.25rem; background: #ffffff; color: #1a1a1a; border-radius: 0 0 .75rem .75rem; }
+      .tx-preview { font-family: "Calibri", "Helvetica Neue", Arial, sans-serif; font-size: 11pt; line-height: 1.35; max-width: 780px; margin: 0 auto; color: #1a1a1a; }
+      .tx-preview h1 { font-size: 18pt; font-weight: 700; margin: .6em 0 .3em; color: #1a1a1a; }
+      .tx-preview h2 { font-size: 14pt; font-weight: 700; margin: .6em 0 .3em; }
+      .tx-preview h3 { font-size: 12pt; font-weight: 700; margin: .6em 0 .3em; }
+      .tx-preview p { margin: 0 0 .4em; }
+      .tx-preview p.tx-empty { margin: .2em 0; min-height: 1em; }
+      .tx-preview p.tx-li { margin-left: 1.25em; position: relative; }
+      .tx-preview p.tx-li::before { content: "\\2022"; position: absolute; left: -1em; color: #555; }
+      .tx-preview table.tx-tbl { border-collapse: collapse; width: 100%; margin: .3em 0 .6em; }
+      .tx-preview table.tx-tbl td { border: 1px solid #e0e0e0; padding: .25em .5em; vertical-align: top; }
+      .tx-preview .tx-b { font-weight: 700; }
+      .tx-preview .tx-i { font-style: italic; }
+      .tx-preview .tx-u { text-decoration: underline; }
+      .tx-preview .tx-ph { background: rgba(255, 221, 89, .45); padding: 0 .1em; border-radius: 2px; transition: background .15s; }
+      .tx-preview .tx-ph.tx-filled { background: rgba(77, 200, 142, .18); }
+      .tx-preview .tx-ph.tx-empty-val { background: rgba(220, 53, 69, .12); color: #a22; font-style: italic; }
+      .tx-preview .tx-ph.tx-cb-on { background: transparent; color: #1a1a1a; font-weight: 700; }
+      .tx-preview .tx-ph.tx-cb-off { background: transparent; color: #777; }
+      .tx-preview ul.tx-preview-bullets { list-style: disc; margin: 0; padding-left: 1.1em; }
+      .tx-preview ul.tx-preview-bullets li { margin: 0 0 .15em; }
+      .tx-preview-missing { padding: 2rem; text-align: center; color: var(--txt-secondary); font-size: .875rem; }
     `;
 
     // =========================================================================
@@ -965,7 +1336,14 @@ export default {
     function renderVariablesTab(c) {
       const fields = state.variablesDraft || c.fields || [];
 
+      if (state.variablesTplImportOpen) return renderVariablesTplImport(c);
       if (state.variablesImportOpen) return renderVariablesImport(c);
+
+      const attachedTemplates = collectionTemplates(c);
+      const hasTemplates = attachedTemplates.length > 0;
+      const tplTitle = hasTemplates
+        ? T("variables.import_from_template_hint")
+        : T("variables.import_no_templates");
 
       const header = `<div class="flex items-start justify-between gap-3 flex-wrap">
         <div>
@@ -976,6 +1354,7 @@ export default {
           <p class="text-sm tx-secondary" style="max-width:640px">${T("variables.subtitle")}</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
+          <button data-action="variables-import-template" class="tx-btn tx-btn-sm tx-btn-ghost" title="${escHtml(tplTitle)}"${hasTemplates ? "" : " disabled"}>${ICONS.doc} ${T("variables.import_from_template")}</button>
           <button data-action="variables-import" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("variables.import_hint")}">${ICONS.upload} ${T("variables.import_from_text")}</button>
           <button data-action="add-variable" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("variables.new_field")}</button>
         </div>
@@ -1014,8 +1393,9 @@ export default {
         "number",
         "checkbox",
         "table",
+        "image",
       ];
-      const showDesigner = ["list", "table", "checkbox"].includes(fd.type);
+      const showDesigner = ["list", "table", "checkbox", "image"].includes(fd.type);
       const designerOpen = state.expandedDesignerIdx === idx;
       return `<div class="tx-row p-3 space-y-2" data-field-idx="${idx}">
         <div class="flex items-start gap-2">
@@ -1119,25 +1499,53 @@ export default {
           </div>
         </div>`;
       }
+      if (fd.type === "image") {
+        return `<div class="mt-2 p-3 rounded space-y-2" style="background:var(--bg-app)">
+          <p class="text-xs tx-secondary">${T("variables.designer_image_hint")}</p>
+          <div class="grid grid-cols-3 gap-2 items-center">
+            <div>
+              <label class="tx-label">${T("variables.designer_image_width")}</label>
+              <input type="number" name="fd_${idx}_width" value="${escHtml(String(d.width || 140))}" min="16" max="1600" class="tx-input" />
+            </div>
+            <div>
+              <label class="tx-label">${T("variables.designer_image_height")}</label>
+              <input type="number" name="fd_${idx}_height" value="${escHtml(String(d.height || 180))}" min="16" max="2000" class="tx-input" />
+            </div>
+            <label class="flex items-center gap-1.5 text-sm mt-5">
+              <input type="checkbox" name="fd_${idx}_preserve_ratio" ${d.preserve_ratio ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+              <span>${T("variables.designer_image_preserve_ratio")}</span>
+            </label>
+          </div>
+        </div>`;
+      }
       return "";
     }
 
     function renderVariableColumnEditor(fieldIdx, columns) {
+      const colTypes = ["text", "textarea", "list", "date", "number"];
       const colRows = columns
-        .map(
-          (col, ci) =>
-            `<div class="flex items-center gap-2" data-col-idx="${ci}">
-              <input name="fc_${fieldIdx}_ck_${ci}" value="${escHtml(col.key || "")}" placeholder="${T("variables.column_key")}" class="tx-input text-xs" style="flex:1" />
-              <input name="fc_${fieldIdx}_cl_${ci}" value="${escHtml(col.label || "")}" placeholder="${T("variables.column_label")}" class="tx-input text-xs" style="flex:1" />
-              <button type="button" data-action="var-col-remove" data-field-idx="${fieldIdx}" data-col-idx="${ci}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button>
-            </div>`,
-        )
+        .map((col, ci) => {
+          const curType = col.type || "text";
+          const typeOpts = colTypes
+            .map(
+              (ct) =>
+                `<option value="${ct}"${ct === curType ? " selected" : ""}>${T(`variables.col_type_${ct}`, ct)}</option>`,
+            )
+            .join("");
+          return `<div class="flex items-center gap-2" data-col-idx="${ci}">
+            <input name="fc_${fieldIdx}_ck_${ci}" value="${escHtml(col.key || "")}" placeholder="${T("variables.column_key")}" class="tx-input text-xs" style="flex:1" />
+            <input name="fc_${fieldIdx}_cl_${ci}" value="${escHtml(col.label || "")}" placeholder="${T("variables.column_label")}" class="tx-input text-xs" style="flex:1" />
+            <select name="fc_${fieldIdx}_ct_${ci}" class="tx-select text-xs" style="width:7.5rem">${typeOpts}</select>
+            <button type="button" data-action="var-col-remove" data-field-idx="${fieldIdx}" data-col-idx="${ci}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button>
+          </div>`;
+        })
         .join("");
       return `<div class="ml-0 p-2 rounded" style="background:var(--bg-app);border:1px dashed var(--divider)">
         <div class="flex items-center justify-between mb-1.5">
           <span class="text-xs font-medium tx-secondary">${T("variables.table_columns")}</span>
           <button type="button" data-action="var-col-add" data-field-idx="${fieldIdx}" class="tx-link text-xs flex items-center gap-1">${ICONS.plus} ${T("variables.add_column")}</button>
         </div>
+        <p class="text-xs tx-secondary mb-1">${T("variables.column_type_hint")}</p>
         <div class="space-y-1.5">${colRows}</div>
       </div>`;
     }
@@ -1165,6 +1573,129 @@ export default {
         </div>
         ${hasPreview ? renderVariablesImportPreview(parsed) : ""}
       </div>`;
+    }
+
+    function renderVariablesTplImport(c) {
+      const templates = collectionTemplates(c);
+      if (templates.length === 0) {
+        return `<div class="space-y-4">
+          <button data-action="variables-tplimport-close" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T("app.back")}</button>
+          <h3 class="text-lg font-semibold">${T("variables.import_dialog_title")}</h3>
+          <div class="tx-card p-5">
+            <p class="text-sm">${T("variables.import_no_templates")}</p>
+          </div>
+        </div>`;
+      }
+
+      const pickerOptions = templates
+        .map(
+          (t) =>
+            `<option value="${escHtml(t.id)}"${state.variablesTplImportTemplateId === t.id ? " selected" : ""}>${escHtml(t.name || t.id)} \u2014 ${(t.placeholder_count ?? (t.placeholders?.length || 0))} ${T("templates.placeholder_count")}</option>`,
+        )
+        .join("");
+
+      const loading = state.variablesTplImportLoading;
+      const error = state.variablesTplImportError;
+      const result = state.variablesTplImportResult;
+
+      let body = "";
+      if (loading) {
+        body = `<div class="tx-card p-5 text-center">
+          <span class="animate-spin inline-block w-5 h-5 border-2 border-current border-t-transparent rounded-full"></span>
+          <p class="text-sm tx-secondary mt-2">${T("app.loading")}</p>
+        </div>`;
+      } else if (error) {
+        body = `<div class="tx-card p-5"><p class="text-sm" style="color:var(--status-error)">${escHtml(error)}</p></div>`;
+      } else if (result) {
+        body = renderVariablesTplImportPreview(result);
+      }
+
+      return `<div class="space-y-4">
+        <button data-action="variables-tplimport-close" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T("app.back")}</button>
+        <h3 class="text-lg font-semibold">${T("variables.import_dialog_title")}</h3>
+        <p class="text-sm tx-secondary" style="max-width:640px">${T("variables.import_dialog_subtitle")}</p>
+        <div class="tx-card p-5 space-y-3">
+          <label class="tx-label">${T("variables.import_pick_template")}</label>
+          <div class="flex items-center gap-2 flex-wrap">
+            <select id="tx-tplimport-picker" class="tx-select" style="max-width:360px">${pickerOptions}</select>
+            <button data-action="variables-tplimport-load" class="tx-btn tx-btn-sm"${loading ? " disabled" : ""}>${ICONS.sparkle} ${T("variables.detect_placeholders")}</button>
+          </div>
+          <p class="text-xs tx-secondary">${T("variables.import_pick_template_hint")}</p>
+        </div>
+        ${body}
+      </div>`;
+    }
+
+    function renderVariablesTplImportPreview(result) {
+      const suggestions = result.suggestions || [];
+      const sel = state.variablesTplImportSelection || {};
+      const summary = result.summary || {};
+
+      const summaryText = T("variables.import_summary")
+        .replace("{total}", result.placeholder_count ?? 0)
+        .replace("{tables}", summary.tables || 0)
+        .replace("{checkboxes}", summary.checkboxes || 0)
+        .replace("{lists}", summary.lists || 0)
+        .replace("{texts}", summary.texts || 0)
+        .replace("{duplicate}", summary.duplicate || 0);
+
+      const rows = suggestions
+        .map((f, i) => {
+          const isDup = f._status === "duplicate";
+          const checked = sel[i] === true;
+          const extras = describeFieldExtras(f);
+          return `<tr class="tx-divider border-t${isDup ? " opacity-60" : ""}">
+            <td class="py-2 px-3"><input type="checkbox" data-action="variables-tplimport-toggle" data-idx="${i}" ${checked ? "checked" : ""} ${isDup ? "" : ""} class="h-4 w-4" style="accent-color:var(--brand)" /></td>
+            <td class="py-2 px-3 font-mono text-xs">${escHtml(f.key)}${isDup ? ` <span class="tx-secondary text-xs">(${T("variables.import_duplicate_key")})</span>` : ""}</td>
+            <td class="py-2 px-3 text-sm">${escHtml(f.label || "")}</td>
+            <td class="py-2 px-3 text-xs">${escHtml(T(`variables.type_${f.type}`, f.type))}</td>
+            <td class="py-2 px-3 text-xs tx-secondary">${escHtml(extras)}</td>
+          </tr>`;
+        })
+        .join("");
+
+      const selectedCount = Object.values(sel).filter(Boolean).length;
+      const applyLabel =
+        selectedCount > 0
+          ? T("variables.import_apply_count").replace("{count}", selectedCount)
+          : T("variables.import_apply_none");
+
+      return `<div class="tx-card p-5 space-y-3">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <h4 class="text-sm font-medium">${T("variables.import_placeholders_label")}</h4>
+          <p class="text-xs tx-secondary">${escHtml(summaryText)}</p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left">
+            <thead>
+              <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
+                <th class="py-2 px-3">${T("variables.import_col_use")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_key")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_label")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_type")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_extras")}</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div class="flex items-center gap-2">
+          <button data-action="variables-tplimport-apply" class="tx-btn tx-btn-sm"${selectedCount === 0 ? " disabled" : ""}>${ICONS.check} ${escHtml(applyLabel)}</button>
+          <button data-action="variables-tplimport-close" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.cancel")}</button>
+        </div>
+      </div>`;
+    }
+
+    function describeFieldExtras(f) {
+      if (f.type === "table") {
+        const cols = (f.columns || []).map((c) => c.key).join(", ");
+        return T("variables.import_extra_table_cols")
+          .replace("{count}", (f.columns || []).length)
+          .replace("{cols}", cols);
+      }
+      if (f.type === "checkbox") return T("variables.import_extra_checkbox");
+      if (f.type === "list") return T("variables.import_extra_list");
+      return T("variables.import_extra_text");
     }
 
     function renderVariablesImportPreview(parsed) {
@@ -1548,26 +2079,101 @@ export default {
 
     function renderDatasetDetail(c) {
       const d = state.selectedDataset;
-      return `<div class="space-y-4">
-        <button data-action="datasets-back" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T("app.back")}</button>
-        <div class="tx-card p-5">
-          <div class="flex items-center justify-between gap-3">
-            <div class="min-w-0 flex-1">
-              <h3 class="text-lg font-semibold truncate">${escHtml(datasetDisplayName(d))}</h3>
-              <div class="text-xs tx-secondary mt-0.5">${T("app.created")}: ${formatDate(d.created_at)}</div>
-            </div>
-            <div class="flex items-center gap-2">
-              ${statusBadge(d.status || "draft")}
-              <button data-delete-dataset="${d.id}" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)">${ICONS.trash}</button>
-            </div>
+      const templates = collectionTemplates(c);
+      const hasPreview = templates.length > 0 && state.previewVisible;
+      const canShowPreview = templates.length > 0 && !state.previewVisible;
+
+      const header = `<div class="tx-card p-5">
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <h3 class="text-lg font-semibold truncate">${escHtml(datasetDisplayName(d))}</h3>
+            <div class="text-xs tx-secondary mt-0.5">${T("app.created")}: ${formatDate(d.created_at)}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            ${statusBadge(d.status || "draft")}
+            ${canShowPreview ? `<button data-action="preview-show" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("preview.show")}">${ICONS.doc} ${T("preview.show")}</button>` : ""}
+            <button data-delete-dataset="${d.id}" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)">${ICONS.trash}</button>
           </div>
         </div>
+      </div>`;
+
+      const leftColumn = `<div class="space-y-4">
         ${renderDatasetDataSection(c, d)}
         ${renderDatasetFilesSection(d)}
         ${renderDatasetExtractionSection(d)}
         ${renderDatasetVariablesSection(d)}
         ${renderDatasetGenerateSection(c, d)}
       </div>`;
+
+      const rightColumn = hasPreview
+        ? `<div class="tx-card tx-preview-panel" id="tx-preview-panel">${renderDatasetPreviewPanel(c, d, templates)}</div>`
+        : "";
+
+      const splitClass = hasPreview ? "tx-split has-preview" : "tx-split";
+
+      return `<div class="space-y-4">
+        <button data-action="datasets-back" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T("app.back")}</button>
+        ${header}
+        <div class="${splitClass}">
+          ${leftColumn}
+          ${rightColumn}
+        </div>
+      </div>`;
+    }
+
+    function renderDatasetPreviewPanel(c, d, templates) {
+      const currentId =
+        state.previewTemplateId && templates.some((t) => t.id === state.previewTemplateId)
+          ? state.previewTemplateId
+          : templates[0].id;
+
+      const options = templates
+        .map(
+          (t) =>
+            `<option value="${escHtml(t.id)}"${t.id === currentId ? " selected" : ""}>${escHtml(t.name || t.id)}</option>`,
+        )
+        .join("");
+
+      const toolbar = `<div class="tx-preview-toolbar">
+        <span class="text-xs uppercase tracking-wider tx-secondary" style="letter-spacing:.04em">${T("preview.title")}</span>
+        <select id="tx-preview-template-picker" class="tx-select" style="max-width:220px;padding:.25rem .5rem;font-size:.8125rem">${options}</select>
+        <button data-action="preview-refresh" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("preview.refresh")}">${ICONS.refresh}</button>
+        <button data-action="preview-render-pdf" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("preview.render_pdf_hint")}"${state.previewPdfLoading ? " disabled" : ""}>
+          ${state.previewPdfLoading ? `<span class="animate-spin inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full"></span>` : ICONS.sparkle}
+          ${T("preview.render_pdf")}
+        </button>
+        <button data-action="preview-hide" class="tx-btn tx-btn-sm tx-btn-ghost ml-auto" title="${T("preview.hide")}">${ICONS.close}</button>
+      </div>`;
+
+      let body = "";
+      if (state.previewPdfUrl) {
+        body = `<div class="tx-preview-viewport" style="padding:0;background:#f6f6f6">
+          <div class="flex items-center gap-2 p-2" style="border-bottom:1px solid var(--divider);background:var(--bg-card)">
+            <span class="text-xs tx-secondary">${T("preview.showing_pdf")}</span>
+            <button data-action="preview-back-html" class="tx-btn tx-btn-sm tx-btn-ghost ml-auto">${T("preview.back_to_html")}</button>
+          </div>
+          <iframe src="${escHtml(state.previewPdfUrl)}" style="width:100%;height:calc(100vh - 9rem);border:0"></iframe>
+        </div>`;
+      } else if (state.previewLoading) {
+        body = `<div class="tx-preview-missing">
+          <span class="animate-spin inline-block w-5 h-5 border-2 border-current border-t-transparent rounded-full"></span>
+          <p class="mt-2">${T("preview.loading")}</p>
+        </div>`;
+      } else if (state.previewError) {
+        body = `<div class="tx-preview-missing"><p>${escHtml(state.previewError)}</p></div>`;
+      } else if (state.previewSkeleton && state.previewSkeleton.html) {
+        const banner = state.previewPdfUnavailable
+          ? `<div class="tx-callout m-3" style="font-size:.75rem">${T("preview.pdf_unavailable")}</div>`
+          : "";
+        body = `<div class="tx-preview-viewport">
+          ${banner}
+          <div id="tx-preview-root" data-template-id="${escHtml(currentId)}">${state.previewSkeleton.html}</div>
+        </div>`;
+      } else {
+        body = `<div class="tx-preview-missing"><p>${T("preview.loading")}</p></div>`;
+      }
+
+      return toolbar + body;
     }
 
     function renderDatasetDataSection(c, d) {
@@ -1624,7 +2230,7 @@ export default {
       const hint = field.hint
         ? `<p class="tx-hint">${escHtml(field.hint)}</p>`
         : "";
-      const wideTypes = ["textarea", "list", "table"];
+      const wideTypes = ["textarea", "list", "table", "image"];
       const span = wideTypes.includes(field.type) ? "sm:col-span-2" : "";
 
       if (field.type === "checkbox") {
@@ -1633,6 +2239,36 @@ export default {
             <input type="checkbox" id="${fid}" name="${escHtml(field.key)}" ${value === true || value === "true" || value === "Ja" ? "checked" : ""} class="rounded h-4 w-4" style="accent-color:var(--brand)" />
             <span class="text-sm font-medium">${escHtml(field.label || field.key)}${reqMark}</span>
           </label>${hint}
+        </div>`;
+      }
+
+      if (field.type === "image") {
+        const meta = value && typeof value === "object" ? value : null;
+        const d = state.selectedDataset;
+        const thumbUrl =
+          meta && d
+            ? `${BASE}/candidates/${d.id}/image/${encodeURIComponent(field.key)}?v=${encodeURIComponent(meta.uploaded_at || "")}`
+            : null;
+        const hasImage = !!thumbUrl;
+        return `<div class="${span}">
+          ${label}
+          <div class="flex items-start gap-3 p-3 rounded" style="background:var(--bg-app);border:1px dashed var(--divider)">
+            <div style="width:96px;height:120px;flex:none;background:var(--bg-card);border-radius:.375rem;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--txt-secondary)">
+              ${hasImage ? `<img src="${escHtml(thumbUrl)}" alt="${escHtml(field.label || field.key)}" style="width:100%;height:100%;object-fit:cover" />` : ICONS.doc}
+            </div>
+            <div class="flex-1 min-w-0 space-y-2">
+              <p class="text-sm tx-secondary">${hasImage ? T("datasets.image_uploaded") : T("datasets.image_empty")}</p>
+              ${hasImage && meta?.original_name ? `<p class="text-xs tx-secondary truncate">${escHtml(meta.original_name)}</p>` : ""}
+              <div class="flex items-center gap-2">
+                <label class="tx-btn tx-btn-sm tx-btn-ghost cursor-pointer">
+                  ${ICONS.upload} ${hasImage ? T("datasets.image_replace") : T("datasets.image_upload")}
+                  <input type="file" data-action="image-upload" data-key="${escHtml(field.key)}" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp" class="hidden" />
+                </label>
+                ${hasImage ? `<button type="button" data-action="image-remove" data-key="${escHtml(field.key)}" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)">${ICONS.trash} ${T("app.delete")}</button>` : ""}
+              </div>
+              ${hint}
+            </div>
+          </div>
         </div>`;
       }
 
@@ -1677,17 +2313,31 @@ export default {
             )
             .join("");
           const dr = rows
-            .map(
-              (row, ri) =>
-                `<tr class="tx-divider border-t">${cols
-                  .map(
-                    (c) =>
-                      `<td class="py-1 px-1"><input name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" value="${escHtml(String(row[c.key] ?? ""))}" class="tx-input text-xs" style="padding:.25rem .375rem" /></td>`,
-                  )
-                  .join(
-                    "",
-                  )}<td class="py-1 px-1 text-center"><button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button></td></tr>`,
-            )
+            .map((row, ri) => {
+              const cells = cols
+                .map((c) => {
+                  const colType = c.type || "text";
+                  const rawVal = row[c.key];
+                  // List-typed columns store arrays; display as one-per-line
+                  // inside a textarea. On save the harvest layer splits back.
+                  if (colType === "list") {
+                    const asArr = Array.isArray(rawVal)
+                      ? rawVal
+                      : String(rawVal ?? "")
+                          .split(/\r?\n/)
+                          .filter((s) => s.trim() !== "");
+                    const txt = asArr.join("\n");
+                    return `<td class="py-1 px-1" style="vertical-align:top"><textarea name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" rows="${Math.max(2, asArr.length)}" class="tx-textarea text-xs" style="padding:.25rem .375rem;min-height:2.25rem;font-size:.75rem" placeholder="${T("datasets.table_list_placeholder")}">${escHtml(txt)}</textarea></td>`;
+                  }
+                  if (colType === "textarea") {
+                    return `<td class="py-1 px-1" style="vertical-align:top"><textarea name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" rows="2" class="tx-textarea text-xs" style="padding:.25rem .375rem;font-size:.75rem">${escHtml(String(rawVal ?? ""))}</textarea></td>`;
+                  }
+                  const inputType = colType === "number" ? "number" : colType === "date" ? "date" : "text";
+                  return `<td class="py-1 px-1"><input type="${inputType}" name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" value="${escHtml(String(rawVal ?? ""))}" class="tx-input text-xs" style="padding:.25rem .375rem" /></td>`;
+                })
+                .join("");
+              return `<tr class="tx-divider border-t">${cells}<td class="py-1 px-1 text-center" style="vertical-align:top"><button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button></td></tr>`;
+            })
             .join("");
           const empty =
             rows.length === 0
@@ -2465,6 +3115,7 @@ export default {
           }
           if (fields[idx].type === "table") {
             const cols = fields[idx].columns || [];
+            const validColTypes = ["text", "textarea", "list", "date", "number"];
             for (let ci = 0; ci < cols.length; ci++) {
               if (fd.has(`fc_${idx}_ck_${ci}`)) {
                 cols[ci].key =
@@ -2473,6 +3124,8 @@ export default {
                 cols[ci].label =
                   fd.get(`fc_${idx}_cl_${ci}`)?.toString().trim() ||
                   cols[ci].label;
+                const ct = fd.get(`fc_${idx}_ct_${ci}`)?.toString();
+                cols[ci].type = validColTypes.includes(ct) ? ct : (cols[ci].type || "text");
               }
             }
           }
@@ -2491,6 +3144,12 @@ export default {
             const un = fd.get(`fd_${idx}_unchecked_glyph`)?.toString().trim();
             if (ch) designer.checked_glyph = ch;
             if (un) designer.unchecked_glyph = un;
+          } else if (fields[idx].type === "image") {
+            const w = parseInt(fd.get(`fd_${idx}_width`) || "0", 10);
+            const h = parseInt(fd.get(`fd_${idx}_height`) || "0", 10);
+            if (w > 0) designer.width = w;
+            if (h > 0) designer.height = h;
+            designer.preserve_ratio = fd.has(`fd_${idx}_preserve_ratio`);
           }
           if (Object.keys(designer).length > 0) fields[idx].designer = designer;
         }
@@ -2552,7 +3211,7 @@ export default {
           const f = state.variablesDraft[fIdx];
           if (!f) return;
           if (!f.columns) f.columns = [];
-          f.columns.push({ key: "", label: "" });
+          f.columns.push({ key: "", label: "", type: "text" });
           state.variablesDirty = true;
           render();
         }),
@@ -2718,6 +3377,111 @@ export default {
           state.variablesImportOpen = false;
           state.variablesImportFields = null;
           showToast(T("variables.save_success"));
+          await fetchForms();
+          render();
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      });
+
+      // --- Import from Target Template ---
+      el.querySelector(
+        '[data-action="variables-import-template"]',
+      )?.addEventListener("click", () => {
+        const tpls = collectionTemplates(c);
+        state.variablesTplImportOpen = true;
+        state.variablesTplImportTemplateId = tpls[0]?.id || null;
+        state.variablesTplImportResult = null;
+        state.variablesTplImportError = null;
+        state.variablesTplImportSelection = {};
+        render();
+      });
+
+      el.querySelectorAll(
+        '[data-action="variables-tplimport-close"]',
+      ).forEach((btn) =>
+        btn.addEventListener("click", () => {
+          state.variablesTplImportOpen = false;
+          state.variablesTplImportTemplateId = null;
+          state.variablesTplImportResult = null;
+          state.variablesTplImportError = null;
+          state.variablesTplImportSelection = {};
+          render();
+        }),
+      );
+
+      el.querySelector(
+        '[data-action="variables-tplimport-load"]',
+      )?.addEventListener("click", async () => {
+        const picker = el.querySelector("#tx-tplimport-picker");
+        const tplId = picker?.value;
+        if (!tplId) return;
+        state.variablesTplImportTemplateId = tplId;
+        state.variablesTplImportLoading = true;
+        state.variablesTplImportError = null;
+        state.variablesTplImportResult = null;
+        state.variablesTplImportSelection = {};
+        render();
+        try {
+          await refreshAccessToken();
+          const res = await api(
+            `/templates/${encodeURIComponent(tplId)}/variable-suggestions?form_id=${encodeURIComponent(c.id)}`,
+          );
+          state.variablesTplImportResult = res;
+          const sel = {};
+          (res.suggestions || []).forEach((f, i) => {
+            sel[i] = f._status !== "duplicate";
+          });
+          state.variablesTplImportSelection = sel;
+        } catch (err) {
+          state.variablesTplImportError = err.message;
+        }
+        state.variablesTplImportLoading = false;
+        render();
+      });
+
+      el.querySelectorAll(
+        '[data-action="variables-tplimport-toggle"]',
+      ).forEach((cb) =>
+        cb.addEventListener("change", () => {
+          const idx = parseInt(cb.dataset.idx);
+          state.variablesTplImportSelection[idx] = !!cb.checked;
+          render();
+        }),
+      );
+
+      el.querySelector(
+        '[data-action="variables-tplimport-apply"]',
+      )?.addEventListener("click", async () => {
+        const res = state.variablesTplImportResult;
+        if (!res) return;
+        const sel = state.variablesTplImportSelection || {};
+        const picked = (res.suggestions || []).filter((_, i) => sel[i]);
+        if (picked.length === 0) return;
+
+        ensureDraft();
+        const existingKeys = new Set(state.variablesDraft.map((f) => f.key));
+        for (const f of picked) {
+          if (!f.key) continue;
+          if (existingKeys.has(f.key)) continue;
+          const clone = { ...f };
+          delete clone._status;
+          state.variablesDraft.push(clone);
+          existingKeys.add(f.key);
+        }
+        state.variablesDirty = true;
+        try {
+          await api(`/forms/${c.id}`, {
+            method: "PUT",
+            body: JSON.stringify({ fields: state.variablesDraft }),
+          });
+          state.variablesDraft = null;
+          state.variablesDirty = false;
+          state.variablesTplImportOpen = false;
+          state.variablesTplImportTemplateId = null;
+          state.variablesTplImportResult = null;
+          state.variablesTplImportSelection = {};
+          showToast(T("variables.import_applied"));
           await fetchForms();
           render();
         } catch (err) {
@@ -3077,7 +3841,15 @@ export default {
                   const cell = dataForm.querySelector(
                     `[name="${f.key}__${ri}__${col.key}"]`,
                   );
-                  row[col.key] = cell?.value ?? "";
+                  const raw = cell?.value ?? "";
+                  if ((col.type || "text") === "list") {
+                    row[col.key] = raw
+                      .split(/\r?\n/)
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                  } else {
+                    row[col.key] = raw;
+                  }
                 }
                 rows.push(row);
                 ri++;
@@ -3441,6 +4213,193 @@ export default {
           }
         }),
       );
+
+      // --- Image variable upload / remove ---
+      el.querySelectorAll('[data-action="image-upload"]').forEach((inp) =>
+        inp.addEventListener("change", async (ev) => {
+          const file = ev.target?.files?.[0];
+          if (!file) return;
+          const key = inp.dataset.key;
+          try {
+            await refreshAccessToken();
+            await apiUpload(
+              `/candidates/${d.id}/image/${encodeURIComponent(key)}`,
+              file,
+            );
+            showToast(T("datasets.image_uploaded"));
+            await selectDataset(d.id);
+          } catch (err) {
+            showToast(err.message || String(err), "error");
+          }
+        }),
+      );
+      el.querySelectorAll('[data-action="image-remove"]').forEach((btn) =>
+        btn.addEventListener("click", async () => {
+          const key = btn.dataset.key;
+          if (!confirm(T("datasets.image_confirm_remove"))) return;
+          try {
+            await api(`/candidates/${d.id}/image/${encodeURIComponent(key)}`, {
+              method: "DELETE",
+            });
+            await selectDataset(d.id);
+          } catch (err) {
+            showToast(err.message || String(err), "error");
+          }
+        }),
+      );
+
+      // --- Live preview (Phase 4b) ---
+      bindPreviewEvents(c, d);
+    }
+
+    function bindPreviewEvents(c, d) {
+      // "Show preview" toggle lives in the dataset header, outside the panel
+      el.querySelector('[data-action="preview-show"]')?.addEventListener(
+        "click",
+        () => {
+          state.previewVisible = true;
+          render();
+        },
+      );
+
+      const panel = el.querySelector("#tx-preview-panel");
+      if (!panel) return;
+
+      const templates = collectionTemplates(c);
+      if (templates.length === 0) return;
+
+      // Pick an initial template if we don't have one cached yet
+      const validIds = templates.map((t) => t.id);
+      let targetId = state.previewTemplateId;
+      if (!targetId || !validIds.includes(targetId)) {
+        targetId = validIds[0];
+      }
+
+      // Kick off a fetch only when we have no skeleton for the target AND no
+      // other fetch is in flight. The in-flight guard inside loadPreviewSkeleton
+      // also prevents loops, but checking here avoids the redundant render().
+      const needsLoad =
+        (!state.previewSkeleton || state.previewTemplateId !== targetId) &&
+        !state.previewLoading &&
+        !state.previewError;
+      if (needsLoad) {
+        loadPreviewSkeleton(targetId);
+        // fall through: still bind the toolbar buttons so the user can act
+        // while the fetch is pending (refresh, hide, pick a different template).
+      }
+
+      // Prime the DOM once on bind so the first render isn't blank (only if
+      // the skeleton is actually present).
+      if (state.previewSkeleton) {
+        setTimeout(updatePreviewNow, 0);
+      }
+
+      // Template picker — always bind, even mid-fetch, so the user can switch.
+      const picker = panel.querySelector("#tx-preview-template-picker");
+      picker?.addEventListener("change", () => {
+        const id = picker.value;
+        if (id && id !== state.previewTemplateId) {
+          loadPreviewSkeleton(id, { force: true });
+        }
+      });
+
+      // Refresh: re-fetch the skeleton (handles updated DOCX upload or prior error).
+      panel
+        .querySelector('[data-action="preview-refresh"]')
+        ?.addEventListener("click", () => {
+          loadPreviewSkeleton(state.previewTemplateId || targetId, { force: true });
+        });
+
+      // Hide
+      panel
+        .querySelector('[data-action="preview-hide"]')
+        ?.addEventListener("click", () => {
+          state.previewVisible = false;
+          render();
+        });
+
+      // Live input listener on the dataset form (delegated). Only bind while
+      // the skeleton is present so we don't schedule pointless DOM updates.
+      if (state.previewSkeleton) {
+        const form = el.querySelector("#tx-entry-data-form");
+        if (form) {
+          const handler = () => schedulePreviewUpdate();
+          form.addEventListener("input", handler);
+          form.addEventListener("change", handler);
+        }
+      }
+
+      // --- True-preview (PDF) path ---
+      panel
+        .querySelector('[data-action="preview-render-pdf"]')
+        ?.addEventListener("click", () => renderTruePreviewPdf(c, d));
+
+      panel
+        .querySelector('[data-action="preview-back-html"]')
+        ?.addEventListener("click", () => {
+          if (state.previewPdfUrl) {
+            URL.revokeObjectURL(state.previewPdfUrl);
+          }
+          state.previewPdfUrl = null;
+          state.previewPdfError = null;
+          render();
+        });
+    }
+
+    async function renderTruePreviewPdf(c, d) {
+      if (!d || !state.previewTemplateId) return;
+      const templateId = state.previewTemplateId;
+
+      state.previewPdfLoading = true;
+      state.previewPdfError = null;
+      state.previewPdfUnavailable = false;
+      render();
+
+      try {
+        // 1. Save the current form state so generation uses fresh values.
+        const form = el.querySelector("#tx-entry-data-form");
+        if (form) {
+          // Synthesise a submit (the existing handler writes field_values).
+          const submit = new Event("submit", { cancelable: true, bubbles: true });
+          form.dispatchEvent(submit);
+          // Give the save + render a tick to complete
+          await new Promise((r) => setTimeout(r, 150));
+        }
+
+        // 2. Generate the DOCX (persists as a "generated document" on the candidate).
+        await refreshAccessToken();
+        const gen = await api(`/candidates/${d.id}/generate/${templateId}`, {
+          method: "POST",
+        });
+        const docId = gen?.document?.id;
+        if (!docId) throw new Error("Generation did not return a document id");
+
+        // 3. Fetch the PDF. Response is a binary stream; turn into a blob URL.
+        const pdfResp = await fetch(
+          `${BASE}/candidates/${d.id}/documents/${docId}/pdf`,
+          { credentials: "include" },
+        );
+        if (pdfResp.status === 501) {
+          const errJson = await pdfResp.json().catch(() => ({}));
+          state.previewPdfUnavailable = true;
+          state.previewPdfError = errJson.error || T("preview.pdf_unavailable");
+          throw new Error(state.previewPdfError);
+        }
+        if (!pdfResp.ok) {
+          throw new Error(`PDF conversion failed (${pdfResp.status})`);
+        }
+        const blob = await pdfResp.blob();
+        const url = URL.createObjectURL(blob);
+        if (state.previewPdfUrl) URL.revokeObjectURL(state.previewPdfUrl);
+        state.previewPdfUrl = url;
+      } catch (err) {
+        if (!state.previewPdfUnavailable) {
+          showToast(err.message || String(err), "error");
+        }
+      }
+
+      state.previewPdfLoading = false;
+      render();
     }
 
     // --- Export events ---

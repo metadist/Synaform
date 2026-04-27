@@ -14,6 +14,7 @@ use App\Service\ModelConfigService;
 use App\Service\RateLimitService;
 use PhpOffice\PhpWord\IOFactory as PhpWordIOFactory;
 use PhpOffice\PhpWord\TemplateProcessor;
+use Plugin\TemplateX\Service\TemplateHtmlPreviewService;
 use OpenApi\Attributes as OA;
 use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -41,10 +42,10 @@ class TemplateXController extends AbstractController
     /**
      * Row-group sub-fields whose string value is too rich for a single Word run
      * and must be rendered as a sequence of paragraphs (date headers, sub-titles,
-     * real bullet items). Listed in "group.subfield" form and handled by the
-     * expandStationDetails() post-pass.
+     * real bullet items). Always-on defaults; any `table` field whose column
+     * declares `type=list` is appended at runtime by getRichRowSubfields().
      */
-    private const RICH_ROW_SUBFIELDS = ['stations.details'];
+    private const RICH_ROW_SUBFIELDS_DEFAULT = ['stations.details'];
 
     private const DEFAULT_VARIABLE_SOURCES = [
         'firstname' => ['primary' => 'form', 'fallback' => 'ai'],
@@ -85,6 +86,7 @@ class TemplateXController extends AbstractController
         private LoggerInterface $logger,
         private AiFacade $aiFacade,
         private FileProcessor $fileProcessor,
+        private TemplateHtmlPreviewService $htmlPreviewService,
         #[Autowire('%app.upload_dir%')] private string $uploadDir,
     ) {
     }
@@ -282,12 +284,23 @@ class TemplateXController extends AbstractController
 
         $placeholders = $this->extractPlaceholders($dir . '/template.docx');
 
+        // Build the HTML preview skeleton once and cache it on the template record.
+        // Non-fatal: if it fails (malformed docx, exotic content), generation and
+        // download still work; only the live-preview panel degrades to "unavailable".
+        try {
+            $preview = $this->htmlPreviewService->build($dir . '/template.docx');
+        } catch (\Throwable $e) {
+            $this->logger->warning('Preview skeleton failed', ['template' => $templateId, 'err' => $e->getMessage()]);
+            $preview = null;
+        }
+
         $templateData = [
             'id' => $templateId,
             'name' => $name,
             'original_filename' => $originalName,
             'placeholders' => $placeholders,
             'placeholder_count' => count($placeholders),
+            'preview' => $preview,
             'created_at' => date('c'),
             'updated_at' => date('c'),
         ];
@@ -373,6 +386,108 @@ class TemplateXController extends AbstractController
         return $this->json([
             'success' => true,
             'placeholders' => $template['placeholders'] ?? [],
+        ]);
+    }
+
+    #[Route('/templates/{templateId}/variable-suggestions', name: 'templates_variable_suggestions', methods: ['GET'], priority: 10)]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/variable-suggestions',
+        summary: 'Turn detected placeholders into ready-to-apply form fields (deterministic, no AI)',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Suggested field[] array and a summary of what was detected')]
+    public function templatesVariableSuggestions(int $userId, string $templateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $template = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId);
+        if (!$template) {
+            return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        // Optional form_id lets us flag duplicates so the UI can pre-uncheck existing keys.
+        $existingKeys = [];
+        $formId = $request->query->get('form_id');
+        if (is_string($formId) && $formId !== '') {
+            $form = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, $formId);
+            if ($form && isset($form['fields']) && is_array($form['fields'])) {
+                foreach ($form['fields'] as $f) {
+                    if (!empty($f['key'])) {
+                        $existingKeys[(string) $f['key']] = true;
+                    }
+                }
+            }
+        }
+
+        $placeholders = $template['placeholders'] ?? [];
+        $suggestions = $this->buildVariableSuggestions($placeholders, $existingKeys);
+
+        return $this->json([
+            'success' => true,
+            'template_id' => $templateId,
+            'template_name' => $template['name'] ?? '',
+            'placeholder_count' => count($placeholders),
+            'suggestions' => $suggestions['fields'],
+            'summary' => $suggestions['summary'],
+        ]);
+    }
+
+    #[Route('/templates/{templateId}/preview-html', name: 'templates_preview_html', methods: ['GET'], priority: 10)]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/preview-html',
+        summary: 'Return the cached HTML preview skeleton for a target template (used by the live preview panel)',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'HTML skeleton with placeholder spans')]
+    public function templatesPreviewHtml(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $template = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId);
+        if (!$template) {
+            return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $preview = $template['preview'] ?? null;
+        $stale = !is_array($preview)
+            || ($preview['schema_version'] ?? 0) !== TemplateHtmlPreviewService::SCHEMA_VERSION;
+
+        if ($stale) {
+            $filePath = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId . '/template.docx';
+            if (is_file($filePath)) {
+                try {
+                    $preview = $this->htmlPreviewService->build($filePath);
+                    $template['preview'] = $preview;
+                    $template['updated_at'] = date('c');
+                    $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId, $template);
+                } catch (\Throwable $e) {
+                    $this->logger->warning('Preview skeleton rebuild failed', ['template' => $templateId, 'err' => $e->getMessage()]);
+                    $preview = null;
+                }
+            }
+        }
+
+        if (!is_array($preview)) {
+            return $this->json([
+                'success' => false,
+                'error' => 'Preview unavailable for this template.',
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+
+        return $this->json([
+            'success'        => true,
+            'template_id'    => $templateId,
+            'schema_version' => $preview['schema_version'] ?? 0,
+            'html'           => $preview['html'] ?? '',
+            'placeholders'   => $preview['placeholders'] ?? [],
+            'row_groups'     => $preview['row_groups'] ?? [],
+            'generated_at'   => $preview['generated_at'] ?? null,
         ]);
     }
 
@@ -1278,8 +1393,21 @@ class TemplateXController extends AbstractController
             }
             if ($type === 'table') {
                 $columns = $field['columns'] ?? [];
-                $colKeys = array_map(fn ($c) => ($c['key'] ?? '') . ' (' . ($c['label'] ?? $c['key'] ?? '') . ')', $columns);
-                $desc .= ' — columns: ' . implode(', ', $colKeys) . '. [return as JSON array of objects with these column keys]';
+                $colDescs = array_map(function ($c) {
+                    $key = (string) ($c['key'] ?? '');
+                    $label = (string) ($c['label'] ?? $key);
+                    $colType = (string) ($c['type'] ?? 'text');
+                    return $key . ' (' . $label . ', type=' . $colType . ')';
+                }, $columns);
+                $listCols = array_values(array_filter(
+                    array_map(fn ($c) => ($c['type'] ?? 'text') === 'list' ? (string) ($c['key'] ?? '') : null, $columns),
+                ));
+                $desc .= ' — columns: ' . implode(', ', $colDescs)
+                    . '. [return as JSON array of objects with these column keys]';
+                if (!empty($listCols)) {
+                    $desc .= ' — the following columns must themselves be JSON arrays of short strings (one bullet per item, no markdown, no dashes, no numbering): '
+                        . implode(', ', $listCols);
+                }
             }
             $fieldDescriptions[] = $desc;
         }
@@ -1294,6 +1422,7 @@ class TemplateXController extends AbstractController
         - For "select" fields, ONLY return one of the allowed values listed in brackets, or null if not found.
         - For "list" fields, return a JSON array of strings (one entry per item).
         - For "table" fields, return a JSON array of objects where each object has the column keys listed in the field description. Most recent entries first.
+        - Table columns with type=list return a JSON array of short strings inside the row (one bullet per achievement/item). Do NOT include dashes, bullets, or numbering characters in the strings; the template generator adds proper bullets automatically. Do NOT embed multiple bullets in a single string separated by newlines.
         - For "text" fields, return a plain string value.
         - For "checkbox" fields, return true or false.
         - For "date" fields, return in YYYY-MM-DD format.
@@ -1444,8 +1573,22 @@ class TemplateXController extends AbstractController
             $resolved = $this->resolveVariables($entry, $formFields);
             $variables = $resolved['variables'];
 
+            // Image-typed variables are handled separately by processImages(); strip
+            // their meta dicts from the generic $variables map so the
+            // placeholder classifier doesn't see them as lists (the meta dict is
+            // an associative array which would otherwise get treated as a list
+            // value and cloned into multiple paragraphs by expandListParagraphs).
+            $imageKeys = [];
+            foreach ($formFields as $field) {
+                if (($field['type'] ?? '') === 'image' && !empty($field['key'])) {
+                    $imageKeys[(string) $field['key']] = true;
+                    unset($variables[(string) $field['key']]);
+                }
+            }
+
             $arrays = $this->collectArrayData($entry, $formFields);
             $designerMap = $this->getDesignerConfigMap($formFields);
+            $richSubfields = $this->getRichRowSubfields($formFields);
 
             $cleanedPath = $this->cleanTemplateMacros($templatePath);
 
@@ -1456,7 +1599,8 @@ class TemplateXController extends AbstractController
             $expandedTableKeys = $this->expandTableBlocks(
                 $cleanedPath,
                 $formFields,
-                $arrays
+                $arrays,
+                $richSubfields
             );
 
             // Phase A pre-pass: expand list-type placeholders into proper per-item
@@ -1481,12 +1625,14 @@ class TemplateXController extends AbstractController
             // inside a <w:tr> (paragraph-based templates such as v2_de), clone the
             // contiguous paragraph range once per data row and fill simple sub-fields
             // inline. This is the non-table equivalent of PhpWord's cloneRow.
-            // Rich sub-fields (RICH_ROW_SUBFIELDS, e.g. stations.details) are left
-            // as {{…#N}} placeholders so Phase B's expandStationDetails handles them.
+            // Rich sub-fields (`$richSubfields`, e.g. stations.details and any
+            // column declared type=list) are left as {{…#N}} placeholders so
+            // Phase B's expandRichRowColumns renderer handles them.
             $preClonedGroups = $this->cloneParagraphGroupsPrepass(
                 $cleanedPath,
                 $preClassified['rowGroups'] ?? [],
-                $arrays
+                $arrays,
+                $richSubfields
             );
 
             $tp = new TemplateProcessor($cleanedPath);
@@ -1521,10 +1667,11 @@ class TemplateXController extends AbstractController
                 unset($classified['rowGroups'][$handledGroup]);
             }
 
-            $this->processRowGroups($tp, $classified['rowGroups'], $arrays, $designerMap);
+            $this->processRowGroups($tp, $classified['rowGroups'], $arrays, $designerMap, $richSubfields);
             $this->processBlockGroups($tp, $classified['blockGroups'], $arrays);
             $this->processCheckboxes($tp, $classified['checkboxes'], $variables, $designerMap);
             $this->processLists($tp, $classified['lists'], $variables);
+            $this->processImages($tp, $formFields, $entry);
             $this->processScalars($tp, $classified['scalars'], $variables);
 
             $docId = 'doc_' . bin2hex(random_bytes(6));
@@ -1535,10 +1682,11 @@ class TemplateXController extends AbstractController
             $outputPath = $genDir . '/' . $docId . '.docx';
             $tp->saveAs($outputPath);
 
-            // Phase B post-pass: expand any station-detail placeholders left behind
-            // by processRowGroups (RICH_ROW_SUBFIELDS) into real Word paragraphs with
-            // bold date headers, role titles, and bulleted achievements.
-            $this->expandStationDetails($outputPath, $arrays['stations'] ?? []);
+            // Phase B post-pass: expand any rich-column placeholders left behind
+            // by processRowGroups/expandTableBlocks into real Word paragraphs
+            // with proper bullets. Arrays become one bullet per item; legacy
+            // multi-line strings are parsed with date-header + bullet heuristics.
+            $this->expandRichRowColumns($outputPath, $richSubfields, $arrays, $formFields);
 
             // Phase D post-pass: apply layout helpers (repeat header / cantSplit)
             // driven either by the original template XML or by per-variable
@@ -1646,6 +1794,50 @@ class TemplateXController extends AbstractController
         return $response;
     }
 
+    #[Route('/candidates/{candidateId}/documents/{documentId}/pdf', name: 'candidates_documents_pdf', methods: ['GET'], priority: 10)]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}/pdf',
+        summary: 'Stream a PDF rendering of a generated document (true-preview path). Requires libreoffice on the backend host; returns 501 otherwise.',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'PDF file')]
+    #[OA\Response(response: 501, description: 'LibreOffice not installed on the backend')]
+    public function candidatesDocumentPdf(int $userId, string $candidateId, string $documentId, #[CurrentUser] ?User $user): Response
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $docMeta = $entry['documents'][$documentId] ?? null;
+        if (!$docMeta) {
+            return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $docxPath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        if (!is_file($docxPath)) {
+            return $this->json(['success' => false, 'error' => 'Document file not found on disk'], Response::HTTP_NOT_FOUND);
+        }
+
+        $pdfPath = $this->convertDocxToPdf($docxPath);
+        if ($pdfPath === null) {
+            return $this->json([
+                'success' => false,
+                'error' => 'libreoffice is not installed on the backend. True-preview PDF is unavailable; the HTML live preview still works. Install libreoffice in the backend image or run a gotenberg sidecar to enable this feature.',
+            ], Response::HTTP_NOT_IMPLEMENTED);
+        }
+
+        return new BinaryFileResponse($pdfPath, 200, [
+            'Content-Type'  => 'application/pdf',
+            'Cache-Control' => 'private, max-age=60',
+        ]);
+    }
+
     #[Route('/candidates/{candidateId}/documents/{documentId}', name: 'candidates_documents_delete', methods: ['DELETE'])]
     #[OA\Delete(
         path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}',
@@ -1680,6 +1872,174 @@ class TemplateXController extends AbstractController
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
 
         return $this->json(['success' => true, 'message' => 'Document deleted']);
+    }
+
+    // =========================================================================
+    // Image variables (candidate photos, logos, signatures)
+    // =========================================================================
+
+    #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_upload', methods: ['POST'])]
+    #[OA\Post(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        summary: 'Upload an image for an image-typed variable (stored per candidate, embedded at generation time)',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Image stored')]
+    public function candidatesImageUpload(int $userId, string $candidateId, string $key, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $key)) {
+            return $this->json(['success' => false, 'error' => 'Invalid variable key'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $file = $request->files->get('file');
+        if (!$file) {
+            return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $mime = $file->getMimeType() ?? 'application/octet-stream';
+        $allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
+        if (!in_array($mime, $allowedMimes, true)) {
+            return $this->json(['success' => false, 'error' => 'Unsupported image format: ' . $mime], Response::HTTP_UNSUPPORTED_MEDIA_TYPE);
+        }
+
+        $sizeLimit = 8 * 1024 * 1024;
+        if ($file->getSize() > $sizeLimit) {
+            return $this->json(['success' => false, 'error' => 'Image too large (max 8 MB)'], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
+        }
+
+        $ext = $this->mimeToExtension($mime);
+        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/images';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0o755, true);
+        }
+
+        // Wipe any previous file for this key (different extension possible).
+        foreach (glob($dir . '/' . $key . '.*') ?: [] as $old) {
+            @unlink($old);
+        }
+
+        $filename = $key . '.' . $ext;
+        $file->move($dir, $filename);
+
+        $storedPath = $dir . '/' . $filename;
+        $meta = [
+            'path' => $storedPath,
+            'mime' => $mime,
+            'original_name' => $file->getClientOriginalName(),
+            'size' => filesize($storedPath) ?: 0,
+            'uploaded_at' => date('c'),
+        ];
+
+        if (!isset($entry['field_values']) || !is_array($entry['field_values'])) {
+            $entry['field_values'] = [];
+        }
+        $entry['field_values'][$key] = $meta;
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+
+        return $this->json([
+            'success' => true,
+            'key' => $key,
+            'meta' => $this->publicImageMeta($meta),
+        ]);
+    }
+
+    #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_get', methods: ['GET'])]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        summary: 'Stream a stored image variable (used by the UI thumbnail and the HTML live preview)',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Image file')]
+    public function candidatesImageGet(int $userId, string $candidateId, string $key, #[CurrentUser] ?User $user): Response
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $key)) {
+            return $this->json(['success' => false, 'error' => 'Invalid variable key'], Response::HTTP_BAD_REQUEST);
+        }
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+        $meta = $entry['field_values'][$key] ?? null;
+        if (!is_array($meta) || empty($meta['path']) || !is_file($meta['path'])) {
+            return $this->json(['success' => false, 'error' => 'Image not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        return new BinaryFileResponse($meta['path'], 200, [
+            'Content-Type'  => $meta['mime'] ?? 'application/octet-stream',
+            'Cache-Control' => 'private, max-age=60',
+        ]);
+    }
+
+    #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_delete', methods: ['DELETE'])]
+    #[OA\Delete(
+        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        summary: 'Remove a stored image variable',
+        security: [['ApiKey' => []]],
+        tags: ['TemplateX Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Image removed')]
+    public function candidatesImageDelete(int $userId, string $candidateId, string $key, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $key)) {
+            return $this->json(['success' => false, 'error' => 'Invalid variable key'], Response::HTTP_BAD_REQUEST);
+        }
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+        $meta = $entry['field_values'][$key] ?? null;
+        if (is_array($meta) && !empty($meta['path']) && is_file($meta['path'])) {
+            @unlink($meta['path']);
+        }
+        if (isset($entry['field_values'][$key])) {
+            unset($entry['field_values'][$key]);
+            $entry['updated_at'] = date('c');
+            $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+        }
+        return $this->json(['success' => true]);
+    }
+
+    /**
+     * @return array{mime: ?string, original_name: ?string, size: int, uploaded_at: ?string}
+     */
+    private function publicImageMeta(array $meta): array
+    {
+        return [
+            'mime' => $meta['mime'] ?? null,
+            'original_name' => $meta['original_name'] ?? null,
+            'size' => (int) ($meta['size'] ?? 0),
+            'uploaded_at' => $meta['uploaded_at'] ?? null,
+        ];
+    }
+
+    private function mimeToExtension(string $mime): string
+    {
+        return match ($mime) {
+            'image/jpeg' => 'jpg',
+            'image/png'  => 'png',
+            'image/gif'  => 'gif',
+            'image/webp' => 'webp',
+            'image/bmp'  => 'bmp',
+            default      => 'bin',
+        };
     }
 
     // =========================================================================
@@ -1828,6 +2188,65 @@ class TemplateXController extends AbstractController
         }
 
         return 'text';
+    }
+
+    /**
+     * Convert a DOCX to PDF via a headless LibreOffice invocation. The PDF is
+     * written next to the source DOCX with a `.pdf` extension and cached there
+     * as long as the DOCX is fresher (mtime >= DOCX mtime). Returns null if
+     * the backend doesn't have libreoffice/soffice available — the caller
+     * should treat that as a soft 501.
+     */
+    private function convertDocxToPdf(string $docxPath): ?string
+    {
+        $pdfPath = preg_replace('/\.docx$/i', '.pdf', $docxPath) ?? ($docxPath . '.pdf');
+
+        if (is_file($pdfPath) && filemtime($pdfPath) >= filemtime($docxPath)) {
+            return $pdfPath;
+        }
+
+        $binary = null;
+        foreach (['libreoffice', 'soffice'] as $candidate) {
+            $which = @shell_exec('command -v ' . escapeshellarg($candidate) . ' 2>/dev/null');
+            if (is_string($which) && trim($which) !== '') {
+                $binary = trim($which);
+                break;
+            }
+        }
+        if ($binary === null) {
+            return null;
+        }
+
+        $outDir = dirname($docxPath);
+        // LibreOffice writes to `$outDir/<basename>.pdf`; we use --outdir to make
+        // that explicit. Isolate each conversion with a per-process user profile
+        // to avoid lock contention when two conversions race.
+        $userProfile = sys_get_temp_dir() . '/lo-profile-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        $cmd = sprintf(
+            '%s -env:UserInstallation=file://%s --headless --nologo --nocrashreport --nodefault --nofirststartwizard --convert-to pdf --outdir %s %s 2>&1',
+            escapeshellarg($binary),
+            escapeshellarg($userProfile),
+            escapeshellarg($outDir),
+            escapeshellarg($docxPath),
+        );
+
+        exec($cmd, $out, $code);
+
+        // Best-effort cleanup of the per-process user profile directory.
+        if (is_dir($userProfile)) {
+            $this->removeDirectory($userProfile);
+        }
+
+        if ($code !== 0 || !is_file($pdfPath)) {
+            $this->logger->warning('LibreOffice PDF conversion failed', [
+                'docx' => $docxPath,
+                'code' => $code,
+                'stdout' => implode("\n", array_slice($out, 0, 20)),
+            ]);
+            return null;
+        }
+
+        return $pdfPath;
     }
 
     private function removeDirectory(string $dir): void
@@ -2155,7 +2574,7 @@ class TemplateXController extends AbstractController
 
     private function normalizeFieldType(string $type): string
     {
-        $valid = ['text', 'textarea', 'select', 'list', 'date', 'number', 'checkbox', 'table'];
+        $valid = ['text', 'textarea', 'select', 'list', 'date', 'number', 'checkbox', 'table', 'image'];
 
         return in_array($type, $valid, true) ? $type : 'text';
     }
@@ -2212,6 +2631,16 @@ class TemplateXController extends AbstractController
             if (isset($raw['unchecked_glyph']) && is_string($raw['unchecked_glyph']) && $raw['unchecked_glyph'] !== '') {
                 $out['unchecked_glyph'] = mb_substr((string) $raw['unchecked_glyph'], 0, 4);
             }
+        } elseif ($fieldType === 'image') {
+            if (isset($raw['width'])) {
+                $out['width'] = max(16, min(1600, (int) $raw['width']));
+            }
+            if (isset($raw['height'])) {
+                $out['height'] = max(16, min(2000, (int) $raw['height']));
+            }
+            if (array_key_exists('preserve_ratio', $raw)) {
+                $out['preserve_ratio'] = (bool) $raw['preserve_ratio'];
+            }
         }
 
         return $out;
@@ -2252,13 +2681,19 @@ class TemplateXController extends AbstractController
             }
             if ($type === 'table' && !empty($raw['columns']) && is_array($raw['columns'])) {
                 $cols = [];
+                $validColumnTypes = ['text', 'textarea', 'list', 'date', 'number'];
                 foreach ($raw['columns'] as $col) {
                     if (!is_array($col) || empty($col['key'])) {
                         continue;
                     }
+                    $colType = (string) ($col['type'] ?? 'text');
+                    if (!in_array($colType, $validColumnTypes, true)) {
+                        $colType = 'text';
+                    }
                     $cols[] = [
                         'key' => (string) $col['key'],
                         'label' => (string) ($col['label'] ?? $col['key']),
+                        'type' => $colType,
                     ];
                 }
                 if (!empty($cols)) {
@@ -2315,6 +2750,148 @@ class TemplateXController extends AbstractController
             }
         }
         return $out;
+    }
+
+    /**
+     * Group the raw placeholder list coming out of extractPlaceholders() into
+     * ready-to-apply form fields:
+     *
+     *  - `block_marker` ({{#…}}/{{/…}})   → skipped (structural only)
+     *  - `row_field` (`group.col.N`)      → collapsed into ONE `table` field per group, with columns = unique cols
+     *  - `checkbox` (`checkb.X.yes|no`)   → collapsed into ONE `checkbox` field named `X` with default glyphs
+     *  - `list` (ends with `list`)        → `list` field
+     *  - everything else                  → `text` field
+     *
+     * Also classifies each entry as `new`, `duplicate` (already in the form),
+     * or `structural` (skipped) so the UI can show a preview with pre-unchecked
+     * duplicates.
+     *
+     * @param list<array{key: string, type: string}> $placeholders
+     * @param array<string, bool>                    $existingKeys  map of keys already in the form
+     * @return array{fields: list<array<string, mixed>>, summary: array<string, int>}
+     */
+    private function buildVariableSuggestions(array $placeholders, array $existingKeys): array
+    {
+        $fields = [];
+        $summary = ['new' => 0, 'duplicate' => 0, 'structural' => 0, 'tables' => 0, 'checkboxes' => 0, 'lists' => 0, 'texts' => 0];
+
+        $rowGroups = [];   // group => [col => true]
+        $checkGroups = []; // key => [yes => true, no => true]
+
+        foreach ($placeholders as $ph) {
+            $key = $ph['key'] ?? '';
+            $type = $ph['type'] ?? '';
+            if ($key === '') {
+                continue;
+            }
+
+            if ($type === 'block_marker') {
+                $summary['structural']++;
+                continue;
+            }
+
+            if ($type === 'checkbox' && str_starts_with($key, 'checkb.')) {
+                $parts = explode('.', $key);
+                if (count($parts) >= 3) {
+                    $grp = $parts[1];
+                    $leaf = end($parts);
+                    $checkGroups[$grp][$leaf] = true;
+                    continue;
+                }
+            }
+
+            if ($type === 'row_field' && str_contains($key, '.')) {
+                $segs = explode('.', $key);
+                if (count($segs) >= 3) {
+                    $group = $segs[0];
+                    $col = $segs[1];
+                    $rowGroups[$group][$col] = true;
+                    continue;
+                }
+            }
+
+            $field = [
+                'key' => $key,
+                'label' => $this->humanizeKey($key),
+                'type' => $type === 'list' ? 'list' : 'text',
+                'required' => false,
+                'source' => 'form',
+                '_status' => isset($existingKeys[$key]) ? 'duplicate' : 'new',
+            ];
+            if ($field['type'] === 'list') {
+                $summary['lists']++;
+            } else {
+                $summary['texts']++;
+            }
+            $summary[$field['_status']]++;
+            $fields[] = $field;
+        }
+
+        // Column names commonly holding bullet lists get suggested as type=list
+        // by default. The user can override in the import preview. This matches
+        // how HR profile templates typically use these columns.
+        $listColumnHeuristics = ['details', 'highlights', 'achievements', 'responsibilities', 'bullets'];
+
+        foreach ($rowGroups as $group => $cols) {
+            $columns = [];
+            foreach (array_keys($cols) as $c) {
+                $type = in_array(strtolower($c), $listColumnHeuristics, true) ? 'list' : 'text';
+                $columns[] = ['key' => $c, 'label' => $this->humanizeKey($c), 'type' => $type];
+            }
+            $field = [
+                'key' => $group,
+                'label' => $this->humanizeKey($group),
+                'type' => 'table',
+                'required' => false,
+                'source' => 'form',
+                'columns' => $columns,
+                'designer' => ['repeat_header' => true, 'prevent_row_break' => true],
+                '_status' => isset($existingKeys[$group]) ? 'duplicate' : 'new',
+            ];
+            $summary['tables']++;
+            $summary[$field['_status']]++;
+            $fields[] = $field;
+        }
+
+        foreach ($checkGroups as $grp => $leaves) {
+            $field = [
+                'key' => $grp,
+                'label' => $this->humanizeKey($grp),
+                'type' => 'checkbox',
+                'required' => false,
+                'source' => 'form',
+                'designer' => ['checked_glyph' => '☒', 'unchecked_glyph' => '☐'],
+                '_status' => isset($existingKeys[$grp]) ? 'duplicate' : 'new',
+            ];
+            $summary['checkboxes']++;
+            $summary[$field['_status']]++;
+            $fields[] = $field;
+        }
+
+        usort($fields, static function (array $a, array $b): int {
+            $order = ['text' => 0, 'list' => 1, 'checkbox' => 2, 'table' => 3];
+            $ra = $order[$a['type']] ?? 9;
+            $rb = $order[$b['type']] ?? 9;
+            return $ra === $rb ? strcmp($a['key'], $b['key']) : $ra <=> $rb;
+        });
+
+        return ['fields' => $fields, 'summary' => $summary];
+    }
+
+    /**
+     * Turn a snake_case / camelCase / dotted / hyphenated key into a human
+     * readable label: `current_annual_salary` → "Current annual salary",
+     * `targetPosition` → "Target position", `stations.employer` → "Stations employer".
+     */
+    private function humanizeKey(string $key): string
+    {
+        $s = preg_replace('/[._-]+/', ' ', $key) ?? $key;
+        $s = preg_replace('/([a-z])([A-Z])/', '$1 $2', $s) ?? $s;
+        $s = trim($s);
+        if ($s === '') {
+            return $key;
+        }
+        return mb_strtoupper(mb_substr($s, 0, 1)) . mb_substr($s, 1);
     }
 
     private function normalizeSource(?string $source): ?string
@@ -2609,7 +3186,7 @@ class TemplateXController extends AbstractController
      *
      * @param array<string, array<string, mixed>> $designerMap
      */
-    private function processRowGroups(TemplateProcessor $tp, array $rowGroups, array $arrays, array $designerMap = []): void
+    private function processRowGroups(TemplateProcessor $tp, array $rowGroups, array $arrays, array $designerMap = [], array $richSubfields = self::RICH_ROW_SUBFIELDS_DEFAULT): void
     {
         foreach ($rowGroups as $groupName => $fields) {
             $data = $arrays[$groupName] ?? [];
@@ -2657,7 +3234,7 @@ class TemplateXController extends AbstractController
                     // proper bullet formatting, bold date headers, etc. See
                     // expandStationDetails(). Simple sub-fields continue through the
                     // plain setValue path below.
-                    if (in_array("{$groupName}.{$cleanSuffix}", self::RICH_ROW_SUBFIELDS, true)) {
+                    if (in_array("{$groupName}.{$cleanSuffix}", $richSubfields, true)) {
                         continue;
                     }
 
@@ -2761,6 +3338,53 @@ class TemplateXController extends AbstractController
             $text = htmlspecialchars($text, ENT_XML1 | ENT_QUOTES, 'UTF-8');
             $text = str_replace("\n", '</w:t><w:br/><w:t>', $text);
             $tp->setValue($key, $text);
+        }
+    }
+
+    /**
+     * Image mode: for every image-typed form field whose candidate record
+     * carries a stored image path, replace the matching `{{key}}` placeholder
+     * with an actual embedded image using PhpWord's setImageValue().
+     *
+     * Size defaults are conservative (140x180 px) and can be overridden either
+     * in the template via the `{{key:width=W:height=H}}` suffix (PhpWord
+     * understands this natively) or in the variable's designer config
+     * (`designer.width`, `designer.height`). Missing images leave the
+     * placeholder untouched; the scalar pass then replaces it with an empty
+     * string so it doesn't show up as literal text in the output.
+     *
+     * @param array<int, array<string, mixed>> $formFields
+     * @param array<string, mixed>             $entry
+     */
+    private function processImages(TemplateProcessor $tp, array $formFields, array $entry): void
+    {
+        foreach ($formFields as $field) {
+            if (($field['type'] ?? '') !== 'image' || empty($field['key'])) {
+                continue;
+            }
+            $key = (string) $field['key'];
+            $meta = $entry['field_values'][$key] ?? null;
+            if (!is_array($meta) || empty($meta['path']) || !is_file($meta['path'])) {
+                continue;
+            }
+
+            $designer = $field['designer'] ?? [];
+            $width = (int) ($designer['width'] ?? 140);
+            $height = (int) ($designer['height'] ?? 180);
+
+            try {
+                $tp->setImageValue($key, [
+                    'path'   => $meta['path'],
+                    'width'  => $width,
+                    'height' => $height,
+                    'ratio'  => !empty($designer['preserve_ratio']),
+                ]);
+            } catch (\Throwable $e) {
+                $this->logger->warning('Image placeholder replacement failed', [
+                    'key'   => $key,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 
@@ -3002,7 +3626,7 @@ class TemplateXController extends AbstractController
      * @param array<string, array<int, array<string, mixed>>> $arrays
      * @return array<string, true>                          keys that were expanded
      */
-    private function expandTableBlocks(string $docxPath, array $formFields, array $arrays): array
+    private function expandTableBlocks(string $docxPath, array $formFields, array $arrays, array $richSubfields = self::RICH_ROW_SUBFIELDS_DEFAULT): array
     {
         $handled = [];
 
@@ -3088,10 +3712,12 @@ class TemplateXController extends AbstractController
 
             // Build one fresh row per data entry.
             $allRows = '';
+            $dataIdx = 0;
             foreach ($cfg['data'] as $rowData) {
                 if (!is_array($rowData)) {
                     continue;
                 }
+                $dataIdx++;
                 $newRow = $rowTemplate;
                 // Replace the placeholder token first so it never leaks.
                 $newRow = str_replace($token, '', $newRow);
@@ -3100,7 +3726,7 @@ class TemplateXController extends AbstractController
                 $cellIdx = 0;
                 $newRow = preg_replace_callback(
                     '#<w:tc\b[^>]*>(?:(?!</w:tc>).)*?</w:tc>#s',
-                    function (array $cm) use (&$cellIdx, $columns, $rowData, $maxColumns): string {
+                    function (array $cm) use (&$cellIdx, $columns, $rowData, $maxColumns, $key, $richSubfields, $dataIdx): string {
                         $cell = $cm[0];
                         if ($cellIdx >= $maxColumns) {
                             $cellIdx++;
@@ -3108,8 +3734,22 @@ class TemplateXController extends AbstractController
                         }
                         $colKey = $columns[$cellIdx]['key'] ?? '';
                         $cellIdx++;
-                        $value = $colKey !== '' ? (string) ($rowData[$colKey] ?? '') : '';
-                        $escaped = $this->escapeForWordXml($value);
+                        if ($colKey === '') {
+                            return $cell;
+                        }
+
+                        // Rich column? Leave a token for expandRichRowColumns to
+                        // replace post-save with real bullet paragraphs. The
+                        // {{...#N}} syntax is the same one processRowGroups uses,
+                        // so the post-pass works uniformly for both row-flow modes.
+                        $richKey = $key . '.' . $colKey;
+                        if (in_array($richKey, $richSubfields, true)) {
+                            $placeholder = '{{' . $richKey . '#' . $dataIdx . '}}';
+                            $escaped = $placeholder;
+                        } else {
+                            $value = (string) ($rowData[$colKey] ?? '');
+                            $escaped = $this->escapeForWordXml($value);
+                        }
 
                         // Replace first <w:t>…</w:t> with the escaped value.
                         if (preg_match('#<w:t\b[^>]*>.*?</w:t>#s', $cell)) {
@@ -3168,7 +3808,7 @@ class TemplateXController extends AbstractController
      * @param array<string, mixed>        $arrays
      * @return array<string, true>        set of group names handled by this pre-pass
      */
-    private function cloneParagraphGroupsPrepass(string $docxPath, array $rowGroups, array $arrays): array
+    private function cloneParagraphGroupsPrepass(string $docxPath, array $rowGroups, array $arrays, array $richSubfields = self::RICH_ROW_SUBFIELDS_DEFAULT): array
     {
         $handled = [];
         if (empty($rowGroups)) {
@@ -3256,7 +3896,7 @@ class TemplateXController extends AbstractController
                     $richKey = "{$groupName}.{$cleanSubfield}";
                     $token = '{{' . $ph . '}}';
 
-                    if (in_array($richKey, self::RICH_ROW_SUBFIELDS, true)) {
+                    if (in_array($richKey, $richSubfields, true)) {
                         $copy = str_replace($token, '{{' . $ph . '#' . $n . '}}', $copy);
                         continue;
                     }
@@ -3336,29 +3976,82 @@ class TemplateXController extends AbstractController
     }
 
     /**
-     * Phase B post-pass: after TemplateProcessor has saved the DOCX, every
-     * {{stations.details.N#i}} placeholder (left intact by RICH_ROW_SUBFIELDS)
-     * is replaced with a sequence of real <w:p> elements parsed from the
-     * station's `details` string. This turns multi-line prose blocks with
-     * date ranges, sub-titles, and dash-prefixed achievements into properly
-     * formatted Word paragraphs with bold date headers and bullet items.
+     * Build the list of "rich" row sub-fields — `{group}.{col}` strings whose
+     * cell content must be rendered as a sequence of bullet paragraphs instead
+     * of a single text run. Two things feed into the list:
      *
-     * The host paragraph's <w:pPr> is cloned as the base style for headers
-     * and plain text lines; bullet paragraphs get their own <w:pPr> using a
-     * numId auto-detected from the template's numbering.xml (falling back to
-     * a "• " character prefix if no bullet numbering is defined).
+     *   - the default constant (always includes `stations.details` for back-compat
+     *     with forms created before column-level `type` was supported)
+     *   - every `table` variable whose column declares `type=list`
      *
-     * @param list<array<string, mixed>|string> $stations
+     * Used by processRowGroups / cloneParagraphGroupsPrepass / expandTableBlocks
+     * to leave the cell as a `{{group.col.N#i}}` placeholder that the Phase B
+     * post-pass (`expandRichRowColumns`) then expands into real paragraphs.
+     *
+     * @param array<int, array<string, mixed>> $formFields
+     * @return list<string>
      */
-    private function expandStationDetails(string $docxPath, array $stations): void
+    private function getRichRowSubfields(array $formFields): array
     {
-        if (empty($stations)) {
+        $rich = [];
+        foreach (self::RICH_ROW_SUBFIELDS_DEFAULT as $k) {
+            $rich[$k] = true;
+        }
+        foreach ($formFields as $field) {
+            if (($field['type'] ?? '') !== 'table' || empty($field['key'])) {
+                continue;
+            }
+            $group = (string) $field['key'];
+            foreach (($field['columns'] ?? []) as $col) {
+                if (!is_array($col) || empty($col['key'])) {
+                    continue;
+                }
+                if (($col['type'] ?? 'text') === 'list') {
+                    $rich["{$group}.{$col['key']}"] = true;
+                }
+            }
+        }
+        return array_keys($rich);
+    }
+
+    /**
+     * Phase B post-pass: after TemplateProcessor has saved the DOCX, every
+     * rich-column placeholder (left intact by processRowGroups / expandTableBlocks)
+     * is replaced with a sequence of real <w:p> elements — one bullet per array
+     * item, or — when the incoming value is still a multi-line string — the
+     * legacy "parseStationDetails" heuristic renderer (date-range detection,
+     * dash-prefixed bullets, spacers) for back-compat with existing datasets
+     * that carry unstructured text.
+     *
+     * @param list<string>                     $richSubfields list of "group.col" strings
+     * @param array<string, array<int, array<string, mixed>>> $arrays       group => rows[]
+     * @param array<int, array<string, mixed>> $formFields
+     */
+    private function expandRichRowColumns(string $docxPath, array $richSubfields, array $arrays, array $formFields): void
+    {
+        if (empty($richSubfields)) {
             return;
+        }
+
+        // Map "group.col" → declared column `type`, so renderer knows whether
+        // the stored value is expected to be an array or a legacy string.
+        $columnTypes = [];
+        foreach ($formFields as $field) {
+            if (($field['type'] ?? '') !== 'table' || empty($field['key'])) {
+                continue;
+            }
+            $group = (string) $field['key'];
+            foreach (($field['columns'] ?? []) as $col) {
+                if (!is_array($col) || empty($col['key'])) {
+                    continue;
+                }
+                $columnTypes["{$group}.{$col['key']}"] = (string) ($col['type'] ?? 'text');
+            }
         }
 
         $zip = new \ZipArchive();
         if ($zip->open($docxPath) !== true) {
-            $this->logger->warning('Failed to open DOCX for station-detail expansion', ['path' => $docxPath]);
+            $this->logger->warning('Failed to open DOCX for rich-column expansion', ['path' => $docxPath]);
             return;
         }
 
@@ -3373,51 +4066,67 @@ class TemplateXController extends AbstractController
 
         $originalXml = $xml;
 
-        foreach ($stations as $i => $station) {
-            $num = $i + 1;
-            $details = '';
-            if (is_array($station)) {
-                $details = (string) ($station['details'] ?? '');
-            } elseif (is_string($station)) {
-                $details = $station;
+        foreach ($richSubfields as $richKey) {
+            [$group, $col] = array_pad(explode('.', $richKey, 2), 2, '');
+            if ($group === '' || $col === '') {
+                continue;
             }
+            $rows = $arrays[$group] ?? [];
+            if (!is_array($rows)) {
+                continue;
+            }
+            $columnType = $columnTypes[$richKey] ?? 'text';
 
-            // Both cloneRow-suffixed and unsuffixed variants are attempted so the
-            // pass is robust against templates that use either style.
-            foreach (["{{stations.details.N#{$num}}}", "{{stations.details#{$num}}}"] as $placeholder) {
-                if (!str_contains($xml, $placeholder)) {
-                    continue;
+            foreach ($rows as $i => $row) {
+                $num = $i + 1;
+
+                // Pull the value — an array means the user/AI returned structured
+                // bullets, a string means legacy markdown-ish prose.
+                $raw = null;
+                if (is_array($row)) {
+                    $raw = $row[$col] ?? null;
+                } elseif (is_string($row) && $col === 'details') {
+                    // Legacy "stations" entries stored as plain strings.
+                    $raw = $row;
                 }
 
-                if (trim($details) === '') {
-                    // No content → swallow the placeholder but keep the (now empty)
-                    // paragraph so the table row/cell structure stays intact.
-                    $xml = str_replace($placeholder, '', $xml);
-                    continue;
-                }
+                foreach (["{{{$richKey}.N#{$num}}}", "{{{$richKey}#{$num}}}"] as $placeholder) {
+                    if (!str_contains($xml, $placeholder)) {
+                        continue;
+                    }
 
-                $pattern = '#<w:p\b[^>]*>(?:(?!</w:p>).)*?' . preg_quote($placeholder, '#') . '(?:(?!</w:p>).)*?</w:p>#s';
+                    $isEmpty = $raw === null
+                        || $raw === ''
+                        || (is_array($raw) && empty(array_filter($raw, static fn ($v) => trim((string) $v) !== '')));
+                    if ($isEmpty) {
+                        $xml = str_replace($placeholder, '', $xml);
+                        continue;
+                    }
 
-                $replaced = preg_replace_callback(
-                    $pattern,
-                    function (array $m) use ($details, $bulletNumId): string {
-                        $basePPr = '';
-                        if (preg_match('#<w:pPr>.*?</w:pPr>#s', $m[0], $pm)) {
-                            $basePPr = $pm[0];
-                        }
-                        return $this->renderStationDetailsXml($details, $basePPr, $bulletNumId);
-                    },
-                    $xml
-                );
+                    $pattern = '#<w:p\b[^>]*>(?:(?!</w:p>).)*?' . preg_quote($placeholder, '#') . '(?:(?!</w:p>).)*?</w:p>#s';
+                    $replaced = preg_replace_callback(
+                        $pattern,
+                        function (array $m) use ($raw, $columnType, $bulletNumId): string {
+                            $basePPr = '';
+                            if (preg_match('#<w:pPr>.*?</w:pPr>#s', $m[0], $pm)) {
+                                $basePPr = $pm[0];
+                            }
+                            return $this->renderRichColumnXml($raw, $columnType, $basePPr, $bulletNumId);
+                        },
+                        $xml
+                    );
 
-                if ($replaced !== null && $replaced !== $xml) {
-                    $xml = $replaced;
-                } else {
-                    // Regex couldn't locate the host paragraph (unusual nesting).
-                    // Fall back to line-break substitution so the cell is not left
-                    // with a raw placeholder.
-                    $fallback = $this->escapeForWordXml($details);
-                    $xml = str_replace($placeholder, $fallback, $xml);
+                    if ($replaced !== null && $replaced !== $xml) {
+                        $xml = $replaced;
+                    } else {
+                        // Regex couldn't locate the host paragraph. Fall back to
+                        // a safe line-break substitution so the cell is never
+                        // left with a raw placeholder.
+                        $fallback = is_array($raw)
+                            ? implode("\n", array_map('strval', $raw))
+                            : (string) $raw;
+                        $xml = str_replace($placeholder, $this->escapeForWordXml($fallback), $xml);
+                    }
                 }
             }
         }
@@ -3426,6 +4135,64 @@ class TemplateXController extends AbstractController
             $zip->addFromString('word/document.xml', $xml);
         }
         $zip->close();
+    }
+
+    /**
+     * Render a rich column value into a sequence of <w:p> OOXML paragraphs.
+     * Array-typed values produce one bullet per item (no heuristic parsing);
+     * string-typed values go through the legacy parseStationDetails reader so
+     * "date range + dash bullets" prose keeps working for old datasets.
+     *
+     * @param array<int, mixed>|string|null $raw
+     */
+    private function renderRichColumnXml(array|string|null $raw, string $columnType, string $basePPr, ?int $bulletNumId): string
+    {
+        if (is_array($raw)) {
+            // Structured path: one bullet per non-empty item. Column type is
+            // `list` here (or anything else that naturally arrays); empty items
+            // are dropped so trailing input whitespace doesn't add blank lines.
+            $items = array_values(array_filter(
+                array_map(static fn ($v) => trim((string) $v), $raw),
+                static fn ($v) => $v !== '',
+            ));
+            if (empty($items)) {
+                return '';
+            }
+            return $this->renderBulletList($items, $basePPr, $bulletNumId);
+        }
+
+        // Legacy string path: keep the date-header / dash-bullet heuristic so
+        // existing "stations.details" prose still renders nicely.
+        $str = (string) ($raw ?? '');
+        if (trim($str) === '') {
+            return '';
+        }
+        return $this->renderStationDetailsXml($str, $basePPr, $bulletNumId);
+    }
+
+    /**
+     * Helper: emit `<w:p>` paragraphs — one per item — using the bullet
+     * numbering defined in the template's numbering.xml (falling back to a
+     * "• " character prefix if no numId is available).
+     *
+     * @param list<string> $items
+     */
+    private function renderBulletList(array $items, string $basePPr, ?int $bulletNumId): string
+    {
+        $bulletPPr = $bulletNumId !== null
+            ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
+                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>'
+            : '<w:pPr><w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
+
+        $out = '';
+        foreach ($items as $item) {
+            $text = $this->escapeForWordXml($item);
+            $prefix = $bulletNumId !== null ? '' : '• ';
+            $out .= '<w:p>' . $bulletPPr
+                . '<w:r><w:t xml:space="preserve">' . $prefix . $text . '</w:t></w:r>'
+                . '</w:p>';
+        }
+        return $out;
     }
 
     /**

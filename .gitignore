@@ -2,6 +2,7 @@ node_modules/
 package-lock.json
 tests/e2e/test-results/
 tests/e2e/reports/
+test-results/
 
 # Personal test data - never commit
 tests/fixtures/*.JPG
