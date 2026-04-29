@@ -2,7 +2,7 @@
   "id": "templatex",
   "name": "templatex",
   "namespace": "Plugin\\TemplateX",
-  "version": "2.0.0",
+  "version": "3.1.0",
   "displayName": "TemplateX",
   "description": "Organise data collection workflows into Collections: define variables, upload Word templates, gather datasets, and export with AI-powered extraction.",
   "author": "Synaplan",

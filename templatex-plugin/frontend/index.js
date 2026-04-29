@@ -1,4 +1,4 @@
-const TX_VERSION = "v2.0.0";
+const TX_VERSION = "v3.1.0";
 
 export default {
   mount(el, context) {
