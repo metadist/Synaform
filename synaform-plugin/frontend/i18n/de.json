@@ -230,7 +230,11 @@
     "occurrences": "Verwendet",
     "confirm_delete": "Diese Zielvorlage wirklich l\u00f6schen?",
     "uploading": "Wird hochgeladen...",
-    "analyzing": "Analysiere Platzhalter..."
+    "analyzing": "Analysiere Platzhalter...",
+    "language_label": "Vorlagensprache",
+    "language_hint": "Die KI-Extraktion liefert Werte in dieser Sprache. F\u00e4llt auf die Collection-Sprache zur\u00fcck, wenn nichts gew\u00e4hlt ist.",
+    "language_inherit": "Collection-Sprache verwenden",
+    "language_updated": "Vorlagensprache aktualisiert"
   },
   "datasets": {
     "title": "Datens\u00e4tze",
@@ -274,6 +278,12 @@
     "analyze_step_ocr": "Lesen",
     "analyze_step_ai": "Analyse",
     "analyze_step_done": "Fertig",
+    "analyze_status_reading_files": "Text wird aus {count} Datei(en) extrahiert...",
+    "analyze_status_running_ai": "Die KI liest den extrahierten Text...",
+    "analyze_status_image_hint": "Bilder werden \u00fcber die Vision-KI verarbeitet \u2014 etwa 5\u201315 Sekunden pro Bild.",
+    "analyze_status_doc_hint": "Office-Dokumente werden zuerst per Apache Tika gelesen; schl\u00e4gt das fehl, \u00fcbernimmt die KI (langsamer).",
+    "analyze_status_elapsed": "Vergangen: {seconds}s",
+    "analyze_dont_close": "Bitte halten Sie diesen Tab offen, bis die Analyse fertig ist.",
     "extract_btn": "Aus Dokumenten extrahieren",
     "extract_running": "Extrahiere...",
     "extract_done": "Extraktion abgeschlossen",

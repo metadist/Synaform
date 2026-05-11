@@ -230,7 +230,11 @@
     "occurrences": "Used",
     "confirm_delete": "Delete this Target Template?",
     "uploading": "Uploading...",
-    "analyzing": "Analyzing placeholders..."
+    "analyzing": "Analyzing placeholders...",
+    "language_label": "Template language",
+    "language_hint": "AI extraction will write values in this language. Falls back to the Collection language if unset.",
+    "language_inherit": "Use Collection language",
+    "language_updated": "Template language updated"
   },
   "datasets": {
     "title": "Datasets",
@@ -274,6 +278,12 @@
     "analyze_step_ocr": "Reading",
     "analyze_step_ai": "Analyzing",
     "analyze_step_done": "Done",
+    "analyze_status_reading_files": "Extracting text from {count} file(s)...",
+    "analyze_status_running_ai": "AI is reading the extracted text...",
+    "analyze_status_image_hint": "Images are processed with Vision AI \u2014 about 5\u201315 seconds per image.",
+    "analyze_status_doc_hint": "Office documents are extracted with Apache Tika first; if that fails the AI takes over (slower).",
+    "analyze_status_elapsed": "Elapsed: {seconds}s",
+    "analyze_dont_close": "Please keep this tab open until the analysis finishes.",
     "extract_btn": "Extract from documents",
     "extract_running": "Extracting...",
     "extract_done": "Extraction complete",

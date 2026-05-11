@@ -211,7 +211,11 @@
     "occurrences": "Kullan\u0131m",
     "confirm_delete": "Bu hedef \u015fablon silinsin mi?",
     "uploading": "Y\u00fckleniyor...",
-    "analyzing": "Yer tutucular analiz ediliyor..."
+    "analyzing": "Yer tutucular analiz ediliyor...",
+    "language_label": "\u015eablon dili",
+    "language_hint": "YZ \u00e7\u0131kar\u0131m\u0131 de\u011ferleri bu dilde yazacakt\u0131r. Bo\u015f b\u0131rak\u0131l\u0131rsa Collection dili kullan\u0131l\u0131r.",
+    "language_inherit": "Collection dilini kullan",
+    "language_updated": "\u015eablon dili g\u00fcncellendi"
   },
   "datasets": {
     "title": "Veri k\u00fcmeleri",
@@ -255,6 +259,12 @@
     "analyze_step_ocr": "Okuma",
     "analyze_step_ai": "Analiz",
     "analyze_step_done": "Bitti",
+    "analyze_status_reading_files": "{count} dosyadan metin \u00e7\u0131kar\u0131l\u0131yor...",
+    "analyze_status_running_ai": "YZ \u00e7\u0131kar\u0131lan metni okuyor...",
+    "analyze_status_image_hint": "G\u00f6rseller Vision YZ ile i\u015flenir \u2014 g\u00f6rsel ba\u015f\u0131na yakla\u015f\u0131k 5\u201315 saniye.",
+    "analyze_status_doc_hint": "Office belgeleri \u00f6nce Apache Tika ile okunur; ba\u015far\u0131s\u0131z olursa YZ devral\u0131r (daha yava\u015f).",
+    "analyze_status_elapsed": "Ge\u00e7en s\u00fcre: {seconds}s",
+    "analyze_dont_close": "Analiz tamamlan\u0131ncaya kadar l\u00fctfen bu sekmeyi a\u00e7\u0131k tutun.",
     "extract_btn": "Belgelerden \u00e7\u0131kar",
     "extract_running": "\u00c7\u0131kar\u0131l\u0131yor...",
     "extract_done": "\u00c7\u0131kar\u0131m tamamland\u0131",

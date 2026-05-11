@@ -211,7 +211,11 @@
     "occurrences": "Uso",
     "confirm_delete": "\u00bfEliminar esta plantilla objetivo?",
     "uploading": "Subiendo...",
-    "analyzing": "Analizando marcadores..."
+    "analyzing": "Analizando marcadores...",
+    "language_label": "Idioma de la plantilla",
+    "language_hint": "La extracci\u00f3n de IA escribir\u00e1 los valores en este idioma. Si est\u00e1 vac\u00edo, se usa el idioma de la Collection.",
+    "language_inherit": "Usar el idioma de la Collection",
+    "language_updated": "Idioma de la plantilla actualizado"
   },
   "datasets": {
     "title": "Datasets",
@@ -255,6 +259,12 @@
     "analyze_step_ocr": "Lectura",
     "analyze_step_ai": "An\u00e1lisis",
     "analyze_step_done": "Listo",
+    "analyze_status_reading_files": "Extrayendo texto de {count} archivo(s)...",
+    "analyze_status_running_ai": "La IA est\u00e1 leyendo el texto extra\u00eddo...",
+    "analyze_status_image_hint": "Las im\u00e1genes se procesan con IA de visi\u00f3n \u2014 aprox. 5\u201315 segundos por imagen.",
+    "analyze_status_doc_hint": "Los documentos Office se extraen primero con Apache Tika; si falla, la IA toma el relevo (m\u00e1s lento).",
+    "analyze_status_elapsed": "Transcurrido: {seconds}s",
+    "analyze_dont_close": "Mant\u00e9n esta pesta\u00f1a abierta hasta que termine el an\u00e1lisis.",
     "extract_btn": "Extraer de documentos",
     "extract_running": "Extrayendo...",
     "extract_done": "Extracci\u00f3n completada",
