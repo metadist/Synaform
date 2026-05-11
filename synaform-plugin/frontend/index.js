@@ -105,6 +105,11 @@ export default {
 
       // Danger zone
       dangerConfirmText: "",
+
+      // GDPR / data retention banner state — when truthy, renderDatasetsTab
+      // suppresses the overdue banner for the current session even if datasets
+      // remain past their expiry date. The user explicitly clicked Cancel.
+      retentionBannerDismissed: false,
     };
 
     // =========================================================================
@@ -840,6 +845,8 @@ export default {
       link: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>',
       refresh:
         '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>',
+      clock:
+        '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
     };
 
     // =========================================================================
@@ -1542,6 +1549,18 @@ export default {
             <span>${T("variables.designer_prevent_orphans")}</span>
           </label>
           <p class="text-xs tx-secondary">${T("variables.designer_prevent_orphans_hint")}</p>
+          <div class="pt-2 border-t" style="border-color:var(--divider)">
+            <label class="tx-label">${T("variables.designer_list_spacing")}</label>
+            <p class="text-xs tx-secondary mb-2" style="margin-top:-.125rem">${T("variables.designer_list_spacing_hint")}</p>
+            <label class="flex items-center gap-1.5 text-sm">
+              <input type="checkbox" name="fd_${idx}_top_blank_line" ${d.top_blank_line ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+              <span>${T("variables.designer_list_top_blank")}</span>
+            </label>
+            <label class="flex items-center gap-1.5 text-sm">
+              <input type="checkbox" name="fd_${idx}_bottom_blank_line" ${d.bottom_blank_line ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+              <span>${T("variables.designer_list_bottom_blank")}</span>
+            </label>
+          </div>
         </div>`;
       }
       if (fd.type === "table") {
@@ -1562,8 +1581,14 @@ export default {
         </div>`;
       }
       if (fd.type === "checkbox") {
+        const clickable = d.clickable_checkbox !== false;
         return `<div class="mt-2 p-3 rounded space-y-3" style="background:var(--bg-app)">
           <p class="text-xs tx-secondary">${T("variables.designer_checkbox_hint")}</p>
+          <label class="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" name="fd_${idx}_clickable_checkbox" ${clickable ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+            <span>${T("variables.designer_checkbox_clickable")}</span>
+          </label>
+          <p class="text-xs tx-secondary" style="margin-top:-.125rem">${T("variables.designer_checkbox_clickable_hint")}</p>
           <div>
             <label class="tx-label">${T("variables.designer_checkbox_glyphs")}</label>
             <p class="text-xs tx-secondary mb-2" style="margin-top:-.125rem">${T("variables.designer_checkbox_glyphs_hint")}</p>
@@ -2202,9 +2227,17 @@ export default {
         <button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("datasets.new")}</button>
       </div>`;
 
+      // Surface a GDPR-style overdue banner so the user can bulk-delete
+      // datasets whose retention window (delete_after_months) has elapsed.
+      const overdueDatasets = state.retentionBannerDismissed
+        ? []
+        : allDatasets.filter(datasetIsOverdue);
+      const overdueBanner = renderOverdueBanner(overdueDatasets);
+
       if (allDatasets.length === 0) {
         return `<div class="space-y-4">
           ${header}
+          ${overdueBanner}
           <div class="tx-card p-8 text-center">
             <div class="inline-flex items-center justify-center w-12 h-12 rounded-full mb-3" style="background:var(--bg-chip);color:var(--txt-secondary)">${ICONS.database}</div>
             <h4 class="font-semibold text-lg mb-1">${T("datasets.empty")}</h4>
@@ -2245,6 +2278,7 @@ export default {
 
       return `<div class="space-y-4">
         ${header}
+        ${overdueBanner}
         ${toolbar}
         <div class="space-y-2">${rows}</div>
         ${totalPages > 1 ? renderPagination(state.datasetsPage, totalPages, filtered.length) : ""}
@@ -2309,19 +2343,106 @@ export default {
       </div>`;
     }
 
+    // ---------------------------------------------------------------------
+    // GDPR / data retention helpers
+    // ---------------------------------------------------------------------
+
+    const RETENTION_MONTHS_OPTIONS = [0, 3, 6, 9, 12, 18];
+
+    function datasetExpiresAt(d) {
+      // Backend already returns a computed `expires_at`. We re-derive it on
+      // the client for legacy entries (or in case the timestamp is stale)
+      // so the UI stays accurate even before the next API roundtrip.
+      const months = parseInt(d?.delete_after_months, 10);
+      if (!months || months <= 0) return null;
+      const base = new Date(d.updated_at || d.created_at || Date.now());
+      if (Number.isNaN(base.getTime())) return null;
+      const out = new Date(base);
+      out.setMonth(out.getMonth() + months);
+      return out;
+    }
+
+    function datasetIsOverdue(d) {
+      const exp = datasetExpiresAt(d);
+      if (!exp) return false;
+      return exp.getTime() < Date.now();
+    }
+
+    function renderRetentionPicker(d) {
+      const cur = parseInt(d?.delete_after_months, 10) || 0;
+      const opts = RETENTION_MONTHS_OPTIONS.map((m) => {
+        const label =
+          m === 0
+            ? T("datasets.retention_never")
+            : Tf("datasets.retention_months", { months: m });
+        return `<option value="${m}"${m === cur ? " selected" : ""}>${escHtml(label)}</option>`;
+      }).join("");
+      return `<label class="flex items-center gap-1.5 text-xs tx-secondary" title="${escHtml(T("datasets.retention_hint"))}">
+        ${ICONS.clock || ICONS.calendar || ""}
+        <span>${T("datasets.retention_label")}:</span>
+        <select data-action="set-retention" class="tx-input" style="height:30px;padding:0 0.4rem;font-size:0.75rem">${opts}</select>
+      </label>`;
+    }
+
+    function renderExpiryHint(d) {
+      const exp = datasetExpiresAt(d);
+      if (!exp) return "";
+      const overdue = exp.getTime() < Date.now();
+      const formatted = exp.toISOString().slice(0, 10);
+      const cls = overdue
+        ? "color:var(--status-error);font-weight:500"
+        : "color:var(--txt-secondary)";
+      const text = overdue
+        ? Tf("datasets.retention_expired_at", { date: formatted })
+        : Tf("datasets.retention_expires_at", { date: formatted });
+      return ` · <span style="${cls}">${escHtml(text)}</span>`;
+    }
+
+    function renderOverdueBanner(overdueDatasets) {
+      if (!overdueDatasets.length) return "";
+      const count = overdueDatasets.length;
+      return `<div class="tx-card p-4" style="background:rgba(220,38,38,0.08);border-color:var(--status-error)">
+        <div class="flex items-start justify-between gap-3 flex-wrap">
+          <div class="flex-1 min-w-0">
+            <div class="font-semibold" style="color:var(--status-error)">
+              ${ICONS.warning} ${Tf("datasets.retention_overdue_title", { count })}
+            </div>
+            <p class="text-sm tx-secondary mt-1">${T("datasets.retention_overdue_hint")}</p>
+            <ul class="text-xs tx-secondary mt-2 space-y-0.5">
+              ${overdueDatasets
+                .slice(0, 5)
+                .map(
+                  (d) =>
+                    `<li>${escHtml(datasetDisplayName(d))} — ${escHtml(formatDate(d.updated_at || d.created_at))}</li>`,
+                )
+                .join("")}
+              ${overdueDatasets.length > 5 ? `<li>… ${overdueDatasets.length - 5} more</li>` : ""}
+            </ul>
+          </div>
+          <div class="flex items-center gap-2">
+            <button data-action="retention-dismiss" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.cancel")}</button>
+            <button data-action="retention-delete-overdue" class="tx-btn tx-btn-sm" style="background:var(--status-error);color:white">${ICONS.trash} ${T("datasets.retention_delete_now")}</button>
+          </div>
+        </div>
+      </div>`;
+    }
+
     function renderDatasetDetail(c) {
       const d = state.selectedDataset;
       const templates = collectionTemplates(c);
       const hasPreview = templates.length > 0 && state.previewVisible;
       const canShowPreview = templates.length > 0 && !state.previewVisible;
 
+      const retention = renderRetentionPicker(d);
+      const expiryHint = renderExpiryHint(d);
       const header = `<div class="tx-card p-5">
-        <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
           <div class="min-w-0 flex-1">
             <h3 class="text-lg font-semibold truncate">${escHtml(datasetDisplayName(d))}</h3>
-            <div class="text-xs tx-secondary mt-0.5">${T("app.created")}: ${formatDate(d.created_at)}</div>
+            <div class="text-xs tx-secondary mt-0.5">${T("app.created")}: ${formatDate(d.created_at)}${expiryHint}</div>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 flex-wrap">
+            ${retention}
             ${statusBadge(d.status || "draft")}
             ${canShowPreview ? `<button data-action="preview-show" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("preview.show")}">${ICONS.doc} ${T("preview.show")}</button>` : ""}
             <button data-delete-dataset="${d.id}" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)">${ICONS.trash}</button>
@@ -3402,6 +3523,8 @@ export default {
             const style = fd.get(`fd_${idx}_style`)?.toString();
             if (style === "ol" || style === "ul") designer.list_style = style;
             designer.prevent_orphans = fd.has(`fd_${idx}_prevent_orphans`);
+            designer.top_blank_line = fd.has(`fd_${idx}_top_blank_line`);
+            designer.bottom_blank_line = fd.has(`fd_${idx}_bottom_blank_line`);
           } else if (fields[idx].type === "table") {
             designer.repeat_header = fd.has(`fd_${idx}_repeat_header`);
             designer.prevent_row_break = fd.has(`fd_${idx}_prevent_row_break`);
@@ -3415,6 +3538,9 @@ export default {
             if (un) designer.unchecked_glyph = un;
             if (yl) designer.yes_label = yl;
             if (nl) designer.no_label = nl;
+            designer.clickable_checkbox = fd.has(
+              `fd_${idx}_clickable_checkbox`,
+            );
           } else if (fields[idx].type === "image") {
             const w = parseInt(fd.get(`fd_${idx}_width`) || "0", 10);
             const h = parseInt(fd.get(`fd_${idx}_height`) || "0", 10);
@@ -4042,6 +4168,68 @@ export default {
           }
         }),
       );
+
+      // GDPR retention dropdown on the dataset detail header.
+      el.querySelector('[data-action="set-retention"]')?.addEventListener(
+        "change",
+        async (e) => {
+          const d = state.selectedDataset;
+          if (!d) return;
+          const months = parseInt(e.target.value, 10) || 0;
+          try {
+            const res = await api(`/candidates/${d.id}`, {
+              method: "PUT",
+              body: JSON.stringify({
+                delete_after_months: months > 0 ? months : null,
+              }),
+            });
+            state.selectedDataset = res.candidate;
+            await fetchDatasets();
+            showToast(T("datasets.retention_updated"));
+            render();
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        },
+      );
+
+      // Overdue banner — Cancel just hides the banner for the current
+      // session. Delete now batch-DELETEs every dataset whose computed
+      // expires_at is in the past, after a confirm() guard.
+      el.querySelector('[data-action="retention-dismiss"]')?.addEventListener(
+        "click",
+        () => {
+          state.retentionBannerDismissed = true;
+          render();
+        },
+      );
+      el.querySelector(
+        '[data-action="retention-delete-overdue"]',
+      )?.addEventListener("click", async () => {
+        const overdue = (state.datasets || []).filter(datasetIsOverdue);
+        if (!overdue.length) return;
+        if (
+          !confirm(
+            Tf("datasets.retention_delete_confirm", {
+              count: overdue.length,
+            }),
+          )
+        )
+          return;
+        let okCount = 0;
+        for (const d of overdue) {
+          try {
+            await api(`/candidates/${d.id}`, { method: "DELETE" });
+            okCount++;
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        }
+        state.retentionBannerDismissed = false;
+        await fetchDatasets();
+        showToast(Tf("datasets.retention_delete_done", { count: okCount }));
+        render();
+      });
 
       // Datasets search
       const ds = el.querySelector("#tx-datasets-search");

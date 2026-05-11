@@ -810,6 +810,20 @@ class SynaformController extends AbstractController
         }
 
         $candidates = $this->pluginData->list($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE);
+        // Surface the GDPR retention metadata on every entry so the UI can
+        // flag overdue datasets without re-walking each one. We compute
+        // expires_at on the fly: legacy entries created before this feature
+        // existed have no `delete_after_months` field and therefore never
+        // expire by default.
+        $candidates = array_map(function (array $c): array {
+            $c['delete_after_months'] = $this->normalizeRetentionMonths($c['delete_after_months'] ?? null);
+            $c['expires_at'] = $this->computeExpiresAt(
+                $c['updated_at'] ?? null,
+                $c['delete_after_months']
+            );
+
+            return $c;
+        }, $candidates);
 
         return $this->json([
             'success' => true,
@@ -843,9 +857,14 @@ class SynaformController extends AbstractController
             'status' => $data['status'] ?? 'draft',
             'field_values' => $data['field_values'] ?? [],
             'files' => [],
+            // GDPR / data-retention: when set to a positive integer the
+            // dataset is flagged for deletion after that many months from
+            // its last update. null = "never auto-delete" (legacy default).
+            'delete_after_months' => $this->normalizeRetentionMonths($data['delete_after_months'] ?? null),
             'created_at' => date('c'),
             'updated_at' => date('c'),
         ];
+        $entryData['expires_at'] = $this->computeExpiresAt($entryData['updated_at'], $entryData['delete_after_months']);
 
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $entryId, $entryData);
 
@@ -873,6 +892,12 @@ class SynaformController extends AbstractController
         if (!$candidate) {
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
+
+        $candidate['delete_after_months'] = $this->normalizeRetentionMonths($candidate['delete_after_months'] ?? null);
+        $candidate['expires_at'] = $this->computeExpiresAt(
+            $candidate['updated_at'] ?? null,
+            $candidate['delete_after_months']
+        );
 
         return $this->json([
             'success' => true,
@@ -907,7 +932,14 @@ class SynaformController extends AbstractController
                 $existing[$field] = $data[$field];
             }
         }
+        if (array_key_exists('delete_after_months', $data)) {
+            $existing['delete_after_months'] = $this->normalizeRetentionMonths($data['delete_after_months']);
+        }
         $existing['updated_at'] = date('c');
+        $existing['expires_at'] = $this->computeExpiresAt(
+            $existing['updated_at'],
+            $existing['delete_after_months'] ?? null
+        );
 
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $existing);
 
@@ -915,6 +947,40 @@ class SynaformController extends AbstractController
             'success' => true,
             'candidate' => $existing,
         ]);
+    }
+
+    /**
+     * Coerce arbitrary input into the allowed retention period (months).
+     * Allowed values: 3, 6, 9, 12, 18. Anything else (including 0, "never",
+     * empty string, null) collapses to null = "never auto-delete".
+     */
+    private function normalizeRetentionMonths(mixed $raw): ?int
+    {
+        if ($raw === null || $raw === '' || $raw === false || (is_string($raw) && strtolower(trim($raw)) === 'never')) {
+            return null;
+        }
+        $n = (int) $raw;
+        $allowed = [3, 6, 9, 12, 18];
+
+        return in_array($n, $allowed, true) ? $n : null;
+    }
+
+    /**
+     * Compute the GDPR-driven expiry timestamp from a base ISO date and a
+     * retention window in months. Returns null when retention is "never".
+     */
+    private function computeExpiresAt(?string $baseIso, ?int $months): ?string
+    {
+        if ($months === null || $months <= 0 || !is_string($baseIso) || $baseIso === '') {
+            return null;
+        }
+        try {
+            $dt = new \DateTimeImmutable($baseIso);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $dt->modify('+' . $months . ' months')->format('c');
     }
 
     #[Route('/candidates/{candidateId}', name: 'candidates_delete', methods: ['DELETE'])]
@@ -1791,7 +1857,7 @@ class SynaformController extends AbstractController
             $this->processRowGroups($tp, $classified['rowGroups'], $arrays, $designerMap, $richSubfields);
             $this->processBlockGroups($tp, $classified['blockGroups'], $arrays);
             $this->processCheckboxes($tp, $classified['checkboxes'], $variables, $designerMap);
-            $this->processLists($tp, $classified['lists'], $variables);
+            $this->processLists($tp, $classified['lists'], $variables, $designerMap);
             $this->processImages($tp, $formFields, $entry);
             $this->processScalars($tp, $classified['scalars'], $variables);
 
@@ -1814,6 +1880,13 @@ class SynaformController extends AbstractController
             // designer config. Runs on the final DOCX so row clones emitted by
             // cloneRow / cloneParagraphGroupsPrepass are also reached.
             $this->applyTableLayoutHelpers($outputPath, $arrays, $designerMap);
+
+            // Phase E post-pass: convert [[SYNCB|…]] markers emitted by
+            // processCheckboxes() into real Word content-control checkboxes
+            // (`<w:sdt>` with `<w14:checkbox>`). Lets the customer click and
+            // toggle the checkboxes in the generated DOCX while still keeping
+            // the pre-resolved state visible.
+            $this->convertCheckboxMarkersToContentControls($outputPath);
 
             if (is_file($cleanedPath)) {
                 unlink($cleanedPath);
@@ -2823,6 +2896,12 @@ class SynaformController extends AbstractController
             if (array_key_exists('prevent_orphans', $raw)) {
                 $out['prevent_orphans'] = (bool) $raw['prevent_orphans'];
             }
+            if (array_key_exists('top_blank_line', $raw)) {
+                $out['top_blank_line'] = (bool) $raw['top_blank_line'];
+            }
+            if (array_key_exists('bottom_blank_line', $raw)) {
+                $out['bottom_blank_line'] = (bool) $raw['bottom_blank_line'];
+            }
         } elseif ($fieldType === 'table') {
             if (array_key_exists('repeat_header', $raw)) {
                 $out['repeat_header'] = (bool) $raw['repeat_header'];
@@ -2839,6 +2918,18 @@ class SynaformController extends AbstractController
             }
             if (isset($raw['unchecked_glyph']) && is_string($raw['unchecked_glyph']) && $raw['unchecked_glyph'] !== '') {
                 $out['unchecked_glyph'] = mb_substr((string) $raw['unchecked_glyph'], 0, 4);
+            }
+            if (array_key_exists('clickable_checkbox', $raw)) {
+                // Default behaviour is now "clickable" (real Word content
+                // controls). Persist false explicitly when the designer
+                // opted out so the renderer falls back to static glyphs.
+                $out['clickable_checkbox'] = (bool) $raw['clickable_checkbox'];
+            }
+            if (isset($raw['yes_label']) && is_string($raw['yes_label'])) {
+                $out['yes_label'] = mb_substr($raw['yes_label'], 0, 32);
+            }
+            if (isset($raw['no_label']) && is_string($raw['no_label'])) {
+                $out['no_label'] = mb_substr($raw['no_label'], 0, 32);
             }
         } elseif ($fieldType === 'image') {
             if (isset($raw['width'])) {
@@ -3516,34 +3607,69 @@ class SynaformController extends AbstractController
             $designer = $designerMap[$cbKey] ?? [];
             $checkedGlyph = is_string($designer['checked_glyph'] ?? null) ? $designer['checked_glyph'] : '☒';
             $uncheckedGlyph = is_string($designer['unchecked_glyph'] ?? null) ? $designer['unchecked_glyph'] : '☐';
+            // Per-variable opt-out: plain `clickable_checkbox` => false leaves
+            // the historical static glyph behaviour untouched. Default is true
+            // because the customer wants real, interactive checkboxes.
+            $clickable = !array_key_exists('clickable_checkbox', $designer)
+                || $designer['clickable_checkbox'] !== false;
 
             foreach ($fields as $ph) {
                 $checked = str_ends_with($ph, '.yes') ? $yesVal : !$yesVal;
 
-                // Best-effort: for templates that use real Word checkbox content
-                // controls (<w:sdt>…<w:sdtCheckbox>), update the checkbox state via
-                // PhpWord. For plain-text placeholders (like highlighted {{checkb.*.*}}
-                // markers in table cells) setCheckbox either throws or silently
-                // no-ops — so we always follow up with a text replacement to a
-                // visible glyph as a guaranteed fallback.
+                // Best-effort: for templates that already use real Word checkbox
+                // content controls (<w:sdt>…<w:sdtCheckbox>), update the state
+                // via PhpWord directly. Plain-text placeholders fall through to
+                // the marker path below.
                 try {
                     $tp->setCheckbox($ph, $checked);
                 } catch (\Throwable) {
-                    // ignored — text replacement below is the guaranteed path
+                    // ignored — marker / text replacement below is the guaranteed path
                 }
-                $tp->setValue($ph, $checked ? $checkedGlyph : $uncheckedGlyph);
+
+                if ($clickable) {
+                    // Emit a unique marker that survives PhpWord's setValue
+                    // XML escaping. The post-pass
+                    // convertCheckboxMarkersToContentControls() then rewrites
+                    // each `<w:r>…marker…</w:r>` into a real <w:sdt> Word
+                    // content-control checkbox so the generated DOCX exposes
+                    // a clickable checkbox pre-set to the correct state.
+                    $tp->setValue($ph, $this->buildCheckboxMarker($checked, $checkedGlyph, $uncheckedGlyph));
+                } else {
+                    $tp->setValue($ph, $checked ? $checkedGlyph : $uncheckedGlyph);
+                }
             }
         }
     }
 
     /**
+     * Build the unique placeholder marker we substitute for a checkbox during
+     * the PhpWord pass. The marker carries the desired state plus both glyphs
+     * so the post-pass can use designer-customised glyphs without re-reading
+     * the variable map.
+     *
+     * Format: [[SYNCB|state|checkedGlyph|uncheckedGlyph]]
+     */
+    private function buildCheckboxMarker(bool $checked, string $checkedGlyph, string $uncheckedGlyph): string
+    {
+        return '[[SYNCB|' . ($checked ? 'on' : 'off') . '|' . $checkedGlyph . '|' . $uncheckedGlyph . ']]';
+    }
+
+    /**
      * LIST mode: array values rendered as newline-separated text with OOXML line breaks.
      */
-    private function processLists(TemplateProcessor $tp, array $listKeys, array $variables): void
+    private function processLists(TemplateProcessor $tp, array $listKeys, array $variables, array $designerMap = []): void
     {
         foreach ($listKeys as $key) {
             $val = $variables[$key] ?? null;
-            $text = is_array($val) ? implode("\n", array_map('strval', $val)) : (string) ($val ?? '');
+            $items = is_array($val) ? array_map('strval', $val) : ((string) ($val ?? '') === '' ? [] : [(string) $val]);
+            $designer = $designerMap[$key] ?? [];
+            if (!empty($designer['top_blank_line'])) {
+                array_unshift($items, '');
+            }
+            if (!empty($designer['bottom_blank_line'])) {
+                $items[] = '';
+            }
+            $text = implode("\n", $items);
             $text = htmlspecialchars($text, ENT_XML1 | ENT_QUOTES, 'UTF-8');
             $text = str_replace("\n", '</w:t><w:br/><w:t>', $text);
             $tp->setValue($key, $text);
@@ -3698,6 +3824,8 @@ class SynaformController extends AbstractController
             $designer = $designerMap[$key] ?? [];
             $wantsOrdered = ($designer['list_style'] ?? null) === 'ol';
             $preventOrphans = !empty($designer['prevent_orphans']);
+            $topBlankLine = !empty($designer['top_blank_line']);
+            $bottomBlankLine = !empty($designer['bottom_blank_line']);
 
             // Non-greedy match of the <w:p>...</w:p> containing the placeholder.
             // The negative lookahead on </w:p> keeps us inside one paragraph.
@@ -3706,7 +3834,7 @@ class SynaformController extends AbstractController
             $replacementCount = 0;
             $newXml = preg_replace_callback(
                 $pattern,
-                function (array $match) use ($placeholder, $items, $wantsOrdered, $preventOrphans, $orderedNumId, $bulletNumId, &$replacementCount): string {
+                function (array $match) use ($placeholder, $items, $wantsOrdered, $preventOrphans, $topBlankLine, $bottomBlankLine, $orderedNumId, $bulletNumId, &$replacementCount): string {
                     $replacementCount++;
                     $paragraph = $match[0];
 
@@ -3730,6 +3858,9 @@ class SynaformController extends AbstractController
                     }
 
                     $out = '';
+                    if ($topBlankLine) {
+                        $out .= $this->buildBlankSpacerParagraph($paragraph);
+                    }
                     $lastIdx = count($items) - 1;
                     foreach ($items as $idx => $item) {
                         // The last item drops `keepNext` even when preventing orphans,
@@ -3739,6 +3870,9 @@ class SynaformController extends AbstractController
                             : $paragraphForItem;
                         $escaped = $this->escapeForWordXml($item);
                         $out .= str_replace($placeholder, $escaped, $paraForThisItem);
+                    }
+                    if ($bottomBlankLine) {
+                        $out .= $this->buildBlankSpacerParagraph($paragraph);
                     }
                     return $out;
                 },
@@ -3791,6 +3925,29 @@ class SynaformController extends AbstractController
             $paragraphXml,
             1
         ) ?? $paragraphXml;
+    }
+
+    /**
+     * Build an empty Word paragraph used as a "blank line" before/after a
+     * list. We strip out the source paragraph's bullet numPr so the spacer
+     * does not show a stray bullet, but otherwise inherit its run/paragraph
+     * properties (font, indentation, alignment) so the spacer's height
+     * matches the surrounding list visually.
+     */
+    private function buildBlankSpacerParagraph(string $sourceParagraphXml): string
+    {
+        // Best-effort: pull the original <w:pPr> if present so the spacer's
+        // line-height matches the list. Strip <w:numPr> to avoid showing a
+        // bullet. Strip <w:keepNext/> so the spacer doesn't glue to the
+        // next paragraph.
+        $pPr = '';
+        if (preg_match('#<w:pPr\b[^>]*>.*?</w:pPr>#s', $sourceParagraphXml, $m)) {
+            $pPr = $m[0];
+            $pPr = preg_replace('#<w:numPr\b.*?</w:numPr>#s', '', $pPr) ?? $pPr;
+            $pPr = preg_replace('#<w:keepNext\s*/>#', '', $pPr) ?? $pPr;
+        }
+
+        return '<w:p>' . $pPr . '</w:p>';
     }
 
     /**
@@ -4422,6 +4579,204 @@ class SynaformController extends AbstractController
      * placeholder variants appears (or used to appear — we also peek at the
      * post-cleaned template to be safe) inside the table.
      *
+     * Post-pass: rewrite [[SYNCB|state|on|off]] placeholders left behind by
+     * processCheckboxes() into proper Word content-control checkboxes
+     * (`<w:sdt>` with `<w14:checkbox>`). The result is a generated DOCX where
+     * every Synaform-rendered checkbox is fully clickable in Word 2010+,
+     * pre-set to the resolved state, and uses the designer's chosen glyph
+     * pair for the visible state.
+     *
+     * Best-effort and non-fatal: if the DOCX cannot be opened or the regex
+     * finds nothing, the document keeps the static glyph fallback (which is
+     * visually identical, just not interactive).
+     */
+    private function convertCheckboxMarkersToContentControls(string $docxPath): void
+    {
+        if (!is_file($docxPath)) {
+            return;
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            $this->logger->warning('Failed to open DOCX for checkbox SDT post-pass', ['path' => $docxPath]);
+
+            return;
+        }
+
+        $xml = $zip->getFromName('word/document.xml');
+        if ($xml === false) {
+            $zip->close();
+
+            return;
+        }
+
+        $count = 0;
+        $hasW14 = str_contains($xml, 'xmlns:w14=');
+
+        // Match a single Word run that contains the SYNCB marker anywhere
+        // inside its <w:t>…</w:t> (text may have arbitrary surrounding
+        // characters because PhpWord's setValue replaces only the
+        // {{placeholder}} substring inside whatever text node hosted it).
+        // We capture:
+        //   1 = the rPr block (preserved on the surviving runs so the
+        //       generated DOCX keeps the template's font/size/color),
+        //   2 = the literal <w:t …> opening tag (with its xml:space attr
+        //       intact),
+        //   3 = text before the marker,
+        //   4 = state ("on"/"off"),
+        //   5 = checked glyph,
+        //   6 = unchecked glyph,
+        //   7 = text after the marker.
+        // The body uses [^<]* to stay inside a single text node (no nested
+        // elements), which is exactly what PhpWord setValue produces.
+        $pattern = '#<w:r\b[^>]*>(<w:rPr\b[^/]*?>.*?</w:rPr>|<w:rPr\b[^/]*?/>)?(<w:t\b[^>]*>)([^<]*?)\[\[SYNCB\|(on|off)\|([^|]+)\|([^\]]+)\]\]([^<]*?)</w:t></w:r>#s';
+
+        // Iterate so that runs containing multiple SYNCB markers all get
+        // converted. Each pass splits one marker out into its own SDT plus
+        // up to two surrounding text-only runs; subsequent passes find
+        // any remaining markers in the freshly created text-only runs.
+        // Cap the loop to a sane number of iterations as a safety net
+        // against pathological inputs.
+        $newXml = $xml;
+        for ($i = 0; $i < 64; ++$i) {
+            $passCount = 0;
+            $newXml = preg_replace_callback(
+                $pattern,
+                function (array $match) use (&$count, &$passCount): string {
+                    ++$count;
+                    ++$passCount;
+                    $rPr = $match[1] ?? '';
+                    $tOpen = $match[2];
+                    $before = $match[3];
+                    $state = $match[4];
+                    $checkedGlyph = $match[5];
+                    $uncheckedGlyph = $match[6];
+                    $after = $match[7];
+
+                    // Force xml:space="preserve" on surviving text fragments
+                    // so leading/trailing whitespace around the original
+                    // placeholder is not collapsed by Word's XML parser.
+                    $tOpenPreserved = $this->ensureXmlSpacePreserve($tOpen);
+
+                    $out = '';
+                    if ($before !== '') {
+                        $out .= '<w:r>' . $rPr . $tOpenPreserved . $before . '</w:t></w:r>';
+                    }
+                    $out .= $this->buildCheckboxSdtXml($state === 'on', $checkedGlyph, $uncheckedGlyph);
+                    if ($after !== '') {
+                        $out .= '<w:r>' . $rPr . $tOpenPreserved . $after . '</w:t></w:r>';
+                    }
+
+                    return $out;
+                },
+                $newXml
+            );
+
+            if ($newXml === null) {
+                $zip->close();
+
+                return;
+            }
+            if ($passCount === 0) {
+                break;
+            }
+        }
+
+        if ($count === 0) {
+            $zip->close();
+
+            return;
+        }
+
+        // Word's content-control checkbox lives in the w14 namespace. Older
+        // templates (Word 2007) may not declare it — inject it on the root
+        // <w:document> element so Word/LibreOffice render the SDT correctly.
+        if (!$hasW14) {
+            $newXml = preg_replace(
+                '#<w:document\b([^>]*?)>#',
+                '<w:document$1 xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">',
+                $newXml,
+                1
+            ) ?? $newXml;
+        }
+
+        $zip->addFromString('word/document.xml', $newXml);
+        $zip->close();
+    }
+
+    /**
+     * Build a Word content-control checkbox (`<w:sdt>` with `<w14:checkbox>`)
+     * pre-set to $checked. The visible state shows $checkedGlyph or
+     * $uncheckedGlyph depending on $checked. Uses MS Gothic for the symbol
+     * because that's the font Word's UI inserts for checkbox content
+     * controls and it ships on every Office install.
+     */
+    private function buildCheckboxSdtXml(bool $checked, string $checkedGlyph, string $uncheckedGlyph): string
+    {
+        $checkedFlag = $checked ? '1' : '0';
+        $glyph = $checked ? $checkedGlyph : $uncheckedGlyph;
+        $checkedHex = $this->glyphToHex($checkedGlyph, '2612');
+        $uncheckedHex = $this->glyphToHex($uncheckedGlyph, '2610');
+        // Random per-control id so multiple checkboxes do not collide.
+        $id = random_int(1, 2_147_483_647);
+        $glyphXml = htmlspecialchars($glyph, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+
+        return '<w:sdt>'
+            . '<w:sdtPr>'
+            .   '<w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic" w:cs="MS Gothic" w:hint="eastAsia"/></w:rPr>'
+            .   '<w:id w:val="' . $id . '"/>'
+            .   '<w14:checkbox>'
+            .     '<w14:checked w14:val="' . $checkedFlag . '"/>'
+            .     '<w14:checkedState w14:val="' . $checkedHex . '" w14:font="MS Gothic"/>'
+            .     '<w14:uncheckedState w14:val="' . $uncheckedHex . '" w14:font="MS Gothic"/>'
+            .   '</w14:checkbox>'
+            . '</w:sdtPr>'
+            . '<w:sdtContent>'
+            .   '<w:r><w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic" w:cs="MS Gothic" w:hint="eastAsia"/></w:rPr><w:t xml:space="preserve">' . $glyphXml . '</w:t></w:r>'
+            . '</w:sdtContent>'
+            . '</w:sdt>';
+    }
+
+    /**
+     * Ensure a `<w:t …>` opening tag carries `xml:space="preserve"` so the
+     * surrounding whitespace from the original template text is honoured
+     * after we split a run around a SYNCB marker. PhpWord uses this
+     * attribute pattern itself, so we just inject it when missing.
+     */
+    private function ensureXmlSpacePreserve(string $wtOpen): string
+    {
+        if (str_contains($wtOpen, 'xml:space=')) {
+            return $wtOpen;
+        }
+
+        return preg_replace('#<w:t\b#', '<w:t xml:space="preserve"', $wtOpen, 1) ?? $wtOpen;
+    }
+
+    /**
+     * Convert a single character to its 4-digit upper-hex Unicode codepoint
+     * for the `w14:val` attribute on checkbox state declarations. Falls back
+     * to $default when the input is empty or the codepoint cannot be derived
+     * (e.g. the designer used a multi-character emoji).
+     */
+    private function glyphToHex(string $glyph, string $default): string
+    {
+        if ($glyph === '') {
+            return $default;
+        }
+        $arr = function_exists('mb_str_split') ? mb_str_split($glyph, 1, 'UTF-8') : preg_split('//u', $glyph, -1, PREG_SPLIT_NO_EMPTY);
+        $first = is_array($arr) && $arr !== [] ? $arr[0] : '';
+        if ($first === '') {
+            return $default;
+        }
+        $cp = mb_ord($first, 'UTF-8');
+        if (!is_int($cp) || $cp <= 0) {
+            return $default;
+        }
+
+        return strtoupper(str_pad(dechex($cp), 4, '0', STR_PAD_LEFT));
+    }
+
+    /**
      * @param array<string, mixed>                $arrays       group => rows[]
      * @param array<string, array<string, mixed>> $designerMap  varKey => designer
      */
