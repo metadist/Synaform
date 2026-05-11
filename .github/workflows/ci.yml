@@ -28,7 +28,7 @@ jobs:
             --dry-run --diff \
             --rules=@PSR12 \
             --using-cache=no \
-            templatex-plugin/backend/
+            synaform-plugin/backend/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -39,11 +39,12 @@ jobs:
         run: npm install --no-save prettier
 
       - name: JS formatting check
-        run: npx prettier --check 'templatex-plugin/frontend/**/*.js'
+        run: npx prettier --check 'synaform-plugin/frontend/**/*.js'
 
       - name: Validate i18n JSON files parse correctly
         run: |
-          for f in templatex-plugin/frontend/i18n/*.json; do
+          set -euo pipefail
+          for f in synaform-plugin/frontend/i18n/*.json; do
             echo "Validating $f..."
             python3 -m json.tool "$f" > /dev/null || { echo "FAIL: $f is not valid JSON"; exit 1; }
           done
@@ -54,7 +55,7 @@ jobs:
           python3 - <<'PYEOF'
           import json, sys, os
 
-          i18n_dir = "templatex-plugin/frontend/i18n"
+          i18n_dir = "synaform-plugin/frontend/i18n"
           ref_file = os.path.join(i18n_dir, "en.json")
 
           def collect_keys(obj, prefix=""):

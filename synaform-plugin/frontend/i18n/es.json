@@ -199,7 +199,15 @@
     "designer_yes_label": "Etiqueta S\u00ed",
     "designer_no_label": "Etiqueta No",
     "designer_checked_glyph": "S\u00edmbolo marcado",
-    "designer_unchecked_glyph": "S\u00edmbolo sin marcar"
+    "designer_unchecked_glyph": "S\u00edmbolo sin marcar",
+    "render_badge_list": "Lista",
+    "render_badge_checkbox": "Casilla",
+    "render_badge_table": "Tabla",
+    "render_badge_image": "Imagen",
+    "render_badge_textarea": "Multil\u00ednea",
+    "render_badge_select": "Selector",
+    "render_badge_date": "Fecha",
+    "render_badge_number": "N\u00famero"
   },
   "templates": {
     "title": "Plantillas objetivo",
@@ -220,6 +228,11 @@
     "match_add_field": "A\u00f1adir como variable",
     "match_unmatched": "Variable faltante",
     "match_structural": "Estructural (marcadores de bloque/fila)",
+    "match_checkbox_glyph": "se renderiza como un par de glifos \u2612 / \u2610",
+    "match_checkbox_plain": "se renderiza como texto plano \"Ja\" / \"Nein\" (no como glifo)",
+    "tip_checkbox_plain": "La variable {key} es una casilla, pero la plantilla usa la forma simple. Para una marca real use un par como {pair} en el documento de Word.",
+    "tip_list_unused": "La variable de lista {key} est\u00e1 declarada pero no se usa en esta plantilla.",
+    "tip_image_unused": "La variable de imagen {key} est\u00e1 declarada pero no se usa en esta plantilla.",
     "occurrences": "Uso",
     "confirm_delete": "\u00bfEliminar esta plantilla objetivo?",
     "uploading": "Subiendo...",

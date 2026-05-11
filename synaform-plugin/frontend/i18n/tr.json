@@ -199,7 +199,15 @@
     "designer_yes_label": "Evet etiketi",
     "designer_no_label": "Hay\u0131r etiketi",
     "designer_checked_glyph": "\u0130\u015faretli sembol",
-    "designer_unchecked_glyph": "\u0130\u015faretsiz sembol"
+    "designer_unchecked_glyph": "\u0130\u015faretsiz sembol",
+    "render_badge_list": "Liste",
+    "render_badge_checkbox": "Onay kutusu",
+    "render_badge_table": "Tablo",
+    "render_badge_image": "Resim",
+    "render_badge_textarea": "\u00c7ok sat\u0131rl\u0131",
+    "render_badge_select": "A\u00e7\u0131l\u0131r liste",
+    "render_badge_date": "Tarih",
+    "render_badge_number": "Say\u0131"
   },
   "templates": {
     "title": "Hedef \u015fablonlar",
@@ -220,6 +228,11 @@
     "match_add_field": "De\u011fi\u015fken olarak ekle",
     "match_unmatched": "Eksik de\u011fi\u015fken",
     "match_structural": "Yap\u0131sal (blok/sat\u0131r i\u015faret\u00e7ileri)",
+    "match_checkbox_glyph": "\u2612 / \u2610 glif \u00e7ifti olarak i\u015flenir",
+    "match_checkbox_plain": "d\u00fcz \"Ja\" / \"Nein\" metni olarak i\u015flenir (glif de\u011fil)",
+    "tip_checkbox_plain": "{key} de\u011fi\u015fkeni bir onay kutusudur, ancak \u015fablon d\u00fcz formu kullan\u0131yor. Word belgesinde ger\u00e7ek bir onay i\u015fareti i\u00e7in {pair} gibi bir \u00e7ift kullan\u0131n.",
+    "tip_list_unused": "{key} liste de\u011fi\u015fkeni tan\u0131ml\u0131 ancak bu \u015fablonda kullan\u0131lm\u0131yor.",
+    "tip_image_unused": "{key} resim de\u011fi\u015fkeni tan\u0131ml\u0131 ancak bu \u015fablonda kullan\u0131lm\u0131yor.",
     "occurrences": "Kullan\u0131m",
     "confirm_delete": "Bu hedef \u015fablon silinsin mi?",
     "uploading": "Y\u00fckleniyor...",
