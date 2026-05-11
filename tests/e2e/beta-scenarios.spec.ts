@@ -1,7 +1,7 @@
 /**
  * Beta Scenarios E2E Tests
  *
- * Comprehensive tests covering the full TemplateX workflow:
+ * Comprehensive tests covering the full Synaform workflow:
  *   - Record CRUD (create, read, update, delete)
  *   - Document uploads (PDF CVs + JPG scans)
  *   - AI extraction and parse-documents
@@ -12,7 +12,7 @@
  *
  * Prerequisites:
  *   - Synaplan running with backend on localhost:8000
- *   - TemplateX plugin installed for admin user (userId=1)
+ *   - Synaform plugin installed for admin user (userId=1)
  *   - AI provider configured, Tika running
  *
  * Run with:
@@ -27,7 +27,7 @@ const BASE_URL = process.env.BASE_URL || 'http://localhost:5173'
 const ADMIN_EMAIL = process.env.SYNAPLAN_ADMIN_EMAIL || 'admin@synaplan.com'
 const ADMIN_PASS = process.env.SYNAPLAN_ADMIN_PASS || 'admin123'
 const FIXTURES_DIR = path.resolve(__dirname, '../fixtures')
-const PLUGIN_BASE = `${API_URL}/api/v1/user/1/plugins/templatex`
+const PLUGIN_BASE = `${API_URL}/api/v1/user/1/plugins/synaform`
 
 async function login(request: APIRequestContext): Promise<string> {
   const res = await request.post(`${API_URL}/api/v1/auth/login`, {
@@ -398,8 +398,8 @@ test.describe('@ui Records view', () => {
   })
 
   test('plugin loads with updated navigation tabs', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(3000)
 
     for (const tab of ['overview', 'records', 'questionnaires', 'documents', 'settings']) {
@@ -408,8 +408,8 @@ test.describe('@ui Records view', () => {
   })
 
   test('overview shows content cards with item counts', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(3000)
 
     await expect(page.locator('text=Questionnaires')).toBeVisible()
@@ -419,8 +419,8 @@ test.describe('@ui Records view', () => {
   })
 
   test('records view shows list and search works', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(3000)
 
     await page.click('button[data-nav="records"]')
@@ -436,8 +436,8 @@ test.describe('@ui Records view', () => {
   })
 
   test('records view shows pagination when enough entries', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(3000)
 
     await page.click('button[data-nav="records"]')

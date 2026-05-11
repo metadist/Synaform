@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Plugin\TemplateX\Controller;
+namespace Plugin\Synaform\Controller;
 
 use App\Entity\User;
 use App\Repository\ConfigRepository;
@@ -14,7 +14,7 @@ use App\Service\ModelConfigService;
 use App\Service\RateLimitService;
 use PhpOffice\PhpWord\IOFactory as PhpWordIOFactory;
 use PhpOffice\PhpWord\TemplateProcessor;
-use Plugin\TemplateX\Service\TemplateHtmlPreviewService;
+use Plugin\Synaform\Service\TemplateHtmlPreviewService;
 use OpenApi\Attributes as OA;
 use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -27,16 +27,16 @@ use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\CurrentUser;
 
-#[Route('/api/v1/user/{userId}/plugins/templatex', name: 'api_plugin_templatex_')]
-#[OA\Tag(name: 'TemplateX Plugin')]
-class TemplateXController extends AbstractController
+#[Route('/api/v1/user/{userId}/plugins/synaform', name: 'api_plugin_synaform_')]
+#[OA\Tag(name: 'Synaform Plugin')]
+class SynaformController extends AbstractController
 {
-    private const PLUGIN_NAME = 'templatex';
-    private const CONFIG_GROUP = 'P_templatex';
-    private const DATA_TYPE_FORM = 'templatex_form';
-    private const DATA_TYPE_CANDIDATE = 'templatex_candidate';
-    private const DATA_TYPE_TEMPLATE = 'templatex_template';
-    private const DATA_TYPE_VALIDATION = 'templatex_validation';
+    private const PLUGIN_NAME = 'synaform';
+    private const CONFIG_GROUP = 'P_synaform';
+    private const DATA_TYPE_FORM = 'synaform_form';
+    private const DATA_TYPE_CANDIDATE = 'synaform_candidate';
+    private const DATA_TYPE_TEMPLATE = 'synaform_template';
+    private const DATA_TYPE_VALIDATION = 'synaform_validation';
     private const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'txt', 'rtf', 'odt', 'xls', 'xlsx', 'pptx'];
 
     /**
@@ -97,10 +97,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/setup-check', name: 'setup_check', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/setup-check',
+        path: '/api/v1/user/{userId}/plugins/synaform/setup-check',
         summary: 'Check plugin setup status',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Setup status')]
     public function setupCheck(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -134,10 +134,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/setup', name: 'setup', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/setup',
+        path: '/api/v1/user/{userId}/plugins/synaform/setup',
         summary: 'Initialize plugin with default form',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Setup result')]
     public function setup(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -167,10 +167,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/config', name: 'config_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/config',
+        path: '/api/v1/user/{userId}/plugins/synaform/config',
         summary: 'Get plugin configuration',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Plugin config')]
     public function configGet(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -187,10 +187,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/config', name: 'config_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/config',
+        path: '/api/v1/user/{userId}/plugins/synaform/config',
         summary: 'Update plugin configuration',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Updated config')]
     public function configUpdate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -227,10 +227,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates', name: 'templates_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates',
         summary: 'List all templates',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of templates')]
     public function templatesList(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -249,10 +249,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates', name: 'templates_create', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates',
         summary: 'Upload a DOCX template file',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 201, description: 'Template created')]
     public function templatesCreate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -275,7 +275,7 @@ class TemplateXController extends AbstractController
         $name = $request->request->get('name', pathinfo($originalName, PATHINFO_FILENAME));
         $templateId = 'tpl_' . bin2hex(random_bytes(6));
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId;
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
@@ -315,10 +315,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}', name: 'templates_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}',
         summary: 'Get template metadata with placeholders',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Template details')]
     public function templatesGet(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -340,10 +340,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}', name: 'templates_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}',
         summary: 'Delete a template',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Template deleted')]
     public function templatesDelete(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -356,7 +356,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId;
         $this->removeDirectory($dir);
 
         $this->pluginData->delete($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId);
@@ -366,10 +366,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/placeholders', name: 'templates_placeholders', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/placeholders',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/placeholders',
         summary: 'List detected placeholders for a template',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Placeholder list')]
     public function templatesPlaceholders(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -391,10 +391,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/variable-suggestions', name: 'templates_variable_suggestions', methods: ['GET'], priority: 10)]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/variable-suggestions',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/variable-suggestions',
         summary: 'Turn detected placeholders into ready-to-apply form fields (deterministic, no AI)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Suggested field[] array and a summary of what was detected')]
     public function templatesVariableSuggestions(int $userId, string $templateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -437,10 +437,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/preview-html', name: 'templates_preview_html', methods: ['GET'], priority: 10)]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/preview-html',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/preview-html',
         summary: 'Return the cached HTML preview skeleton for a target template (used by the live preview panel)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'HTML skeleton with placeholder spans')]
     public function templatesPreviewHtml(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -459,7 +459,7 @@ class TemplateXController extends AbstractController
             || ($preview['schema_version'] ?? 0) !== TemplateHtmlPreviewService::SCHEMA_VERSION;
 
         if ($stale) {
-            $filePath = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId . '/template.docx';
+            $filePath = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId . '/template.docx';
             if (is_file($filePath)) {
                 try {
                     $preview = $this->htmlPreviewService->build($filePath);
@@ -493,10 +493,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/download', name: 'templates_download', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/download',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/download',
         summary: 'Download original template file',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Template DOCX file')]
     public function templatesDownload(int $userId, string $templateId, #[CurrentUser] ?User $user): Response
@@ -510,7 +510,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $filePath = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId . '/template.docx';
+        $filePath = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId . '/template.docx';
         if (!is_file($filePath)) {
             return $this->json(['success' => false, 'error' => 'Template file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -528,10 +528,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms', name: 'forms_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms',
         summary: 'List all form definitions',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of forms')]
     public function formsList(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -550,10 +550,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms', name: 'forms_create', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms',
         summary: 'Create a new form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 201, description: 'Form created')]
     public function formsCreate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -591,10 +591,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/{formId}', name: 'forms_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/{formId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/{formId}',
         summary: 'Get a form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Form details')]
     public function formsGet(int $userId, string $formId, #[CurrentUser] ?User $user): JsonResponse
@@ -616,10 +616,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/{formId}', name: 'forms_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/{formId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/{formId}',
         summary: 'Update a form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Form updated')]
     public function formsUpdate(int $userId, string $formId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -657,10 +657,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/{formId}', name: 'forms_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/{formId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/{formId}',
         summary: 'Delete a form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Form deleted')]
     public function formsDelete(int $userId, string $formId, #[CurrentUser] ?User $user): JsonResponse
@@ -680,10 +680,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/import-parse', name: 'forms_import_parse', methods: ['POST'], priority: 10)]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/import-parse',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/import-parse',
         summary: 'Parse pasted text or DOCX into structured form fields using AI',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Parsed form fields')]
     public function formsImportParse(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -752,10 +752,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates', name: 'candidates_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates',
         summary: 'List all entries',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of entries')]
     public function candidatesList(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -774,10 +774,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates', name: 'candidates_create', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates',
         summary: 'Create a new entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 201, description: 'Entry created')]
     public function candidatesCreate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -812,10 +812,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}', name: 'candidates_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}',
         summary: 'Get entry detail',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Entry details')]
     public function candidatesGet(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -837,10 +837,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}', name: 'candidates_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}',
         summary: 'Update an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Entry updated')]
     public function candidatesUpdate(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -874,10 +874,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}', name: 'candidates_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}',
         summary: 'Delete an entry and all its files',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Entry deleted')]
     public function candidatesDelete(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -890,7 +890,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         $this->removeDirectory($dir);
 
         $this->pluginData->delete($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
@@ -900,10 +900,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/upload-cv', name: 'candidates_upload_cv', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/upload-cv',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/upload-cv',
         summary: 'Upload primary document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'CV uploaded')]
     public function candidatesUploadCv(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -927,7 +927,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Unsupported file type: ' . $ext], Response::HTTP_BAD_REQUEST);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
@@ -955,10 +955,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/upload-doc', name: 'candidates_upload_doc', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/upload-doc',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/upload-doc',
         summary: 'Upload additional document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Document uploaded')]
     public function candidatesUploadDoc(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -977,7 +977,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
@@ -1013,10 +1013,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/files/{slot}/{fileIndex}', name: 'candidates_file_delete', methods: ['DELETE'], requirements: ['fileIndex' => '\d+'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/files/{slot}/{fileIndex}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/files/{slot}/{fileIndex}',
         summary: 'Delete a source file (CV or additional document) from an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'File deleted')]
     public function candidatesFileDelete(int $userId, string $candidateId, string $slot, int $fileIndex, #[CurrentUser] ?User $user): JsonResponse
@@ -1030,7 +1030,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
 
         if ($slot === 'cv') {
             $cvFile = $entry['files']['cv'] ?? null;
@@ -1074,10 +1074,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/urls', name: 'candidates_urls_add', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/urls',
         summary: 'Attach a web URL (e.g. LinkedIn profile) as an AI-readable source',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'URL attached')]
     public function candidatesUrlsAdd(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -1147,10 +1147,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/urls/{urlIndex}', name: 'candidates_urls_delete', methods: ['DELETE'], requirements: ['urlIndex' => '\d+'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls/{urlIndex}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/urls/{urlIndex}',
         summary: 'Remove a previously added URL source',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'URL removed')]
     public function candidatesUrlsDelete(int $userId, string $candidateId, int $urlIndex, #[CurrentUser] ?User $user): JsonResponse
@@ -1177,10 +1177,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/urls/{urlIndex}/refresh', name: 'candidates_urls_refresh', methods: ['POST'], requirements: ['urlIndex' => '\d+'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls/{urlIndex}/refresh',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/urls/{urlIndex}/refresh',
         summary: 'Re-fetch a URL source (useful when a previous fetch failed or content changed)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'URL re-fetched')]
     public function candidatesUrlsRefresh(int $userId, string $candidateId, int $urlIndex, #[CurrentUser] ?User $user): JsonResponse
@@ -1217,10 +1217,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/extract', name: 'candidates_extract', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/extract',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/extract',
         summary: 'Extract structured data from uploaded CV using AI',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Extraction result')]
     public function candidatesExtract(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1245,7 +1245,7 @@ class TemplateXController extends AbstractController
             if ($hasCv) {
                 $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
                 $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
-                $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+                $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
                 [$cvText, $extractMeta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
                 $cvText = $cvText ?? '';
                 if (trim($cvText) !== '') {
@@ -1306,10 +1306,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/parse-documents', name: 'candidates_parse_documents', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/parse-documents',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/parse-documents',
         summary: 'Parse uploaded documents with AI to auto-fill form fields',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Parsed field suggestions')]
     public function candidatesParseDocuments(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1328,13 +1328,13 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Form definition not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $candidateDir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $candidateDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         $allTexts = [];
 
         if (!empty($entry['files']['cv'])) {
             $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
-            $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+            $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
             try {
                 [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
                 if (!empty(trim((string) $text))) {
@@ -1351,7 +1351,7 @@ class TemplateXController extends AbstractController
                 continue;
             }
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
-            $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+            $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
             try {
                 [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
                 if (!empty(trim((string) $text))) {
@@ -1468,10 +1468,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/variables', name: 'candidates_variables_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/variables',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/variables',
         summary: 'Get resolved variables for an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Resolved variables')]
     public function candidatesVariablesGet(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1501,10 +1501,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/variables', name: 'candidates_variables_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/variables',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/variables',
         summary: 'Update variable overrides for an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Updated variables')]
     public function candidatesVariablesUpdate(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -1540,10 +1540,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/generate/{templateId}', name: 'candidates_generate', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/generate/{templateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/generate/{templateId}',
         summary: 'Generate a DOCX document from template and resolved variables',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Generated document metadata')]
     public function candidatesGenerate(int $userId, string $candidateId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1562,7 +1562,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $templatePath = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId . '/template.docx';
+        $templatePath = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId . '/template.docx';
         if (!is_file($templatePath)) {
             return $this->json(['success' => false, 'error' => 'Template file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -1740,7 +1740,7 @@ class TemplateXController extends AbstractController
             $this->processScalars($tp, $classified['scalars'], $variables);
 
             $docId = 'doc_' . bin2hex(random_bytes(6));
-            $genDir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated';
+            $genDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated';
             if (!is_dir($genDir)) {
                 mkdir($genDir, 0755, true);
             }
@@ -1799,10 +1799,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents', name: 'candidates_documents_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents',
         summary: 'List generated documents for an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of generated documents')]
     public function candidatesDocumentsList(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1824,10 +1824,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents/{documentId}/download', name: 'candidates_documents_download', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}/download',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents/{documentId}/download',
         summary: 'Download a generated document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Generated DOCX file')]
     public function candidatesDocumentDownload(int $userId, string $candidateId, string $documentId, #[CurrentUser] ?User $user): Response
@@ -1846,7 +1846,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $filePath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        $filePath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
         if (!is_file($filePath)) {
             return $this->json(['success' => false, 'error' => 'Document file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -1861,10 +1861,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents/{documentId}/pdf', name: 'candidates_documents_pdf', methods: ['GET'], priority: 10)]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}/pdf',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents/{documentId}/pdf',
         summary: 'Stream a PDF rendering of a generated document (true-preview path). Requires libreoffice on the backend host; returns 501 otherwise.',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'PDF file')]
     #[OA\Response(response: 501, description: 'LibreOffice not installed on the backend')]
@@ -1884,7 +1884,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $docxPath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        $docxPath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
         if (!is_file($docxPath)) {
             return $this->json(['success' => false, 'error' => 'Document file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -1905,10 +1905,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents/{documentId}', name: 'candidates_documents_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents/{documentId}',
         summary: 'Delete a generated document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Document deleted')]
     public function candidatesDocumentDelete(int $userId, string $candidateId, string $documentId, #[CurrentUser] ?User $user): JsonResponse
@@ -1927,7 +1927,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $filePath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        $filePath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
         if (is_file($filePath)) {
             unlink($filePath);
         }
@@ -1945,10 +1945,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_upload', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/image/{key}',
         summary: 'Upload an image for an image-typed variable (stored per candidate, embedded at generation time)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Image stored')]
     public function candidatesImageUpload(int $userId, string $candidateId, string $key, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -1983,7 +1983,7 @@ class TemplateXController extends AbstractController
         }
 
         $ext = $this->mimeToExtension($mime);
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/images';
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/images';
         if (!is_dir($dir)) {
             mkdir($dir, 0o755, true);
         }
@@ -2021,10 +2021,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/image/{key}',
         summary: 'Stream a stored image variable (used by the UI thumbnail and the HTML live preview)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Image file')]
     public function candidatesImageGet(int $userId, string $candidateId, string $key, #[CurrentUser] ?User $user): Response
@@ -2052,10 +2052,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/image/{key}',
         summary: 'Remove a stored image variable',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Image removed')]
     public function candidatesImageDelete(int $userId, string $candidateId, string $key, #[CurrentUser] ?User $user): JsonResponse
@@ -2538,7 +2538,7 @@ class TemplateXController extends AbstractController
             CURLOPT_CONNECTTIMEOUT => 8,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; TemplateX-Bot/1.0; +https://synaplan.com)',
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; Synaform-Bot/1.0; +https://synaplan.com)',
             CURLOPT_HTTPHEADER => [
                 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language: en-US,en;q=0.9,de;q=0.8',

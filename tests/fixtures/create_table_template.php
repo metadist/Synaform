@@ -6,7 +6,7 @@ declare(strict_types=1);
  * Generates a synthetic DOCX fixture whose core structure is a real Word
  * TABLE (<w:tbl>) containing one data row with N-suffix placeholders —
  * exactly the layout PhpWord's TemplateProcessor::cloneRow() is designed
- * to multiply. Used by `tests/phase-c-tables.php` to prove that TemplateX
+ * to multiply. Used by `tests/phase-c-tables.php` to prove that Synaform
  * can fill a target template with tables.
  *
  *   ┌──────────────┬──────────────────────────┬──────────────────────────┐

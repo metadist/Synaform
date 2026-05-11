@@ -25,7 +25,7 @@ declare(strict_types=1);
  *
  * Run:
  *   docker cp /wwwroot/hhff/word-files synaplan-backend:/hhff-word-files 2>/dev/null \
- *   && docker compose exec backend php /plugins/templatex/tests/phase-r-real-profiles.php
+ *   && docker compose exec backend php /plugins/synaform/tests/phase-r-real-profiles.php
  */
 
 require '/var/www/backend/vendor/autoload.php';
@@ -54,7 +54,7 @@ if (!is_dir($profileDir)) {
     exit(0);
 }
 
-$controllerRef = new ReflectionClass(\Plugin\TemplateX\Controller\TemplateXController::class);
+$controllerRef = new ReflectionClass(\Plugin\Synaform\Controller\SynaformController::class);
 $controller = $controllerRef->newInstanceWithoutConstructor();
 $logProp = $controllerRef->getProperty('logger');
 $logProp->setAccessible(true);
@@ -64,7 +64,7 @@ $logProp->setValue($controller, new class extends \Psr\Log\AbstractLogger {
 
 function callPriv($controller, string $method, array $args)
 {
-    $ref = new ReflectionMethod(\Plugin\TemplateX\Controller\TemplateXController::class, $method);
+    $ref = new ReflectionMethod(\Plugin\Synaform\Controller\SynaformController::class, $method);
     $ref->setAccessible(true);
     return $ref->invoke($controller, ...$args);
 }
@@ -89,7 +89,7 @@ foreach ($profiles as $pname) {
     ];
 
     if (count($phKeys) === 0) {
-        // Many real customer DOCX files don't use TemplateX placeholders yet — that's
+        // Many real customer DOCX files don't use Synaform placeholders yet — that's
         // not an error, just note it in the summary.
         $summary[$pname]['note'] = 'no {{placeholders}} present';
         continue;

@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * TemplateX demo seed — fashion HR candidate profiles (German).
+ * Synaform demo seed — fashion HR candidate profiles (German).
  *
  * Produces, fully offline and repeatable:
  *   - demo-template1.docx  Executive/Senior profile layout

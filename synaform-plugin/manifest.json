@@ -1,12 +1,12 @@
 {
-  "id": "templatex",
-  "name": "templatex",
-  "namespace": "Plugin\\TemplateX",
+  "id": "synaform",
+  "name": "synaform",
+  "namespace": "Plugin\\Synaform",
   "version": "3.1.0",
-  "displayName": "TemplateX",
+  "displayName": "Synaform",
   "description": "Organise data collection workflows into Collections: define variables, upload Word templates, gather datasets, and export with AI-powered extraction.",
   "author": "Synaplan",
-  "homepage": "https://github.com/metadist/synaplan-templatex",
+  "homepage": "https://github.com/metadist/synaplan-synaform",
   "license": "MIT",
   "minSynaplanVersion": "1.0.0",
   "capabilities": ["api", "frontend", "migrations"],
@@ -55,9 +55,9 @@
     "001_setup.sql"
   ],
   "config": {
-    "group": "P_templatex",
+    "group": "P_synaform",
     "settings": [
-      {"key": "enabled", "type": "boolean", "default": true, "description": "Enable TemplateX plugin"},
+      {"key": "enabled", "type": "boolean", "default": true, "description": "Enable Synaform plugin"},
       {"key": "default_language", "type": "string", "default": "de", "description": "Default language for forms and UI"},
       {"key": "company_name", "type": "string", "default": "", "description": "HR company name for document branding"},
       {"key": "extraction_model", "type": "string", "default": "default", "description": "Preferred AI model for CV extraction"},

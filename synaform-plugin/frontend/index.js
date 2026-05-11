@@ -3,7 +3,7 @@ const TX_VERSION = "v3.1.0";
 export default {
   mount(el, context) {
     const { userId, apiBaseUrl, pluginBaseUrl } = context;
-    const BASE = `${apiBaseUrl}/api/v1/user/${userId}/plugins/templatex`;
+    const BASE = `${apiBaseUrl}/api/v1/user/${userId}/plugins/synaform`;
     const ASSET_BASE = pluginBaseUrl;
 
     // =========================================================================
@@ -4705,7 +4705,7 @@ export default {
       const today = new Date().toISOString().slice(0, 10);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `templatex-${safeName}-${today}.csv`;
+      a.download = `synaform-${safeName}-${today}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();

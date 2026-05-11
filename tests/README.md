@@ -1,4 +1,4 @@
-# TemplateX — Tests & Demo
+# Synaform — Tests & Demo
 
 This folder contains three independent ways to exercise the plugin:
 
@@ -35,17 +35,17 @@ It takes about 5 minutes to seed and 10 minutes to walk through.
    docker compose ps   # wait for "healthy"
    ```
 
-2. **TemplateX plugin installed for the demo user.** See
+2. **Synaform plugin installed for the demo user.** See
    [`../INSTALL.md`](../INSTALL.md) for the full platform install, or for a
    workspace dev setup:
 
    ```bash
    # From this repo:
-   make sync-and-clear   # or: cp -r templatex-plugin/ ../synaplan/plugins/templatex/
+   make sync-and-clear   # or: cp -r synaform-plugin/ ../synaplan/plugins/synaform/
 
    # Register for user id=1 (admin by default):
    cd ../synaplan && docker compose exec backend \
-     php bin/console app:plugin:install 1 templatex
+     php bin/console app:plugin:install 1 synaform
    ```
 
 3. **PHP 8.2+** on the host (used by the seed/install scripts; the plugin
@@ -107,7 +107,7 @@ DOCX was rejected (usually malformed XML).**
 
 ### Step 3 — Walk the audience through the UI
 
-Open `http://localhost:8000/plugins/templatex` (or whichever host).
+Open `http://localhost:8000/plugins/synaform` (or whichever host).
 Suggested flow, ~2 minutes per stop:
 
 1. **Collections list** — show the two `[FashionDemo]` Collections. Point
@@ -191,7 +191,7 @@ npm run test:ui        # UI-only (tag: @ui)
 The e2e suites live in `tests/e2e/`:
 
 - `beta-scenarios.spec.ts` — CRUD, uploads, AI extraction, pagination, UI.
-- `templatex-plugin.spec.ts` — focused plugin flows.
+- `synaform-plugin.spec.ts` — focused plugin flows.
 
 They use the synthetic CVs in `tests/fixtures/cv_*.pdf`.
 
@@ -224,7 +224,7 @@ tests/
 └── e2e/
     ├── playwright.config.ts
     ├── beta-scenarios.spec.ts
-    └── templatex-plugin.spec.ts
+    └── synaform-plugin.spec.ts
 ```
 
 ---

@@ -17,7 +17,7 @@ declare(strict_types=1);
  * so it doesn't need an HTTP stack or a real candidate record.
  *
  * Run:
- *   docker compose exec backend php /plugins/templatex/tests/phase-d-layout.php
+ *   docker compose exec backend php /plugins/synaform/tests/phase-d-layout.php
  *
  * Exit code: 0 on pass, 1 on any assertion failure.
  */
@@ -82,7 +82,7 @@ copy($fixture, $olPath);
 // ------------------------------------------------------------------
 // 3. Drive the controller's private helpers via reflection.
 // ------------------------------------------------------------------
-$controllerRef = new ReflectionClass(\Plugin\TemplateX\Controller\TemplateXController::class);
+$controllerRef = new ReflectionClass(\Plugin\Synaform\Controller\SynaformController::class);
 
 /** Instantiate without invoking the ctor (we only need instance methods). */
 $controller = $controllerRef->newInstanceWithoutConstructor();
@@ -96,7 +96,7 @@ $logProp->setValue($controller, new class extends \Psr\Log\AbstractLogger {
 
 function callPriv($controller, string $method, array $args)
 {
-    $ref = new ReflectionMethod(\Plugin\TemplateX\Controller\TemplateXController::class, $method);
+    $ref = new ReflectionMethod(\Plugin\Synaform\Controller\SynaformController::class, $method);
     $ref->setAccessible(true);
     return $ref->invoke($controller, ...$args);
 }

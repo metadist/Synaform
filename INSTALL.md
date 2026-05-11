@@ -1,6 +1,6 @@
-# TemplateX Plugin - Live Installation Guide
+# Synaform Plugin - Live Installation Guide
 
-Step-by-step instructions to deploy the TemplateX plugin on the production Synaplan platform.
+Step-by-step instructions to deploy the Synaform plugin on the production Synaplan platform.
 
 ## Prerequisites
 
@@ -11,19 +11,19 @@ Step-by-step instructions to deploy the TemplateX plugin on the production Synap
 
 ## Step 1: Copy the plugin files to the server
 
-From your development machine, copy the `templatex-plugin/` directory to the production server's `plugins/` folder (the one mounted into the container at `/plugins`).
+From your development machine, copy the `synaform-plugin/` directory to the production server's `plugins/` folder (the one mounted into the container at `/plugins`).
 
 ```bash
 # From your local machine / CI runner
-scp -r templatex-plugin/ user@web.synaplan.com:/path/to/synaplan-platform/plugins/templatex/
+scp -r synaform-plugin/ user@web.synaplan.com:/path/to/synaplan-platform/plugins/synaform/
 ```
 
 Or if you're already on the server:
 
 ```bash
 # On the production server, inside the synaplan-platform directory
-mkdir -p plugins/templatex
-cp -r /path/to/synaplan-templatex/templatex-plugin/* plugins/templatex/
+mkdir -p plugins/synaform
+cp -r /path/to/synaplan-synaform/synaform-plugin/* plugins/synaform/
 ```
 
 The final structure on the server should be:
@@ -32,11 +32,11 @@ The final structure on the server should be:
 synaplan-platform/
 ├── docker-compose.yml
 ├── plugins/
-│   └── templatex/
+│   └── synaform/
 │       ├── manifest.json
 │       ├── backend/
 │       │   └── Controller/
-│       │       └── TemplateXController.php
+│       │       └── SynaformController.php
 │       ├── frontend/
 │       │   ├── index.js
 │       │   └── i18n/
@@ -88,7 +88,7 @@ The plugin needs to be "installed" per user. This runs the migration SQL that cr
 **For a single user:**
 
 ```bash
-docker compose exec backend php bin/console app:plugin:install <USER_ID> templatex
+docker compose exec backend php bin/console app:plugin:install <USER_ID> synaform
 ```
 
 Replace `<USER_ID>` with the numeric user ID (e.g., `1` for the admin).
@@ -96,20 +96,20 @@ Replace `<USER_ID>` with the numeric user ID (e.g., `1` for the admin).
 **For all active verified users at once:**
 
 ```bash
-docker compose exec backend php bin/console app:plugin:install-verified-users templatex
+docker compose exec backend php bin/console app:plugin:install-verified-users synaform
 ```
 
 ## Step 5: Initialize the default questionnaire
 
 After installation, each user needs to trigger the initial setup (seeds the default form with standard fields like Vorname, Nachname, Vorgestellte Position, etc.).
 
-**Option A** - The user opens TemplateX in the UI for the first time and the setup runs automatically.
+**Option A** - The user opens Synaform in the UI for the first time and the setup runs automatically.
 
 **Option B** - Trigger it manually via API:
 
 ```bash
 docker compose exec backend php -r "
-\$ch = curl_init('http://localhost/api/v1/user/<USER_ID>/plugins/templatex/setup');
+\$ch = curl_init('http://localhost/api/v1/user/<USER_ID>/plugins/synaform/setup');
 curl_setopt(\$ch, CURLOPT_POST, true);
 curl_setopt(\$ch, CURLOPT_HTTPHEADER, ['X-API-Key: <API_KEY>']);
 curl_setopt(\$ch, CURLOPT_RETURNTRANSFER, true);
@@ -127,7 +127,7 @@ curl -X POST \
   -H "X-API-Key: <API_KEY>" \
   -F "file=@my-template.docx" \
   -F "name=My Template" \
-  https://web.synaplan.com/api/v1/user/<USER_ID>/plugins/templatex/templates
+  https://web.synaplan.com/api/v1/user/<USER_ID>/plugins/synaform/templates
 ```
 
 ## Verification
@@ -136,12 +136,12 @@ After installation, verify everything works:
 
 ```bash
 # 1. Check plugin is recognized
-docker compose exec backend php bin/console app:plugin:install <USER_ID> templatex
-# Should output: "Plugin 'templatex' installed successfully" (or already installed)
+docker compose exec backend php bin/console app:plugin:install <USER_ID> synaform
+# Should output: "Plugin 'synaform' installed successfully" (or already installed)
 
 # 2. Check the API responds
 curl -s -H "X-API-Key: <API_KEY>" \
-  https://web.synaplan.com/api/v1/user/<USER_ID>/plugins/templatex/setup-check | python3 -m json.tool
+  https://web.synaplan.com/api/v1/user/<USER_ID>/plugins/synaform/setup-check | python3 -m json.tool
 ```
 
 Expected response:
@@ -165,8 +165,8 @@ To deploy a new version, simply overwrite the files and restart:
 
 ```bash
 # On the production server
-rm -rf plugins/templatex/*
-cp -r /path/to/new-version/* plugins/templatex/
+rm -rf plugins/synaform/*
+cp -r /path/to/new-version/* plugins/synaform/
 
 # Restart to pick up changes
 docker compose restart backend
@@ -178,7 +178,7 @@ No database migration is needed for code-only updates. The plugin uses `plugin_d
 
 If running multiple web servers (web1, web2, web3 behind a load balancer):
 
-1. Copy `plugins/templatex/` to **each** server's `plugins/` directory
+1. Copy `plugins/synaform/` to **each** server's `plugins/` directory
 2. Restart the container on **each** server
 3. The `app:plugin:install` command only needs to run **once** (it writes to the shared database)
 4. Uploaded files (templates, CVs, generated docs) are stored under `./up/` which should already be on shared NFS storage
@@ -187,8 +187,8 @@ If running multiple web servers (web1, web2, web3 behind a load balancer):
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| 404 on `/api/v1/user/.../plugins/templatex/...` | Container not restarted after adding plugin | `docker compose restart backend` |
-| "Plugin not available" in UI | BCONFIG `enabled` not set | Re-run `app:plugin:install <userId> templatex` |
+| 404 on `/api/v1/user/.../plugins/synaform/...` | Container not restarted after adding plugin | `docker compose restart backend` |
+| "Plugin not available" in UI | BCONFIG `enabled` not set | Re-run `app:plugin:install <userId> synaform` |
 | "No forms" / empty questionnaire | Setup not triggered | Call `POST /setup` or open plugin in UI |
 | AI extraction fails | No AI model configured for the user | Check user has a default CHAT model in Synaplan settings |
 | Generated DOCX has empty placeholders | Template uses `{{firstname}}` but form field not filled | Fill Vorname/Nachname in the questionnaire first |

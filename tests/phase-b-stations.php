@@ -23,7 +23,7 @@ if (!is_file($fixture)) {
     exit(1);
 }
 
-$out = sys_get_temp_dir() . '/templatex_phase_b_out.docx';
+$out = sys_get_temp_dir() . '/synaform_phase_b_out.docx';
 copy($fixture, $out);
 
 // --- Simulate cloneRow's suffixing: {{stations.details.N}} → {{stations.details.N#1}}

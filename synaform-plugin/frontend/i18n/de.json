@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "TemplateX",
+    "title": "Synaform",
     "tagline": "Daten sammeln. Vorlagen f\u00fcllen. Fertig.",
     "loading": "Laden...",
     "save": "Speichern",
@@ -313,7 +313,7 @@
     "url_add_label": "Profil- / Seiten-URL",
     "url_add_placeholder": "https://www.linkedin.com/in/...",
     "url_label_placeholder": "Optionale Bezeichnung (z. B. LinkedIn-Profil)",
-    "url_add_hint": "TemplateX holt die Seite, entfernt Markup und f\u00fcttert die KI gemeinsam mit hochgeladenen Dateien. Funktioniert am besten mit \u00f6ffentlichen Profilseiten (LinkedIn, XING, GitHub, Unternehmensseiten).",
+    "url_add_hint": "Synaform holt die Seite, entfernt Markup und f\u00fcttert die KI gemeinsam mit hochgeladenen Dateien. Funktioniert am besten mit \u00f6ffentlichen Profilseiten (LinkedIn, XING, GitHub, Unternehmensseiten).",
     "url_adding": "Lade\u2026",
     "url_add_required": "Zuerst URL eingeben.",
     "url_added": "URL hinzugef\u00fcgt",

@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * Install the seeded fashion-HR demo into a running Synaplan + TemplateX
+ * Install the seeded fashion-HR demo into a running Synaplan + Synaform
  * instance.
  *
  * What seed-demo.php produces — DOCX files on disk — is static. This script
@@ -50,7 +50,7 @@ if (!is_array($manifest)) {
     exit(1);
 }
 
-$base = "$apiUrl/api/v1/user/$userId/plugins/templatex";
+$base = "$apiUrl/api/v1/user/$userId/plugins/synaform";
 
 // Tag every demo-created record so --wipe can find them again.
 const DEMO_TAG = '[FashionDemo]';
@@ -458,6 +458,6 @@ printf("  User id     : %d\n", $userId);
 printf("  Templates   : %d\n", count($templateIds));
 printf("  Collections : %d\n", count($formIds));
 printf("  Candidates  : %d\n", count($createdCandidateIds));
-printf("\nOpen the plugin UI (/plugins/templatex) — the two '%s' collections\n", DEMO_TAG);
+printf("\nOpen the plugin UI (/plugins/synaform) — the two '%s' collections\n", DEMO_TAG);
 printf("with their 6 candidates should now be visible. Re-run with --wipe\n");
 printf("to clear any previous demo install before seeding.\n");

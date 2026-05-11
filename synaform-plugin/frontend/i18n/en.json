@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "TemplateX",
+    "title": "Synaform",
     "tagline": "Collect data. Fill templates. Done.",
     "loading": "Loading...",
     "save": "Save",
@@ -313,7 +313,7 @@
     "url_add_label": "Profile / page URL",
     "url_add_placeholder": "https://www.linkedin.com/in/...",
     "url_label_placeholder": "Optional label (e.g. LinkedIn profile)",
-    "url_add_hint": "TemplateX fetches the page, strips markup, and feeds the text to AI alongside uploaded files. Works best for public profile pages (LinkedIn, XING, GitHub, company sites).",
+    "url_add_hint": "Synaform fetches the page, strips markup, and feeds the text to AI alongside uploaded files. Works best for public profile pages (LinkedIn, XING, GitHub, company sites).",
     "url_adding": "Fetching\u2026",
     "url_add_required": "Enter a URL first.",
     "url_added": "URL added",

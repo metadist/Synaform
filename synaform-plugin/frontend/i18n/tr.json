@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "TemplateX",
+    "title": "Synaform",
     "tagline": "Veri topla. \u015eablonlar\u0131 doldur. Bitti.",
     "loading": "Y\u00fckleniyor...",
     "save": "Kaydet",
@@ -294,7 +294,7 @@
     "url_add_label": "Profil / sayfa URL\u2019si",
     "url_add_placeholder": "https://www.linkedin.com/in/...",
     "url_label_placeholder": "\u0130ste\u011fe ba\u011fl\u0131 etiket (\u00f6rn. LinkedIn profili)",
-    "url_add_hint": "TemplateX sayfay\u0131 al\u0131r, i\u015faretlemeyi temizler ve metni y\u00fcklenen dosyalarla birlikte yapay zek\u00e2ya verir. En iyi sonu\u00e7 halka a\u00e7\u0131k profil sayfalar\u0131nda al\u0131n\u0131r (LinkedIn, XING, GitHub, kurumsal siteler).",
+    "url_add_hint": "Synaform sayfay\u0131 al\u0131r, i\u015faretlemeyi temizler ve metni y\u00fcklenen dosyalarla birlikte yapay zek\u00e2ya verir. En iyi sonu\u00e7 halka a\u00e7\u0131k profil sayfalar\u0131nda al\u0131n\u0131r (LinkedIn, XING, GitHub, kurumsal siteler).",
     "url_adding": "Al\u0131n\u0131yor\u2026",
     "url_add_required": "\u00d6nce bir URL girin.",
     "url_added": "URL eklendi",
