@@ -1,6 +1,6 @@
-# TemplateX Demo Seed — Fashion HR Profiles (DE)
+# Synaform Demo Seed — Fashion HR Profiles (DE)
 
-A repeatable, fully synthetic demo set for TemplateX. Running a single PHP
+A repeatable, fully synthetic demo set for Synaform. Running a single PHP
 script produces:
 
 - 2 **Word templates** (`demo-template1.docx`, `demo-template2.docx`) with
@@ -10,7 +10,7 @@ script produces:
 - 6 **Datasets / candidates** with fictional German fashion-industry
   positions, salaries, career stations and benefits
 - 6 **filled DOCX** files in `filled/` — one per candidate, rendered through
-  the same expansion primitives the real TemplateXController uses
+  the same expansion primitives the real SynaformController uses
   (row cloning for `{{stations.*.N}}`, list expansion, checkbox toggling,
   station-details block parsing)
 
@@ -22,7 +22,7 @@ scratch via PhpWord with a neutral HR-profile layout.
 | Path | Purpose |
 |---|---|
 | `seed-demo.php` | Step 1 — builds the demo files on disk (offline, no Synaplan required). |
-| `install-demo.php` | Step 2 — pushes the demo into a running Synaplan + TemplateX through the HTTP API. |
+| `install-demo.php` | Step 2 — pushes the demo into a running Synaplan + Synaform through the HTTP API. |
 | `example-variables.md` | Reference of all `{{placeholders}}`, grouped by type (scalar, list, checkbox, optional, station). |
 | `demo-template1.docx` | Executive / Senior Fashion profile (full layout). |
 | `demo-template2.docx` | Retail Store Manager profile (compact layout, same placeholders). |
@@ -58,7 +58,7 @@ candidates appear in the plugin UI, run the installer as the second step.
 ### 1) Generate the files (offline)
 
 ```bash
-# From the templatex repo root:
+# From the synaform repo root:
 php tests/demo/seed-demo.php
 ```
 
@@ -113,10 +113,10 @@ The installer:
    so the plugin renders each candidate in-app using its own engine. After
    that, every candidate shows a completed document in its Documents tab.
 
-Open `/plugins/templatex` in the UI after step 2 — the two
+Open `/plugins/synaform` in the UI after step 2 — the two
 `[FashionDemo]` collections and their 6 candidates will be visible.
 
-## Relation to production TemplateXController
+## Relation to production SynaformController
 
 The fill routine in `seed-demo.php` is intentionally a standalone clone of
 the controller's expansion logic — identical to what
@@ -124,7 +124,7 @@ the controller's expansion logic — identical to what
 That keeps the demo self-contained and lets it run offline, without
 Symfony/Docker.
 
-When you feed `collections.json` into a real TemplateX instance (through
+When you feed `collections.json` into a real Synaform instance (through
 the plugin's `POST /forms` and `POST /candidates` endpoints), the real
 controller will produce equivalent DOCX output.
 
@@ -136,7 +136,7 @@ it overwrites the templates, the manifest and every filled document.
 ## Why two templates
 
 The original customer has "2+ templates" as a requirement. To prove that
-TemplateX handles both an elaborate executive layout _and_ a compact
+Synaform handles both an elaborate executive layout _and_ a compact
 retail layout on the **same variable set**, Collection A points at
 `demo-template1.docx` and Collection B at `demo-template2.docx`. The
 variable catalogue is identical — only the layout differs.

@@ -13,12 +13,12 @@ declare(strict_types=1);
  *     stable and type-aware.
  *
  * Run:
- *   docker compose exec backend php /plugins/templatex/tests/phase-u-urlsource.php
+ *   docker compose exec backend php /plugins/synaform/tests/phase-u-urlsource.php
  */
 
 require '/var/www/backend/vendor/autoload.php';
 
-$controllerRef = new ReflectionClass(\Plugin\TemplateX\Controller\TemplateXController::class);
+$controllerRef = new ReflectionClass(\Plugin\Synaform\Controller\SynaformController::class);
 $controller = $controllerRef->newInstanceWithoutConstructor();
 $logProp = $controllerRef->getProperty('logger');
 $logProp->setAccessible(true);
@@ -28,7 +28,7 @@ $logProp->setValue($controller, new class extends \Psr\Log\AbstractLogger {
 
 function callPriv($controller, string $method, array $args)
 {
-    $ref = new ReflectionMethod(\Plugin\TemplateX\Controller\TemplateXController::class, $method);
+    $ref = new ReflectionMethod(\Plugin\Synaform\Controller\SynaformController::class, $method);
     $ref->setAccessible(true);
     return $ref->invoke($controller, ...$args);
 }

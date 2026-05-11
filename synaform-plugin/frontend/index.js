@@ -3,7 +3,7 @@ const TX_VERSION = "v3.1.0";
 export default {
   mount(el, context) {
     const { userId, apiBaseUrl, pluginBaseUrl } = context;
-    const BASE = `${apiBaseUrl}/api/v1/user/${userId}/plugins/templatex`;
+    const BASE = `${apiBaseUrl}/api/v1/user/${userId}/plugins/synaform`;
     const ASSET_BASE = pluginBaseUrl;
 
     // =========================================================================
@@ -48,6 +48,11 @@ export default {
       datasetGenerating: false,
       datasetParsing: false,
       datasetParseStep: 0,
+      datasetParseStartedAt: null,
+      datasetParseElapsedSec: 0,
+      datasetParseFileCount: 0,
+      datasetParseHasImages: false,
+      datasetParseTimer: null,
       datasetVariables: null,
       datasetVariablesLoading: false,
       selectedGenerateTemplate: null,
@@ -100,6 +105,11 @@ export default {
 
       // Danger zone
       dangerConfirmText: "",
+
+      // GDPR / data retention banner state — when truthy, renderDatasetsTab
+      // suppresses the overdue banner for the current session even if datasets
+      // remain past their expiry date. The user explicitly clicked Cancel.
+      retentionBannerDismissed: false,
     };
 
     // =========================================================================
@@ -835,6 +845,8 @@ export default {
       link: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>',
       refresh:
         '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>',
+      clock:
+        '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
     };
 
     // =========================================================================
@@ -1428,17 +1440,20 @@ export default {
     function renderFieldRenderingBadge(fd) {
       const t = fd.type || "text";
       const map = {
-        list:     { glyph: "\u2022",   cls: "tx-badge-list"   },
-        checkbox: { glyph: "\u2612",   cls: "tx-badge-check"  },
-        table:    { glyph: "\u229E",   cls: "tx-badge-table"  },
-        image:    { glyph: "\u25A3",   cls: "tx-badge-image"  },
-        textarea: { glyph: "\u00B6",   cls: "tx-badge-plain"  },
-        select:   { glyph: "\u25BC",   cls: "tx-badge-plain"  },
-        date:     { glyph: "\u2637",   cls: "tx-badge-plain"  },
-        number:   { glyph: "#",        cls: "tx-badge-plain"  },
+        list: { glyph: "\u2022", cls: "tx-badge-list" },
+        checkbox: { glyph: "\u2612", cls: "tx-badge-check" },
+        table: { glyph: "\u229E", cls: "tx-badge-table" },
+        image: { glyph: "\u25A3", cls: "tx-badge-image" },
+        textarea: { glyph: "\u00B6", cls: "tx-badge-plain" },
+        select: { glyph: "\u25BC", cls: "tx-badge-plain" },
+        date: { glyph: "\u2637", cls: "tx-badge-plain" },
+        number: { glyph: "#", cls: "tx-badge-plain" },
       };
       if (!map[t]) return "";
-      const labelText = T(`variables.render_badge_${t}`, T(`variables.type_${t}`, t));
+      const labelText = T(
+        `variables.render_badge_${t}`,
+        T(`variables.type_${t}`, t),
+      );
       return `<span class="tx-render-badge ${map[t].cls}" title="${escHtml(labelText)}">
         <span aria-hidden="true">${map[t].glyph}</span>
         <span>${escHtml(labelText)}</span>
@@ -1534,6 +1549,18 @@ export default {
             <span>${T("variables.designer_prevent_orphans")}</span>
           </label>
           <p class="text-xs tx-secondary">${T("variables.designer_prevent_orphans_hint")}</p>
+          <div class="pt-2 border-t" style="border-color:var(--divider)">
+            <label class="tx-label">${T("variables.designer_list_spacing")}</label>
+            <p class="text-xs tx-secondary mb-2" style="margin-top:-.125rem">${T("variables.designer_list_spacing_hint")}</p>
+            <label class="flex items-center gap-1.5 text-sm">
+              <input type="checkbox" name="fd_${idx}_top_blank_line" ${d.top_blank_line ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+              <span>${T("variables.designer_list_top_blank")}</span>
+            </label>
+            <label class="flex items-center gap-1.5 text-sm">
+              <input type="checkbox" name="fd_${idx}_bottom_blank_line" ${d.bottom_blank_line ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+              <span>${T("variables.designer_list_bottom_blank")}</span>
+            </label>
+          </div>
         </div>`;
       }
       if (fd.type === "table") {
@@ -1554,8 +1581,14 @@ export default {
         </div>`;
       }
       if (fd.type === "checkbox") {
+        const clickable = d.clickable_checkbox !== false;
         return `<div class="mt-2 p-3 rounded space-y-3" style="background:var(--bg-app)">
           <p class="text-xs tx-secondary">${T("variables.designer_checkbox_hint")}</p>
+          <label class="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" name="fd_${idx}_clickable_checkbox" ${clickable ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+            <span>${T("variables.designer_checkbox_clickable")}</span>
+          </label>
+          <p class="text-xs tx-secondary" style="margin-top:-.125rem">${T("variables.designer_checkbox_clickable_hint")}</p>
           <div>
             <label class="tx-label">${T("variables.designer_checkbox_glyphs")}</label>
             <p class="text-xs tx-secondary mb-2" style="margin-top:-.125rem">${T("variables.designer_checkbox_glyphs_hint")}</p>
@@ -1838,17 +1871,59 @@ export default {
         </div>
       </div>`;
 
+      const inheritLabel = c?.language
+        ? `${T("templates.language_inherit")} (${c.language.toUpperCase()})`
+        : T("templates.language_inherit");
+      const langOptions = `
+        <option value="">${escHtml(inheritLabel)}</option>
+        <option value="de">Deutsch (DE)</option>
+        <option value="en">English (EN)</option>
+        <option value="es">Espa\u00f1ol (ES)</option>
+        <option value="fr">Fran\u00e7ais (FR)</option>
+        <option value="it">Italiano (IT)</option>
+        <option value="tr">T\u00fcrk\u00e7e (TR)</option>
+        <option value="pt">Portugu\u00eas (PT)</option>
+        <option value="nl">Nederlands (NL)</option>
+        <option value="pl">Polski (PL)</option>
+      `;
+
       const drop = `<div id="tx-template-drop" class="tx-drop">
         <div class="inline-flex items-center justify-center w-10 h-10 rounded-full mb-2" style="background:var(--brand-alpha-light);color:var(--brand)">${ICONS.upload}</div>
         <p class="text-sm font-medium">${T("templates.drop_hint")}</p>
         <input type="file" id="tx-template-file" accept=".docx" class="hidden" />
         <div id="tx-template-upload-form" class="mt-3 hidden">
-          <div class="flex items-center gap-2 max-w-md mx-auto">
-            <input type="text" id="tx-template-name" placeholder="${T("templates.name_label")}" class="tx-input" style="flex:1" />
-            <button id="tx-upload-template-btn" class="tx-btn tx-btn-sm">${ICONS.upload} ${T("templates.upload")}</button>
+          <div class="flex flex-col gap-2 max-w-md mx-auto">
+            <div class="flex items-center gap-2">
+              <input type="text" id="tx-template-name" placeholder="${T("templates.name_label")}" class="tx-input" style="flex:1" />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-xs tx-secondary text-left" for="tx-template-language">${T("templates.language_label")}</label>
+              <select id="tx-template-language" class="tx-input">${langOptions}</select>
+              <p class="text-xs tx-secondary text-left">${T("templates.language_hint")}</p>
+            </div>
+            <button id="tx-upload-template-btn" class="tx-btn tx-btn-sm self-end">${ICONS.upload} ${T("templates.upload")}</button>
           </div>
         </div>
       </div>`;
+
+      const buildLangSelect = (tpl) => {
+        const cur = (tpl.language || "").toLowerCase();
+        const opts = [
+          ["", inheritLabel],
+          ["de", "DE"],
+          ["en", "EN"],
+          ["es", "ES"],
+          ["fr", "FR"],
+          ["it", "IT"],
+          ["tr", "TR"],
+          ["pt", "PT"],
+          ["nl", "NL"],
+          ["pl", "PL"],
+        ];
+        return `<select data-template-language-set="${tpl.id}" class="tx-input" style="height:28px;font-size:0.75rem;padding:0 0.4rem" title="${escHtml(T("templates.language_hint"))}">
+          ${opts.map(([v, l]) => `<option value="${v}"${v === cur ? " selected" : ""}>${escHtml(l)}</option>`).join("")}
+        </select>`;
+      };
 
       const list = templates.length
         ? templates
@@ -1860,6 +1935,7 @@ export default {
                     <div class="text-xs tx-secondary mt-0.5">${formatDate(tpl.created_at)}${tpl.placeholder_count != null ? ` · ${tpl.placeholder_count} ${T("templates.placeholders")}` : ""}</div>
                   </div>
                   <div class="flex items-center gap-1">
+                    ${buildLangSelect(tpl)}
                     <button data-action="template-check-match" data-template-id="${tpl.id}" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("templates.check_match")}">${ICONS.check} ${T("templates.check_match")}</button>
                     <button data-download-template="${tpl.id}" class="p-1.5 text-gray-400 hover:text-blue-500 rounded transition-colors" title="${T("app.download")}">${ICONS.download}</button>
                     <button data-detach-template="${tpl.id}" class="p-1.5 text-gray-400 hover:text-red-500 rounded transition-colors" title="${T("app.delete")}">${ICONS.trash}</button>
@@ -1920,10 +1996,12 @@ export default {
         const rawKey = (ph.key || ph.name || "").toString();
         const isGlyphPair = rawKey.startsWith("checkb.");
         if (f && f.type === "checkbox") {
-          return renderFieldRenderingBadge(f)
-            + (isGlyphPair
+          return (
+            renderFieldRenderingBadge(f) +
+            (isGlyphPair
               ? `<span class="tx-hint" style="margin:0 0 0 .5rem">${T("templates.match_checkbox_glyph")}</span>`
-              : `<span class="tx-hint" style="margin:0 0 0 .5rem;color:var(--status-warning,#d97706)">${T("templates.match_checkbox_plain")}</span>`);
+              : `<span class="tx-hint" style="margin:0 0 0 .5rem;color:var(--status-warning,#d97706)">${T("templates.match_checkbox_plain")}</span>`)
+          );
         }
         if (f) return renderFieldRenderingBadge(f);
         return "";
@@ -2009,13 +2087,13 @@ export default {
       //      it in the Word document).
       //   3. An image-typed field missing from the template.
       const tips = [];
-      const phRawKeys = new Set(phs.map((p) => (p.key || p.name || "")));
+      const phRawKeys = new Set(phs.map((p) => p.key || p.name || ""));
       const glyphCbKeys = new Set();
       for (const raw of phRawKeys) {
         const m = raw.match(/^checkb\.(.+?)\.(?:yes|no)$/);
         if (m) glyphCbKeys.add(m[1]);
       }
-      for (const f of (c.fields || [])) {
+      for (const f of c.fields || []) {
         if (!f.key) continue;
         const plainUsed = phRawKeys.has(f.key);
         if (f.type === "checkbox" && plainUsed && !glyphCbKeys.has(f.key)) {
@@ -2047,16 +2125,22 @@ export default {
 
       const tipsHtml = tips.length
         ? `<div class="mt-3 space-y-1.5">
-            ${tips.map((t) => {
-              const color = t.level === "warn"
-                ? "var(--status-warning,#d97706)"
-                : "var(--txt-secondary)";
-              const icon = t.level === "warn" ? ICONS.warning : ICONS.info || ICONS.question;
-              return `<div class="flex items-start gap-1.5 text-xs" style="color:${color}">
+            ${tips
+              .map((t) => {
+                const color =
+                  t.level === "warn"
+                    ? "var(--status-warning,#d97706)"
+                    : "var(--txt-secondary)";
+                const icon =
+                  t.level === "warn"
+                    ? ICONS.warning
+                    : ICONS.info || ICONS.question;
+                return `<div class="flex items-start gap-1.5 text-xs" style="color:${color}">
                 ${icon}
                 <span>${t.html}</span>
               </div>`;
-            }).join("")}
+              })
+              .join("")}
           </div>`
         : "";
 
@@ -2143,9 +2227,17 @@ export default {
         <button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("datasets.new")}</button>
       </div>`;
 
+      // Surface a GDPR-style overdue banner so the user can bulk-delete
+      // datasets whose retention window (delete_after_months) has elapsed.
+      const overdueDatasets = state.retentionBannerDismissed
+        ? []
+        : allDatasets.filter(datasetIsOverdue);
+      const overdueBanner = renderOverdueBanner(overdueDatasets);
+
       if (allDatasets.length === 0) {
         return `<div class="space-y-4">
           ${header}
+          ${overdueBanner}
           <div class="tx-card p-8 text-center">
             <div class="inline-flex items-center justify-center w-12 h-12 rounded-full mb-3" style="background:var(--bg-chip);color:var(--txt-secondary)">${ICONS.database}</div>
             <h4 class="font-semibold text-lg mb-1">${T("datasets.empty")}</h4>
@@ -2186,6 +2278,7 @@ export default {
 
       return `<div class="space-y-4">
         ${header}
+        ${overdueBanner}
         ${toolbar}
         <div class="space-y-2">${rows}</div>
         ${totalPages > 1 ? renderPagination(state.datasetsPage, totalPages, filtered.length) : ""}
@@ -2250,19 +2343,106 @@ export default {
       </div>`;
     }
 
+    // ---------------------------------------------------------------------
+    // GDPR / data retention helpers
+    // ---------------------------------------------------------------------
+
+    const RETENTION_MONTHS_OPTIONS = [0, 3, 6, 9, 12, 18];
+
+    function datasetExpiresAt(d) {
+      // Backend already returns a computed `expires_at`. We re-derive it on
+      // the client for legacy entries (or in case the timestamp is stale)
+      // so the UI stays accurate even before the next API roundtrip.
+      const months = parseInt(d?.delete_after_months, 10);
+      if (!months || months <= 0) return null;
+      const base = new Date(d.updated_at || d.created_at || Date.now());
+      if (Number.isNaN(base.getTime())) return null;
+      const out = new Date(base);
+      out.setMonth(out.getMonth() + months);
+      return out;
+    }
+
+    function datasetIsOverdue(d) {
+      const exp = datasetExpiresAt(d);
+      if (!exp) return false;
+      return exp.getTime() < Date.now();
+    }
+
+    function renderRetentionPicker(d) {
+      const cur = parseInt(d?.delete_after_months, 10) || 0;
+      const opts = RETENTION_MONTHS_OPTIONS.map((m) => {
+        const label =
+          m === 0
+            ? T("datasets.retention_never")
+            : Tf("datasets.retention_months", { months: m });
+        return `<option value="${m}"${m === cur ? " selected" : ""}>${escHtml(label)}</option>`;
+      }).join("");
+      return `<label class="flex items-center gap-1.5 text-xs tx-secondary" title="${escHtml(T("datasets.retention_hint"))}">
+        ${ICONS.clock || ICONS.calendar || ""}
+        <span>${T("datasets.retention_label")}:</span>
+        <select data-action="set-retention" class="tx-input" style="height:30px;padding:0 0.4rem;font-size:0.75rem">${opts}</select>
+      </label>`;
+    }
+
+    function renderExpiryHint(d) {
+      const exp = datasetExpiresAt(d);
+      if (!exp) return "";
+      const overdue = exp.getTime() < Date.now();
+      const formatted = exp.toISOString().slice(0, 10);
+      const cls = overdue
+        ? "color:var(--status-error);font-weight:500"
+        : "color:var(--txt-secondary)";
+      const text = overdue
+        ? Tf("datasets.retention_expired_at", { date: formatted })
+        : Tf("datasets.retention_expires_at", { date: formatted });
+      return ` · <span style="${cls}">${escHtml(text)}</span>`;
+    }
+
+    function renderOverdueBanner(overdueDatasets) {
+      if (!overdueDatasets.length) return "";
+      const count = overdueDatasets.length;
+      return `<div class="tx-card p-4" style="background:rgba(220,38,38,0.08);border-color:var(--status-error)">
+        <div class="flex items-start justify-between gap-3 flex-wrap">
+          <div class="flex-1 min-w-0">
+            <div class="font-semibold" style="color:var(--status-error)">
+              ${ICONS.warning} ${Tf("datasets.retention_overdue_title", { count })}
+            </div>
+            <p class="text-sm tx-secondary mt-1">${T("datasets.retention_overdue_hint")}</p>
+            <ul class="text-xs tx-secondary mt-2 space-y-0.5">
+              ${overdueDatasets
+                .slice(0, 5)
+                .map(
+                  (d) =>
+                    `<li>${escHtml(datasetDisplayName(d))} — ${escHtml(formatDate(d.updated_at || d.created_at))}</li>`,
+                )
+                .join("")}
+              ${overdueDatasets.length > 5 ? `<li>… ${overdueDatasets.length - 5} more</li>` : ""}
+            </ul>
+          </div>
+          <div class="flex items-center gap-2">
+            <button data-action="retention-dismiss" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.cancel")}</button>
+            <button data-action="retention-delete-overdue" class="tx-btn tx-btn-sm" style="background:var(--status-error);color:white">${ICONS.trash} ${T("datasets.retention_delete_now")}</button>
+          </div>
+        </div>
+      </div>`;
+    }
+
     function renderDatasetDetail(c) {
       const d = state.selectedDataset;
       const templates = collectionTemplates(c);
       const hasPreview = templates.length > 0 && state.previewVisible;
       const canShowPreview = templates.length > 0 && !state.previewVisible;
 
+      const retention = renderRetentionPicker(d);
+      const expiryHint = renderExpiryHint(d);
       const header = `<div class="tx-card p-5">
-        <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center justify-between gap-3 flex-wrap">
           <div class="min-w-0 flex-1">
             <h3 class="text-lg font-semibold truncate">${escHtml(datasetDisplayName(d))}</h3>
-            <div class="text-xs tx-secondary mt-0.5">${T("app.created")}: ${formatDate(d.created_at)}</div>
+            <div class="text-xs tx-secondary mt-0.5">${T("app.created")}: ${formatDate(d.created_at)}${expiryHint}</div>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 flex-wrap">
+            ${retention}
             ${statusBadge(d.status || "draft")}
             ${canShowPreview ? `<button data-action="preview-show" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("preview.show")}">${ICONS.doc} ${T("preview.show")}</button>` : ""}
             <button data-delete-dataset="${d.id}" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)">${ICONS.trash}</button>
@@ -2594,18 +2774,40 @@ export default {
           T("datasets.analyze_step_done"),
         ];
         const step = state.datasetParseStep || 0;
-        const pct = Math.min(95, 15 + step * 28);
+        const elapsed = state.datasetParseElapsedSec || 0;
+        const fileCount = state.datasetParseFileCount || 0;
+        const hasImages = !!state.datasetParseHasImages;
+        const expectedSec = Math.max(8, fileCount * (hasImages ? 12 : 4));
+        const timeBasedPct = Math.min(
+          85,
+          Math.round((elapsed / expectedSec) * 85),
+        );
+        const pct = Math.max(15 + step * 25, timeBasedPct);
+        const cappedPct = Math.min(95, pct);
+        const statusLine =
+          step >= 2
+            ? T("datasets.analyze_status_running_ai")
+            : Tf("datasets.analyze_status_reading_files", { count: fileCount });
+        const hintLine = hasImages
+          ? T("datasets.analyze_status_image_hint")
+          : T("datasets.analyze_status_doc_hint");
         progress = `<div class="mt-3 space-y-2">
-          <div class="flex items-center gap-2 text-sm font-medium" style="color:var(--brand)">
-            <div class="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent"></div>
-            ${T("datasets.analyzing")}
+          <div class="flex items-center justify-between gap-2 text-sm font-medium" style="color:var(--brand)">
+            <div class="flex items-center gap-2">
+              <div class="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent"></div>
+              ${T("datasets.analyzing")}
+            </div>
+            <span class="text-xs font-mono tx-secondary" aria-live="polite">${Tf("datasets.analyze_status_elapsed", { seconds: elapsed })}</span>
           </div>
           <div class="w-full rounded-full h-2" style="background:var(--divider)">
-            <div class="h-2 rounded-full transition-all duration-700" style="width:${pct}%;background:var(--brand)"></div>
+            <div class="h-2 rounded-full transition-all duration-700" style="width:${cappedPct}%;background:var(--brand)"></div>
           </div>
           <div class="flex justify-between text-xs tx-secondary">
             ${steps.map((s, i) => `<span${i <= step ? ' style="color:var(--brand);font-weight:500"' : ""}>${s}</span>`).join("")}
           </div>
+          <div class="text-xs tx-secondary">${escHtml(statusLine)}</div>
+          <div class="text-xs tx-secondary" style="opacity:0.85">${escHtml(hintLine)}</div>
+          <div class="text-xs" style="color:var(--status-warning,#d97706);opacity:0.9">${escHtml(T("datasets.analyze_dont_close"))}</div>
         </div>`;
       }
 
@@ -2654,38 +2856,37 @@ export default {
       </div>`;
     }
 
+    // Status-only display for the AI extraction stage. The actual
+    // trigger is the unified "Read files & auto-fill" button in the
+    // Source Documents section above; this card only surfaces the
+    // outcome (and the model used) so users still get feedback that
+    // their data has been extracted.
     function renderDatasetExtractionSection(d) {
-      const hasDoc = datasetHasDoc(d);
       const isExtracted =
         d.status === "extracted" ||
         d.status === "reviewed" ||
         d.status === "generated";
-      const info = d.ai_extracted || {};
-      let line = "";
-      if (state.datasetExtracting) {
-        line = `<div class="flex items-center gap-2 text-sm" style="color:var(--brand)">
-          <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
-          ${T("datasets.extract_running")}
-        </div>`;
-      } else if (isExtracted) {
-        line = `<div class="flex items-center gap-2 text-sm" style="color:var(--status-success)">
-          ${ICONS.check} ${T("datasets.extract_done")}
-          ${info.model_used ? ` · ${T("datasets.extract_model")}: <span class="font-mono text-xs">${escHtml(info.model_used)}</span>` : ""}
-        </div>`;
-      } else {
-        line = `<div class="text-sm tx-secondary">${hasDoc ? "" : T("datasets.extract_no_cv")}</div>`;
+      if (!isExtracted && !state.datasetParsing) {
+        return "";
       }
+      const info = d.ai_extracted || {};
+      const modelInfo = info.model_used
+        ? ` · ${T("datasets.extract_model")}: <span class="font-mono text-xs">${escHtml(info.model_used)}</span>`
+        : "";
+      const line = state.datasetParsing
+        ? `<div class="flex items-center gap-2 text-sm" style="color:var(--brand)">
+            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
+            ${T("datasets.extract_running")}
+          </div>`
+        : `<div class="flex items-center gap-2 text-sm" style="color:var(--status-success)">
+            ${ICONS.check} ${T("datasets.extract_done")}${modelInfo}
+          </div>`;
       return `<div class="tx-card p-5">
         <div class="flex items-center gap-2 mb-3">
           <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2">${ICONS.sparkle} ${T("datasets.section_extraction")}</h4>
           <span class="text-xs tx-secondary">— ${T("datasets.section_extraction_hint")}</span>
         </div>
-        <div class="flex items-center justify-between">
-          ${line}
-          <button data-action="extract" class="tx-btn tx-btn-sm" ${!hasDoc || state.datasetExtracting ? "disabled" : ""}>
-            ${ICONS.sparkle} ${state.datasetExtracting ? T("datasets.extract_running") : isExtracted ? T("datasets.re_extract") : T("datasets.extract_btn")}
-          </button>
-        </div>
+        ${line}
       </div>`;
     }
 
@@ -3322,6 +3523,8 @@ export default {
             const style = fd.get(`fd_${idx}_style`)?.toString();
             if (style === "ol" || style === "ul") designer.list_style = style;
             designer.prevent_orphans = fd.has(`fd_${idx}_prevent_orphans`);
+            designer.top_blank_line = fd.has(`fd_${idx}_top_blank_line`);
+            designer.bottom_blank_line = fd.has(`fd_${idx}_bottom_blank_line`);
           } else if (fields[idx].type === "table") {
             designer.repeat_header = fd.has(`fd_${idx}_repeat_header`);
             designer.prevent_row_break = fd.has(`fd_${idx}_prevent_row_break`);
@@ -3335,6 +3538,9 @@ export default {
             if (un) designer.unchecked_glyph = un;
             if (yl) designer.yes_label = yl;
             if (nl) designer.no_label = nl;
+            designer.clickable_checkbox = fd.has(
+              `fd_${idx}_clickable_checkbox`,
+            );
           } else if (fields[idx].type === "image") {
             const w = parseInt(fd.get(`fd_${idx}_width`) || "0", 10);
             const h = parseInt(fd.get(`fd_${idx}_height`) || "0", 10);
@@ -3711,6 +3917,7 @@ export default {
 
       const uploadBtn = el.querySelector("#tx-upload-template-btn");
       const nameInput = el.querySelector("#tx-template-name");
+      const langSelect = el.querySelector("#tx-template-language");
       if (uploadBtn && nameInput) {
         uploadBtn.addEventListener("click", async () => {
           const file = fi?.files[0] || _pendingTemplateFile;
@@ -3719,7 +3926,10 @@ export default {
           try {
             uploadBtn.disabled = true;
             uploadBtn.textContent = T("templates.uploading");
-            const res = await apiUpload("/templates", file, { name });
+            const language = (langSelect?.value || "").trim();
+            const extra = { name };
+            if (language) extra.language = language;
+            const res = await apiUpload("/templates", file, extra);
             _pendingTemplateFile = null;
             const newTemplateId = res.template?.id;
             if (newTemplateId) {
@@ -3754,6 +3964,32 @@ export default {
           a.remove();
         }),
       );
+
+      el.querySelectorAll("[data-template-language-set]").forEach((sel) =>
+        sel.addEventListener("change", async () => {
+          const tid = sel.dataset.templateLanguageSet;
+          const language = sel.value || "";
+          const original = sel.dataset.previousValue ?? "";
+          sel.disabled = true;
+          try {
+            await api(`/templates/${tid}`, {
+              method: "PATCH",
+              body: JSON.stringify({ language }),
+            });
+            sel.dataset.previousValue = language;
+            await fetchTemplates();
+            showToast(T("templates.language_updated"));
+          } catch (err) {
+            sel.value = original;
+            showToast(err.message, "error");
+          } finally {
+            sel.disabled = false;
+          }
+        }),
+      );
+      el.querySelectorAll("[data-template-language-set]").forEach((sel) => {
+        sel.dataset.previousValue = sel.value || "";
+      });
 
       el.querySelectorAll("[data-detach-template]").forEach((btn) =>
         btn.addEventListener("click", async (e) => {
@@ -3932,6 +4168,68 @@ export default {
           }
         }),
       );
+
+      // GDPR retention dropdown on the dataset detail header.
+      el.querySelector('[data-action="set-retention"]')?.addEventListener(
+        "change",
+        async (e) => {
+          const d = state.selectedDataset;
+          if (!d) return;
+          const months = parseInt(e.target.value, 10) || 0;
+          try {
+            const res = await api(`/candidates/${d.id}`, {
+              method: "PUT",
+              body: JSON.stringify({
+                delete_after_months: months > 0 ? months : null,
+              }),
+            });
+            state.selectedDataset = res.candidate;
+            await fetchDatasets();
+            showToast(T("datasets.retention_updated"));
+            render();
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        },
+      );
+
+      // Overdue banner — Cancel just hides the banner for the current
+      // session. Delete now batch-DELETEs every dataset whose computed
+      // expires_at is in the past, after a confirm() guard.
+      el.querySelector('[data-action="retention-dismiss"]')?.addEventListener(
+        "click",
+        () => {
+          state.retentionBannerDismissed = true;
+          render();
+        },
+      );
+      el.querySelector(
+        '[data-action="retention-delete-overdue"]',
+      )?.addEventListener("click", async () => {
+        const overdue = (state.datasets || []).filter(datasetIsOverdue);
+        if (!overdue.length) return;
+        if (
+          !confirm(
+            Tf("datasets.retention_delete_confirm", {
+              count: overdue.length,
+            }),
+          )
+        )
+          return;
+        let okCount = 0;
+        for (const d of overdue) {
+          try {
+            await api(`/candidates/${d.id}`, { method: "DELETE" });
+            okCount++;
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        }
+        state.retentionBannerDismissed = false;
+        await fetchDatasets();
+        showToast(Tf("datasets.retention_delete_done", { count: okCount }));
+        render();
+      });
 
       // Datasets search
       const ds = el.querySelector("#tx-datasets-search");
@@ -4266,44 +4564,105 @@ export default {
         },
       );
 
-      // Parse documents
+      // Parse documents — single combined action that runs the AI form
+      // auto-fill (parse-documents) and the variable-level extraction
+      // (extract) in parallel. We surface a live elapsed-time + adaptive
+      // progress bar so users know that a slow image OCR or AI roundtrip
+      // is still in progress rather than hung.
       el.querySelector('[data-action="parse-documents"]')?.addEventListener(
         "click",
         async () => {
+          const imageExts = [
+            "jpg",
+            "jpeg",
+            "png",
+            "gif",
+            "webp",
+            "tif",
+            "tiff",
+            "bmp",
+          ];
+          const allFiles = [];
+          if (d.files?.cv?.filename) allFiles.push(d.files.cv.filename);
+          for (const f of d.files?.additional || []) {
+            if (f?.filename) allFiles.push(f.filename);
+          }
+          const urlCount = (d.files?.urls || []).length;
+          const fileCount = allFiles.length + urlCount;
+          const hasImages = allFiles.some((name) => {
+            const dot = name.lastIndexOf(".");
+            if (dot < 0) return false;
+            return imageExts.includes(name.slice(dot + 1).toLowerCase());
+          });
           state.datasetParsing = true;
           state.datasetParseStep = 0;
+          state.datasetParseStartedAt = Date.now();
+          state.datasetParseElapsedSec = 0;
+          state.datasetParseFileCount = fileCount;
+          state.datasetParseHasImages = hasImages;
+          if (state.datasetParseTimer) clearInterval(state.datasetParseTimer);
+          state.datasetParseTimer = setInterval(() => {
+            if (!state.datasetParsing || !state.datasetParseStartedAt) return;
+            state.datasetParseElapsedSec = Math.round(
+              (Date.now() - state.datasetParseStartedAt) / 1000,
+            );
+            render();
+          }, 1000);
           render();
-          await new Promise((r) => setTimeout(r, 400));
+          await new Promise((r) => setTimeout(r, 250));
           state.datasetParseStep = 1;
           render();
           await refreshAccessToken();
+          let parseRes = null;
           try {
             state.datasetParseStep = 2;
             render();
-            const res = await api(`/candidates/${d.id}/parse-documents`, {
+            const parsePromise = api(`/candidates/${d.id}/parse-documents`, {
               method: "POST",
-            });
+            }).catch((err) => ({ __error: err }));
+            const extractPromise = api(`/candidates/${d.id}/extract`, {
+              method: "POST",
+            }).catch((err) => ({ __error: err }));
+            const [pRes, eRes] = await Promise.all([
+              parsePromise,
+              extractPromise,
+            ]);
+            if (pRes && pRes.__error) {
+              throw pRes.__error;
+            }
+            parseRes = pRes;
+            if (eRes && eRes.__error) {
+              console.warn("[synaform] extract endpoint failed", eRes.__error);
+            }
             state.datasetParseStep = 3;
             render();
-            if (res.success && res.suggestions) {
+            if (parseRes && parseRes.success && parseRes.suggestions) {
               const merged = { ...(d.field_values || {}) };
-              for (const [k, v] of Object.entries(res.suggestions)) {
+              for (const [k, v] of Object.entries(parseRes.suggestions)) {
                 if (v !== null && v !== undefined && v !== "") merged[k] = v;
               }
               await api(`/candidates/${d.id}`, {
                 method: "PUT",
                 body: JSON.stringify({ field_values: merged }),
               });
-              const upd = await api(`/candidates/${d.id}`);
-              state.selectedDataset = upd.candidate;
-              await loadDatasetVariables(d.id);
-              showToast(T("datasets.parse_done"));
             }
+            const upd = await api(`/candidates/${d.id}`);
+            state.selectedDataset = upd.candidate;
+            await loadDatasetVariables(d.id);
+            showToast(T("datasets.parse_done"));
           } catch (err) {
             showToast(err.message, "error");
           }
+          if (state.datasetParseTimer) {
+            clearInterval(state.datasetParseTimer);
+            state.datasetParseTimer = null;
+          }
           state.datasetParsing = false;
           state.datasetParseStep = 0;
+          state.datasetParseStartedAt = null;
+          state.datasetParseElapsedSec = 0;
+          state.datasetParseFileCount = 0;
+          state.datasetParseHasImages = false;
           render();
         },
       );
@@ -4705,7 +5064,7 @@ export default {
       const today = new Date().toISOString().slice(0, 10);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `templatex-${safeName}-${today}.csv`;
+      a.download = `synaform-${safeName}-${today}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();

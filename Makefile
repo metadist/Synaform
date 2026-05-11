@@ -1,8 +1,8 @@
 .PHONY: help lint format test sync sync-and-clear validate-i18n
 
 SYNAPLAN_DIR ?= /wwwroot/synaplan
-PLUGIN_SRC   = templatex-plugin
-PLUGIN_DST   = $(SYNAPLAN_DIR)/plugins/templatex
+PLUGIN_SRC   = synaform-plugin
+PLUGIN_DST   = $(SYNAPLAN_DIR)/plugins/synaform
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -12,7 +12,7 @@ help: ## Show this help
 lint: ## Run all lint checks (PHP + JS + i18n)
 	@echo "=== PHP formatting check (PSR-12) ==="
 	docker compose -f $(SYNAPLAN_DIR)/docker-compose.yml exec -T backend \
-		vendor/bin/php-cs-fixer fix --dry-run --diff --rules=@PSR12 --using-cache=no /plugins/templatex/backend/ || true
+		vendor/bin/php-cs-fixer fix --dry-run --diff --rules=@PSR12 --using-cache=no /plugins/synaform/backend/ || true
 	@echo ""
 	@echo "=== JS formatting check ==="
 	npx prettier --check '$(PLUGIN_SRC)/frontend/**/*.js' 2>/dev/null || echo "Install prettier: npm install --save-dev prettier"
@@ -22,7 +22,7 @@ lint: ## Run all lint checks (PHP + JS + i18n)
 
 format: ## Fix formatting (PHP + JS)
 	docker compose -f $(SYNAPLAN_DIR)/docker-compose.yml exec -T backend \
-		vendor/bin/php-cs-fixer fix --rules=@PSR12 --using-cache=no /plugins/templatex/backend/ || true
+		vendor/bin/php-cs-fixer fix --rules=@PSR12 --using-cache=no /plugins/synaform/backend/ || true
 	npx prettier --write '$(PLUGIN_SRC)/frontend/**/*.js' 2>/dev/null || true
 
 validate-i18n: ## Validate i18n JSON files parse and keys match

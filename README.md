@@ -1,8 +1,8 @@
-# TemplateX — AI-Powered Document Merge Plugin for Synaplan
+# Synaform — AI-Powered Document Merge Plugin for Synaplan
 
-TemplateX is a [Synaplan](https://synaplan.com) plugin that turns any repeatable data-collection workflow into a **Collection** — a bundle of the questions you need answered, the Word templates you want filled, and every real-world dataset you process. It uses AI to extract structured information from uploaded files and fills DOCX templates with the results — no manual copy-paste required.
+Synaform is a [Synaplan](https://synaplan.com) plugin that turns any repeatable data-collection workflow into a **Collection** — a bundle of the questions you need answered, the Word templates you want filled, and every real-world dataset you process. It uses AI to extract structured information from uploaded files and fills DOCX templates with the results — no manual copy-paste required.
 
-Originally built for an HR customer turning candidate CVs and interview notes into standardised profile documents, TemplateX is flexible enough for any use case where multiple inputs need to be combined into a single templated output: customer onboarding, incident reports, intake forms, case files, and more.
+Originally built for an HR customer turning candidate CVs and interview notes into standardised profile documents, Synaform is flexible enough for any use case where multiple inputs need to be combined into a single templated output: customer onboarding, incident reports, intake forms, case files, and more.
 
 ## Core Concept: Collections
 
@@ -47,25 +47,25 @@ Requires a running [Synaplan](https://github.com/metadist/synaplan) instance.
 
 ```bash
 # Copy the plugin into Synaplan's plugin directory
-cp -r templatex-plugin/ /path/to/synaplan/plugins/templatex/
+cp -r synaform-plugin/ /path/to/synaplan/plugins/synaform/
 
 # Clear the Symfony cache
 cd /path/to/synaplan && php bin/console cache:clear
 
 # Install for a user
-php bin/console app:plugin:install <userId> templatex
+php bin/console app:plugin:install <userId> synaform
 ```
 
-The plugin will be available at `/plugins/templatex` in the Synaplan UI.
+The plugin will be available at `/plugins/synaform` in the Synaplan UI.
 
 ## Plugin Structure
 
 ```
-templatex-plugin/
+synaform-plugin/
 ├── manifest.json                 # Plugin metadata, routes, config schema
 ├── backend/
 │   └── Controller/
-│       └── TemplateXController.php   # All API endpoints
+│       └── SynaformController.php   # All API endpoints
 ├── frontend/
 │   ├── index.js                  # Vanilla JS single-page application
 │   └── i18n/
@@ -79,7 +79,7 @@ templatex-plugin/
 
 ## API Endpoints
 
-All routes are namespaced under `/api/v1/user/{userId}/plugins/templatex/`. The backend retains the original resource names (`forms`, `candidates`) — the Collection-centric UX is a thin layer on top:
+All routes are namespaced under `/api/v1/user/{userId}/plugins/synaform/`. The backend retains the original resource names (`forms`, `candidates`) — the Collection-centric UX is a thin layer on top:
 
 | Area | Endpoints | Description |
 |------|-----------|-------------|
@@ -110,17 +110,17 @@ Plugin source code lives in this repository. To develop locally:
 
 ```bash
 # Sync plugin to your local Synaplan instance
-cp -r templatex-plugin/ /path/to/synaplan/plugins/templatex/
+cp -r synaform-plugin/ /path/to/synaplan/plugins/synaform/
 
 # Watch for changes (optional)
-fswatch -o templatex-plugin/ | xargs -n1 -I{} cp -r templatex-plugin/ /path/to/synaplan/plugins/templatex/
+fswatch -o synaform-plugin/ | xargs -n1 -I{} cp -r synaform-plugin/ /path/to/synaplan/plugins/synaform/
 ```
 
 CI runs PHP (PSR-12) and JavaScript (Prettier) formatting checks, plus i18n key consistency validation on every push.
 
 ## Related
 
-- **[Synaplan](https://github.com/metadist/synaplan)** — The open-source AI knowledge management platform that TemplateX plugs into
+- **[Synaplan](https://github.com/metadist/synaplan)** — The open-source AI knowledge management platform that Synaform plugs into
 - **[synaplan.com](https://synaplan.com)** — Project homepage, documentation, and live demo
 
 ## License

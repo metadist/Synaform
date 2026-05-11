@@ -14,7 +14,7 @@ declare(strict_types=1);
  * The form field declares columns: [{key:'time'}, {key:'employer'}].
  *
  * Run:
- *   docker compose exec backend php /plugins/templatex/tests/phase-t-tableblock.php
+ *   docker compose exec backend php /plugins/synaform/tests/phase-t-tableblock.php
  */
 
 require '/var/www/backend/vendor/autoload.php';
@@ -34,7 +34,7 @@ IOFactory::createWriter($phpWord, 'Word2007')->save($fixture);
 $out = '/tmp/test_phase_t_filled.docx';
 copy($fixture, $out);
 
-$controllerRef = new ReflectionClass(\Plugin\TemplateX\Controller\TemplateXController::class);
+$controllerRef = new ReflectionClass(\Plugin\Synaform\Controller\SynaformController::class);
 $controller = $controllerRef->newInstanceWithoutConstructor();
 $logProp = $controllerRef->getProperty('logger');
 $logProp->setAccessible(true);
@@ -60,7 +60,7 @@ $arrays = [
     ],
 ];
 
-$ref = new ReflectionMethod(\Plugin\TemplateX\Controller\TemplateXController::class, 'expandTableBlocks');
+$ref = new ReflectionMethod(\Plugin\Synaform\Controller\SynaformController::class, 'expandTableBlocks');
 $ref->setAccessible(true);
 $handled = $ref->invoke($controller, $out, $formFields, $arrays);
 

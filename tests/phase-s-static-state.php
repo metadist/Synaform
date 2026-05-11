@@ -5,7 +5,7 @@ declare(strict_types=1);
 /**
  * Phase S (static state) regression test.
  *
- * Proves that `TemplateXController::candidatesGenerate()` can run more than
+ * Proves that `SynaformController::candidatesGenerate()` can run more than
  * once in the same PHP process without corrupting drawings in the output
  * DOCX. The bug it guards against:
  *
@@ -156,7 +156,7 @@ libxml_use_internal_errors($prev);
 if (!$stillBuggy) {
     echo "NOTE — negative-control iteration produced well-formed XML.\n";
     echo "       This may mean PhpWord has been fixed upstream. If so, the\n";
-    echo "       guard in TemplateXController::candidatesGenerate() can be\n";
+    echo "       guard in SynaformController::candidatesGenerate() can be\n";
     echo "       removed and this phase-S test deleted.\n";
 }
 

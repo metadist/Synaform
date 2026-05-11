@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Plugin\TemplateX\Service;
+namespace Plugin\Synaform\Service;
 
 use Psr\Log\LoggerInterface;
 

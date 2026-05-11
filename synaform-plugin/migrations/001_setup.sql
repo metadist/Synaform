@@ -1,4 +1,4 @@
--- TemplateX Plugin Migration 001: Initial Setup
+-- Synaform Plugin Migration 001: Initial Setup
 -- Run per-user when the plugin is installed.
 -- Uses generic plugin_data table for candidate/form/template storage (non-invasive).
 -- Placeholders: :userId, :group

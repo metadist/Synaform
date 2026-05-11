@@ -23,7 +23,7 @@ if (!is_file($fixture)) {
     exit(1);
 }
 
-$out = sys_get_temp_dir() . '/templatex_phase_a_out.docx';
+$out = sys_get_temp_dir() . '/synaform_phase_a_out.docx';
 copy($fixture, $out);
 
 // --- Test data: realistic but fully synthetic. Mix of scalars and list items.
@@ -35,7 +35,7 @@ $listValues = [
     'relevantfortargetposlist' => ['8 Direct Reports', 'P&L Verantwortung 25 Mio EUR', 'Store-Fläche 4 500 m²'],
 ];
 
-// --- Inline copy of the algorithm from TemplateXController::expandListParagraphs,
+// --- Inline copy of the algorithm from SynaformController::expandListParagraphs,
 //     kept dependency-free so this test can run anywhere PHP is available.
 function expandListParagraphs(string $docxPath, array $listValues): array
 {

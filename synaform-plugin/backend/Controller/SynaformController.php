@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Plugin\TemplateX\Controller;
+namespace Plugin\Synaform\Controller;
 
 use App\Entity\User;
 use App\Repository\ConfigRepository;
@@ -14,7 +14,7 @@ use App\Service\ModelConfigService;
 use App\Service\RateLimitService;
 use PhpOffice\PhpWord\IOFactory as PhpWordIOFactory;
 use PhpOffice\PhpWord\TemplateProcessor;
-use Plugin\TemplateX\Service\TemplateHtmlPreviewService;
+use Plugin\Synaform\Service\TemplateHtmlPreviewService;
 use OpenApi\Attributes as OA;
 use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -27,16 +27,16 @@ use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\CurrentUser;
 
-#[Route('/api/v1/user/{userId}/plugins/templatex', name: 'api_plugin_templatex_')]
-#[OA\Tag(name: 'TemplateX Plugin')]
-class TemplateXController extends AbstractController
+#[Route('/api/v1/user/{userId}/plugins/synaform', name: 'api_plugin_synaform_')]
+#[OA\Tag(name: 'Synaform Plugin')]
+class SynaformController extends AbstractController
 {
-    private const PLUGIN_NAME = 'templatex';
-    private const CONFIG_GROUP = 'P_templatex';
-    private const DATA_TYPE_FORM = 'templatex_form';
-    private const DATA_TYPE_CANDIDATE = 'templatex_candidate';
-    private const DATA_TYPE_TEMPLATE = 'templatex_template';
-    private const DATA_TYPE_VALIDATION = 'templatex_validation';
+    private const PLUGIN_NAME = 'synaform';
+    private const CONFIG_GROUP = 'P_synaform';
+    private const DATA_TYPE_FORM = 'synaform_form';
+    private const DATA_TYPE_CANDIDATE = 'synaform_candidate';
+    private const DATA_TYPE_TEMPLATE = 'synaform_template';
+    private const DATA_TYPE_VALIDATION = 'synaform_validation';
     private const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'txt', 'rtf', 'odt', 'xls', 'xlsx', 'pptx'];
 
     /**
@@ -97,10 +97,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/setup-check', name: 'setup_check', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/setup-check',
+        path: '/api/v1/user/{userId}/plugins/synaform/setup-check',
         summary: 'Check plugin setup status',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Setup status')]
     public function setupCheck(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -134,10 +134,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/setup', name: 'setup', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/setup',
+        path: '/api/v1/user/{userId}/plugins/synaform/setup',
         summary: 'Initialize plugin with default form',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Setup result')]
     public function setup(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -167,10 +167,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/config', name: 'config_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/config',
+        path: '/api/v1/user/{userId}/plugins/synaform/config',
         summary: 'Get plugin configuration',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Plugin config')]
     public function configGet(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -187,10 +187,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/config', name: 'config_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/config',
+        path: '/api/v1/user/{userId}/plugins/synaform/config',
         summary: 'Update plugin configuration',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Updated config')]
     public function configUpdate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -227,10 +227,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates', name: 'templates_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates',
         summary: 'List all templates',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of templates')]
     public function templatesList(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -249,10 +249,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates', name: 'templates_create', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates',
         summary: 'Upload a DOCX template file',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 201, description: 'Template created')]
     public function templatesCreate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -275,7 +275,7 @@ class TemplateXController extends AbstractController
         $name = $request->request->get('name', pathinfo($originalName, PATHINFO_FILENAME));
         $templateId = 'tpl_' . bin2hex(random_bytes(6));
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId;
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
@@ -294,6 +294,12 @@ class TemplateXController extends AbstractController
             $preview = null;
         }
 
+        // Optional language metadata for the target template. The AI extraction
+        // step uses this so values returned for placeholders are written in the
+        // template's intended language (e.g. an English template still gets
+        // English values even when extracting from a German CV).
+        $language = $this->normalizeLanguage($request->request->get('language'));
+
         $templateData = [
             'id' => $templateId,
             'name' => $name,
@@ -301,6 +307,7 @@ class TemplateXController extends AbstractController
             'placeholders' => $placeholders,
             'placeholder_count' => count($placeholders),
             'preview' => $preview,
+            'language' => $language,
             'created_at' => date('c'),
             'updated_at' => date('c'),
         ];
@@ -315,10 +322,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}', name: 'templates_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}',
         summary: 'Get template metadata with placeholders',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Template details')]
     public function templatesGet(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -338,12 +345,50 @@ class TemplateXController extends AbstractController
         ]);
     }
 
+    #[Route('/templates/{templateId}', name: 'templates_update', methods: ['PATCH'])]
+    #[OA\Patch(
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}',
+        summary: 'Update template metadata (currently: name, language)',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Template updated')]
+    public function templatesUpdate(int $userId, string $templateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $template = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId);
+        if (!$template) {
+            return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+
+        if (array_key_exists('name', $data)) {
+            $name = trim((string) ($data['name'] ?? ''));
+            if ($name !== '') {
+                $template['name'] = $name;
+            }
+        }
+
+        if (array_key_exists('language', $data)) {
+            $template['language'] = $this->normalizeLanguage($data['language']);
+        }
+
+        $template['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId, $template);
+
+        return $this->json(['success' => true, 'template' => $template]);
+    }
+
     #[Route('/templates/{templateId}', name: 'templates_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}',
         summary: 'Delete a template',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Template deleted')]
     public function templatesDelete(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -356,7 +401,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId;
         $this->removeDirectory($dir);
 
         $this->pluginData->delete($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId);
@@ -366,10 +411,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/placeholders', name: 'templates_placeholders', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/placeholders',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/placeholders',
         summary: 'List detected placeholders for a template',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Placeholder list')]
     public function templatesPlaceholders(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -391,10 +436,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/variable-suggestions', name: 'templates_variable_suggestions', methods: ['GET'], priority: 10)]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/variable-suggestions',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/variable-suggestions',
         summary: 'Turn detected placeholders into ready-to-apply form fields (deterministic, no AI)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Suggested field[] array and a summary of what was detected')]
     public function templatesVariableSuggestions(int $userId, string $templateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -437,10 +482,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/preview-html', name: 'templates_preview_html', methods: ['GET'], priority: 10)]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/preview-html',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/preview-html',
         summary: 'Return the cached HTML preview skeleton for a target template (used by the live preview panel)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'HTML skeleton with placeholder spans')]
     public function templatesPreviewHtml(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -459,7 +504,7 @@ class TemplateXController extends AbstractController
             || ($preview['schema_version'] ?? 0) !== TemplateHtmlPreviewService::SCHEMA_VERSION;
 
         if ($stale) {
-            $filePath = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId . '/template.docx';
+            $filePath = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId . '/template.docx';
             if (is_file($filePath)) {
                 try {
                     $preview = $this->htmlPreviewService->build($filePath);
@@ -493,10 +538,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/templates/{templateId}/download', name: 'templates_download', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/templates/{templateId}/download',
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/download',
         summary: 'Download original template file',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Template DOCX file')]
     public function templatesDownload(int $userId, string $templateId, #[CurrentUser] ?User $user): Response
@@ -510,7 +555,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $filePath = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId . '/template.docx';
+        $filePath = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId . '/template.docx';
         if (!is_file($filePath)) {
             return $this->json(['success' => false, 'error' => 'Template file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -528,10 +573,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms', name: 'forms_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms',
         summary: 'List all form definitions',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of forms')]
     public function formsList(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -550,10 +595,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms', name: 'forms_create', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms',
         summary: 'Create a new form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 201, description: 'Form created')]
     public function formsCreate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -591,10 +636,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/{formId}', name: 'forms_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/{formId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/{formId}',
         summary: 'Get a form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Form details')]
     public function formsGet(int $userId, string $formId, #[CurrentUser] ?User $user): JsonResponse
@@ -616,10 +661,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/{formId}', name: 'forms_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/{formId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/{formId}',
         summary: 'Update a form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Form updated')]
     public function formsUpdate(int $userId, string $formId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -657,10 +702,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/{formId}', name: 'forms_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/{formId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/{formId}',
         summary: 'Delete a form definition',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Form deleted')]
     public function formsDelete(int $userId, string $formId, #[CurrentUser] ?User $user): JsonResponse
@@ -680,10 +725,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/forms/import-parse', name: 'forms_import_parse', methods: ['POST'], priority: 10)]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/forms/import-parse',
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/import-parse',
         summary: 'Parse pasted text or DOCX into structured form fields using AI',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Parsed form fields')]
     public function formsImportParse(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -752,10 +797,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates', name: 'candidates_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates',
         summary: 'List all entries',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of entries')]
     public function candidatesList(int $userId, #[CurrentUser] ?User $user): JsonResponse
@@ -765,6 +810,20 @@ class TemplateXController extends AbstractController
         }
 
         $candidates = $this->pluginData->list($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE);
+        // Surface the GDPR retention metadata on every entry so the UI can
+        // flag overdue datasets without re-walking each one. We compute
+        // expires_at on the fly: legacy entries created before this feature
+        // existed have no `delete_after_months` field and therefore never
+        // expire by default.
+        $candidates = array_map(function (array $c): array {
+            $c['delete_after_months'] = $this->normalizeRetentionMonths($c['delete_after_months'] ?? null);
+            $c['expires_at'] = $this->computeExpiresAt(
+                $c['updated_at'] ?? null,
+                $c['delete_after_months']
+            );
+
+            return $c;
+        }, $candidates);
 
         return $this->json([
             'success' => true,
@@ -774,10 +833,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates', name: 'candidates_create', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates',
         summary: 'Create a new entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 201, description: 'Entry created')]
     public function candidatesCreate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -798,9 +857,14 @@ class TemplateXController extends AbstractController
             'status' => $data['status'] ?? 'draft',
             'field_values' => $data['field_values'] ?? [],
             'files' => [],
+            // GDPR / data-retention: when set to a positive integer the
+            // dataset is flagged for deletion after that many months from
+            // its last update. null = "never auto-delete" (legacy default).
+            'delete_after_months' => $this->normalizeRetentionMonths($data['delete_after_months'] ?? null),
             'created_at' => date('c'),
             'updated_at' => date('c'),
         ];
+        $entryData['expires_at'] = $this->computeExpiresAt($entryData['updated_at'], $entryData['delete_after_months']);
 
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $entryId, $entryData);
 
@@ -812,10 +876,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}', name: 'candidates_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}',
         summary: 'Get entry detail',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Entry details')]
     public function candidatesGet(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -829,6 +893,12 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
+        $candidate['delete_after_months'] = $this->normalizeRetentionMonths($candidate['delete_after_months'] ?? null);
+        $candidate['expires_at'] = $this->computeExpiresAt(
+            $candidate['updated_at'] ?? null,
+            $candidate['delete_after_months']
+        );
+
         return $this->json([
             'success' => true,
             'candidate' => $candidate,
@@ -837,10 +907,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}', name: 'candidates_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}',
         summary: 'Update an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Entry updated')]
     public function candidatesUpdate(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -862,7 +932,14 @@ class TemplateXController extends AbstractController
                 $existing[$field] = $data[$field];
             }
         }
+        if (array_key_exists('delete_after_months', $data)) {
+            $existing['delete_after_months'] = $this->normalizeRetentionMonths($data['delete_after_months']);
+        }
         $existing['updated_at'] = date('c');
+        $existing['expires_at'] = $this->computeExpiresAt(
+            $existing['updated_at'],
+            $existing['delete_after_months'] ?? null
+        );
 
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $existing);
 
@@ -872,12 +949,46 @@ class TemplateXController extends AbstractController
         ]);
     }
 
+    /**
+     * Coerce arbitrary input into the allowed retention period (months).
+     * Allowed values: 3, 6, 9, 12, 18. Anything else (including 0, "never",
+     * empty string, null) collapses to null = "never auto-delete".
+     */
+    private function normalizeRetentionMonths(mixed $raw): ?int
+    {
+        if ($raw === null || $raw === '' || $raw === false || (is_string($raw) && strtolower(trim($raw)) === 'never')) {
+            return null;
+        }
+        $n = (int) $raw;
+        $allowed = [3, 6, 9, 12, 18];
+
+        return in_array($n, $allowed, true) ? $n : null;
+    }
+
+    /**
+     * Compute the GDPR-driven expiry timestamp from a base ISO date and a
+     * retention window in months. Returns null when retention is "never".
+     */
+    private function computeExpiresAt(?string $baseIso, ?int $months): ?string
+    {
+        if ($months === null || $months <= 0 || !is_string($baseIso) || $baseIso === '') {
+            return null;
+        }
+        try {
+            $dt = new \DateTimeImmutable($baseIso);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $dt->modify('+' . $months . ' months')->format('c');
+    }
+
     #[Route('/candidates/{candidateId}', name: 'candidates_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}',
         summary: 'Delete an entry and all its files',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Entry deleted')]
     public function candidatesDelete(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -890,7 +1001,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         $this->removeDirectory($dir);
 
         $this->pluginData->delete($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
@@ -900,10 +1011,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/upload-cv', name: 'candidates_upload_cv', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/upload-cv',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/upload-cv',
         summary: 'Upload primary document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'CV uploaded')]
     public function candidatesUploadCv(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -927,7 +1038,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Unsupported file type: ' . $ext], Response::HTTP_BAD_REQUEST);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
@@ -955,10 +1066,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/upload-doc', name: 'candidates_upload_doc', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/upload-doc',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/upload-doc',
         summary: 'Upload additional document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Document uploaded')]
     public function candidatesUploadDoc(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -977,7 +1088,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
@@ -1013,10 +1124,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/files/{slot}/{fileIndex}', name: 'candidates_file_delete', methods: ['DELETE'], requirements: ['fileIndex' => '\d+'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/files/{slot}/{fileIndex}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/files/{slot}/{fileIndex}',
         summary: 'Delete a source file (CV or additional document) from an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'File deleted')]
     public function candidatesFileDelete(int $userId, string $candidateId, string $slot, int $fileIndex, #[CurrentUser] ?User $user): JsonResponse
@@ -1030,7 +1141,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
 
         if ($slot === 'cv') {
             $cvFile = $entry['files']['cv'] ?? null;
@@ -1074,10 +1185,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/urls', name: 'candidates_urls_add', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/urls',
         summary: 'Attach a web URL (e.g. LinkedIn profile) as an AI-readable source',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'URL attached')]
     public function candidatesUrlsAdd(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -1147,10 +1258,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/urls/{urlIndex}', name: 'candidates_urls_delete', methods: ['DELETE'], requirements: ['urlIndex' => '\d+'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls/{urlIndex}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/urls/{urlIndex}',
         summary: 'Remove a previously added URL source',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'URL removed')]
     public function candidatesUrlsDelete(int $userId, string $candidateId, int $urlIndex, #[CurrentUser] ?User $user): JsonResponse
@@ -1177,10 +1288,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/urls/{urlIndex}/refresh', name: 'candidates_urls_refresh', methods: ['POST'], requirements: ['urlIndex' => '\d+'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/urls/{urlIndex}/refresh',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/urls/{urlIndex}/refresh',
         summary: 'Re-fetch a URL source (useful when a previous fetch failed or content changed)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'URL re-fetched')]
     public function candidatesUrlsRefresh(int $userId, string $candidateId, int $urlIndex, #[CurrentUser] ?User $user): JsonResponse
@@ -1217,10 +1328,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/extract', name: 'candidates_extract', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/extract',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/extract',
         summary: 'Extract structured data from uploaded CV using AI',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Extraction result')]
     public function candidatesExtract(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1245,7 +1356,7 @@ class TemplateXController extends AbstractController
             if ($hasCv) {
                 $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
                 $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
-                $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+                $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
                 [$cvText, $extractMeta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
                 $cvText = $cvText ?? '';
                 if (trim($cvText) !== '') {
@@ -1267,8 +1378,9 @@ class TemplateXController extends AbstractController
 
             $form = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, $entry['form_id'] ?? 'default');
             $formFields = $form['fields'] ?? [];
+            $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
 
-            $prompt = $this->buildExtractionPrompt($rawText, $formFields);
+            $prompt = $this->buildExtractionPrompt($rawText, $formFields, $extractionLanguage);
             $messages = [
                 ['role' => 'system', 'content' => 'You are a precise CV data extraction assistant. Return only valid JSON.'],
                 ['role' => 'user', 'content' => $prompt],
@@ -1306,10 +1418,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/parse-documents', name: 'candidates_parse_documents', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/parse-documents',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/parse-documents',
         summary: 'Parse uploaded documents with AI to auto-fill form fields',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Parsed field suggestions')]
     public function candidatesParseDocuments(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1328,13 +1440,13 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Form definition not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $candidateDir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId;
+        $candidateDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         $allTexts = [];
 
         if (!empty($entry['files']['cv'])) {
             $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
-            $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+            $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
             try {
                 [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
                 if (!empty(trim((string) $text))) {
@@ -1351,7 +1463,7 @@ class TemplateXController extends AbstractController
                 continue;
             }
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
-            $relativePath = $userId . '/templatex/candidates/' . $candidateId . '/' . $storedAs;
+            $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
             try {
                 [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
                 if (!empty(trim((string) $text))) {
@@ -1414,9 +1526,19 @@ class TemplateXController extends AbstractController
 
         $fieldsBlock = implode("\n", array_map(fn ($d) => '- ' . $d, $fieldDescriptions));
 
+        $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
+        $extractionLanguageName = $this->languageName($extractionLanguage);
+
         $prompt = <<<PROMPT
         You are an assistant that extracts form field values from documents.
         Below are the form fields that need to be filled, followed by the document text.
+
+        IMPORTANT - Output language: All free-text string values you return MUST be
+        written in {$extractionLanguageName}. If the source documents are in another
+        language, translate descriptive text (job titles, summaries, list items,
+        achievements, education descriptions, etc.) into {$extractionLanguageName}.
+        Proper nouns (people, company names, cities), email addresses, phone numbers,
+        URLs, and dates stay verbatim.
 
         For each field, extract the most appropriate value from the documents. Rules:
         - For "select" fields, ONLY return one of the allowed values listed in brackets, or null if not found.
@@ -1468,10 +1590,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/variables', name: 'candidates_variables_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/variables',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/variables',
         summary: 'Get resolved variables for an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Resolved variables')]
     public function candidatesVariablesGet(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1501,10 +1623,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/variables', name: 'candidates_variables_update', methods: ['PUT'])]
     #[OA\Put(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/variables',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/variables',
         summary: 'Update variable overrides for an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Updated variables')]
     public function candidatesVariablesUpdate(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -1540,10 +1662,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/generate/{templateId}', name: 'candidates_generate', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/generate/{templateId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/generate/{templateId}',
         summary: 'Generate a DOCX document from template and resolved variables',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Generated document metadata')]
     public function candidatesGenerate(int $userId, string $candidateId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1562,7 +1684,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $templatePath = $this->uploadDir . '/' . $userId . '/templatex/templates/' . $templateId . '/template.docx';
+        $templatePath = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId . '/template.docx';
         if (!is_file($templatePath)) {
             return $this->json(['success' => false, 'error' => 'Template file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -1735,12 +1857,12 @@ class TemplateXController extends AbstractController
             $this->processRowGroups($tp, $classified['rowGroups'], $arrays, $designerMap, $richSubfields);
             $this->processBlockGroups($tp, $classified['blockGroups'], $arrays);
             $this->processCheckboxes($tp, $classified['checkboxes'], $variables, $designerMap);
-            $this->processLists($tp, $classified['lists'], $variables);
+            $this->processLists($tp, $classified['lists'], $variables, $designerMap);
             $this->processImages($tp, $formFields, $entry);
             $this->processScalars($tp, $classified['scalars'], $variables);
 
             $docId = 'doc_' . bin2hex(random_bytes(6));
-            $genDir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated';
+            $genDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated';
             if (!is_dir($genDir)) {
                 mkdir($genDir, 0755, true);
             }
@@ -1758,6 +1880,13 @@ class TemplateXController extends AbstractController
             // designer config. Runs on the final DOCX so row clones emitted by
             // cloneRow / cloneParagraphGroupsPrepass are also reached.
             $this->applyTableLayoutHelpers($outputPath, $arrays, $designerMap);
+
+            // Phase E post-pass: convert [[SYNCB|…]] markers emitted by
+            // processCheckboxes() into real Word content-control checkboxes
+            // (`<w:sdt>` with `<w14:checkbox>`). Lets the customer click and
+            // toggle the checkboxes in the generated DOCX while still keeping
+            // the pre-resolved state visible.
+            $this->convertCheckboxMarkersToContentControls($outputPath);
 
             if (is_file($cleanedPath)) {
                 unlink($cleanedPath);
@@ -1799,10 +1928,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents', name: 'candidates_documents_list', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents',
         summary: 'List generated documents for an entry',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'List of generated documents')]
     public function candidatesDocumentsList(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
@@ -1824,10 +1953,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents/{documentId}/download', name: 'candidates_documents_download', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}/download',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents/{documentId}/download',
         summary: 'Download a generated document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Generated DOCX file')]
     public function candidatesDocumentDownload(int $userId, string $candidateId, string $documentId, #[CurrentUser] ?User $user): Response
@@ -1846,7 +1975,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $filePath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        $filePath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
         if (!is_file($filePath)) {
             return $this->json(['success' => false, 'error' => 'Document file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -1861,10 +1990,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents/{documentId}/pdf', name: 'candidates_documents_pdf', methods: ['GET'], priority: 10)]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}/pdf',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents/{documentId}/pdf',
         summary: 'Stream a PDF rendering of a generated document (true-preview path). Requires libreoffice on the backend host; returns 501 otherwise.',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'PDF file')]
     #[OA\Response(response: 501, description: 'LibreOffice not installed on the backend')]
@@ -1884,7 +2013,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $docxPath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        $docxPath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
         if (!is_file($docxPath)) {
             return $this->json(['success' => false, 'error' => 'Document file not found on disk'], Response::HTTP_NOT_FOUND);
         }
@@ -1905,10 +2034,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/documents/{documentId}', name: 'candidates_documents_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/documents/{documentId}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/documents/{documentId}',
         summary: 'Delete a generated document',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Document deleted')]
     public function candidatesDocumentDelete(int $userId, string $candidateId, string $documentId, #[CurrentUser] ?User $user): JsonResponse
@@ -1927,7 +2056,7 @@ class TemplateXController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Document not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $filePath = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
+        $filePath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/generated/' . $docMeta['filename'];
         if (is_file($filePath)) {
             unlink($filePath);
         }
@@ -1945,10 +2074,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_upload', methods: ['POST'])]
     #[OA\Post(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/image/{key}',
         summary: 'Upload an image for an image-typed variable (stored per candidate, embedded at generation time)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Image stored')]
     public function candidatesImageUpload(int $userId, string $candidateId, string $key, Request $request, #[CurrentUser] ?User $user): JsonResponse
@@ -1983,7 +2112,7 @@ class TemplateXController extends AbstractController
         }
 
         $ext = $this->mimeToExtension($mime);
-        $dir = $this->uploadDir . '/' . $userId . '/templatex/candidates/' . $candidateId . '/images';
+        $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/images';
         if (!is_dir($dir)) {
             mkdir($dir, 0o755, true);
         }
@@ -2021,10 +2150,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_get', methods: ['GET'])]
     #[OA\Get(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/image/{key}',
         summary: 'Stream a stored image variable (used by the UI thumbnail and the HTML live preview)',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Image file')]
     public function candidatesImageGet(int $userId, string $candidateId, string $key, #[CurrentUser] ?User $user): Response
@@ -2052,10 +2181,10 @@ class TemplateXController extends AbstractController
 
     #[Route('/candidates/{candidateId}/image/{key}', name: 'candidates_image_delete', methods: ['DELETE'])]
     #[OA\Delete(
-        path: '/api/v1/user/{userId}/plugins/templatex/candidates/{candidateId}/image/{key}',
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/image/{key}',
         summary: 'Remove a stored image variable',
         security: [['ApiKey' => []]],
-        tags: ['TemplateX Plugin']
+        tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Image removed')]
     public function candidatesImageDelete(int $userId, string $candidateId, string $key, #[CurrentUser] ?User $user): JsonResponse
@@ -2369,8 +2498,9 @@ class TemplateXController extends AbstractController
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, 'default', $defaultForm);
     }
 
-    private function buildExtractionPrompt(string $rawText, array $formFields = []): string
+    private function buildExtractionPrompt(string $rawText, array $formFields = [], string $language = 'de'): string
     {
+        $languageName = $this->languageName($language);
         $fieldLines = [];
 
         $defaultScalars = [
@@ -2429,6 +2559,12 @@ class TemplateXController extends AbstractController
         return <<<PROMPT
             You are extracting structured data from a CV/resume document. Return a JSON object with these fields. Use null for any field not found in the document. Do NOT invent or guess data.
 
+            IMPORTANT - Output language: All free-text values (job titles, descriptions,
+            list items, education entries, etc.) MUST be written in {$languageName}.
+            If the source document is in another language, translate descriptive text
+            into {$languageName}. Proper nouns (people, company names, cities), email
+            addresses, phone numbers, URLs and dates stay verbatim.
+
             Fields to extract:
             {$fieldsBlock}
 
@@ -2463,6 +2599,87 @@ class TemplateXController extends AbstractController
         }
 
         return null;
+    }
+
+    /**
+     * Normalises a language value coming from the API (UI dropdown, REST
+     * payload, etc.) into a canonical 2-letter ISO code we use across the
+     * plugin. Falls back to '' (= "inherit from form") for unknown values.
+     */
+    private function normalizeLanguage(mixed $raw): string
+    {
+        if (!is_string($raw)) {
+            return '';
+        }
+        $code = strtolower(trim($raw));
+        if ($code === '') {
+            return '';
+        }
+        // Accept BCP-47 style "de-DE" by taking the primary subtag.
+        if (str_contains($code, '-')) {
+            $code = explode('-', $code, 2)[0];
+        }
+        $supported = ['de', 'en', 'es', 'fr', 'it', 'tr', 'pt', 'nl', 'pl'];
+
+        return in_array($code, $supported, true) ? $code : '';
+    }
+
+    /**
+     * Maps an ISO language code to a human readable language name we feed
+     * to the LLM. We always pass an English name regardless of UI locale
+     * because LLM providers respond more reliably to English instructions.
+     */
+    private function languageName(string $code): string
+    {
+        return match ($code) {
+            'de' => 'German',
+            'en' => 'English',
+            'es' => 'Spanish',
+            'fr' => 'French',
+            'it' => 'Italian',
+            'tr' => 'Turkish',
+            'pt' => 'Portuguese',
+            'nl' => 'Dutch',
+            'pl' => 'Polish',
+            default => 'German',
+        };
+    }
+
+    /**
+     * Decides which language the AI should write its extracted values in.
+     * Priority:
+     *   1. If the form's attached target templates declare a language and
+     *      they all agree, use that. (User picked DOCX templates in a
+     *      specific language; values must match.)
+     *   2. Otherwise fall back to the form/collection language.
+     *   3. Final fallback: 'de' (historical default).
+     */
+    private function resolveExtractionLanguage(int $userId, ?array $form): string
+    {
+        $templateIds = $form['template_ids'] ?? [];
+        $templateLanguages = [];
+        if (is_array($templateIds)) {
+            foreach ($templateIds as $tplId) {
+                if (!is_string($tplId) || $tplId === '') {
+                    continue;
+                }
+                $tpl = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $tplId);
+                $lang = $this->normalizeLanguage($tpl['language'] ?? null);
+                if ($lang !== '') {
+                    $templateLanguages[$lang] = true;
+                }
+            }
+        }
+        if (count($templateLanguages) === 1) {
+            return array_key_first($templateLanguages);
+        }
+
+        $formLang = $this->normalizeLanguage($form['language'] ?? null);
+        if ($formLang !== '') {
+            return $formLang;
+        }
+
+        return 'de';
     }
 
     private function buildImportParsePrompt(string $text): string
@@ -2538,7 +2755,7 @@ class TemplateXController extends AbstractController
             CURLOPT_CONNECTTIMEOUT => 8,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; TemplateX-Bot/1.0; +https://synaplan.com)',
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (compatible; Synaform-Bot/1.0; +https://synaplan.com)',
             CURLOPT_HTTPHEADER => [
                 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language: en-US,en;q=0.9,de;q=0.8',
@@ -2679,6 +2896,12 @@ class TemplateXController extends AbstractController
             if (array_key_exists('prevent_orphans', $raw)) {
                 $out['prevent_orphans'] = (bool) $raw['prevent_orphans'];
             }
+            if (array_key_exists('top_blank_line', $raw)) {
+                $out['top_blank_line'] = (bool) $raw['top_blank_line'];
+            }
+            if (array_key_exists('bottom_blank_line', $raw)) {
+                $out['bottom_blank_line'] = (bool) $raw['bottom_blank_line'];
+            }
         } elseif ($fieldType === 'table') {
             if (array_key_exists('repeat_header', $raw)) {
                 $out['repeat_header'] = (bool) $raw['repeat_header'];
@@ -2695,6 +2918,18 @@ class TemplateXController extends AbstractController
             }
             if (isset($raw['unchecked_glyph']) && is_string($raw['unchecked_glyph']) && $raw['unchecked_glyph'] !== '') {
                 $out['unchecked_glyph'] = mb_substr((string) $raw['unchecked_glyph'], 0, 4);
+            }
+            if (array_key_exists('clickable_checkbox', $raw)) {
+                // Default behaviour is now "clickable" (real Word content
+                // controls). Persist false explicitly when the designer
+                // opted out so the renderer falls back to static glyphs.
+                $out['clickable_checkbox'] = (bool) $raw['clickable_checkbox'];
+            }
+            if (isset($raw['yes_label']) && is_string($raw['yes_label'])) {
+                $out['yes_label'] = mb_substr($raw['yes_label'], 0, 32);
+            }
+            if (isset($raw['no_label']) && is_string($raw['no_label'])) {
+                $out['no_label'] = mb_substr($raw['no_label'], 0, 32);
             }
         } elseif ($fieldType === 'image') {
             if (isset($raw['width'])) {
@@ -3372,34 +3607,69 @@ class TemplateXController extends AbstractController
             $designer = $designerMap[$cbKey] ?? [];
             $checkedGlyph = is_string($designer['checked_glyph'] ?? null) ? $designer['checked_glyph'] : '☒';
             $uncheckedGlyph = is_string($designer['unchecked_glyph'] ?? null) ? $designer['unchecked_glyph'] : '☐';
+            // Per-variable opt-out: plain `clickable_checkbox` => false leaves
+            // the historical static glyph behaviour untouched. Default is true
+            // because the customer wants real, interactive checkboxes.
+            $clickable = !array_key_exists('clickable_checkbox', $designer)
+                || $designer['clickable_checkbox'] !== false;
 
             foreach ($fields as $ph) {
                 $checked = str_ends_with($ph, '.yes') ? $yesVal : !$yesVal;
 
-                // Best-effort: for templates that use real Word checkbox content
-                // controls (<w:sdt>…<w:sdtCheckbox>), update the checkbox state via
-                // PhpWord. For plain-text placeholders (like highlighted {{checkb.*.*}}
-                // markers in table cells) setCheckbox either throws or silently
-                // no-ops — so we always follow up with a text replacement to a
-                // visible glyph as a guaranteed fallback.
+                // Best-effort: for templates that already use real Word checkbox
+                // content controls (<w:sdt>…<w:sdtCheckbox>), update the state
+                // via PhpWord directly. Plain-text placeholders fall through to
+                // the marker path below.
                 try {
                     $tp->setCheckbox($ph, $checked);
                 } catch (\Throwable) {
-                    // ignored — text replacement below is the guaranteed path
+                    // ignored — marker / text replacement below is the guaranteed path
                 }
-                $tp->setValue($ph, $checked ? $checkedGlyph : $uncheckedGlyph);
+
+                if ($clickable) {
+                    // Emit a unique marker that survives PhpWord's setValue
+                    // XML escaping. The post-pass
+                    // convertCheckboxMarkersToContentControls() then rewrites
+                    // each `<w:r>…marker…</w:r>` into a real <w:sdt> Word
+                    // content-control checkbox so the generated DOCX exposes
+                    // a clickable checkbox pre-set to the correct state.
+                    $tp->setValue($ph, $this->buildCheckboxMarker($checked, $checkedGlyph, $uncheckedGlyph));
+                } else {
+                    $tp->setValue($ph, $checked ? $checkedGlyph : $uncheckedGlyph);
+                }
             }
         }
     }
 
     /**
+     * Build the unique placeholder marker we substitute for a checkbox during
+     * the PhpWord pass. The marker carries the desired state plus both glyphs
+     * so the post-pass can use designer-customised glyphs without re-reading
+     * the variable map.
+     *
+     * Format: [[SYNCB|state|checkedGlyph|uncheckedGlyph]]
+     */
+    private function buildCheckboxMarker(bool $checked, string $checkedGlyph, string $uncheckedGlyph): string
+    {
+        return '[[SYNCB|' . ($checked ? 'on' : 'off') . '|' . $checkedGlyph . '|' . $uncheckedGlyph . ']]';
+    }
+
+    /**
      * LIST mode: array values rendered as newline-separated text with OOXML line breaks.
      */
-    private function processLists(TemplateProcessor $tp, array $listKeys, array $variables): void
+    private function processLists(TemplateProcessor $tp, array $listKeys, array $variables, array $designerMap = []): void
     {
         foreach ($listKeys as $key) {
             $val = $variables[$key] ?? null;
-            $text = is_array($val) ? implode("\n", array_map('strval', $val)) : (string) ($val ?? '');
+            $items = is_array($val) ? array_map('strval', $val) : ((string) ($val ?? '') === '' ? [] : [(string) $val]);
+            $designer = $designerMap[$key] ?? [];
+            if (!empty($designer['top_blank_line'])) {
+                array_unshift($items, '');
+            }
+            if (!empty($designer['bottom_blank_line'])) {
+                $items[] = '';
+            }
+            $text = implode("\n", $items);
             $text = htmlspecialchars($text, ENT_XML1 | ENT_QUOTES, 'UTF-8');
             $text = str_replace("\n", '</w:t><w:br/><w:t>', $text);
             $tp->setValue($key, $text);
@@ -3554,6 +3824,8 @@ class TemplateXController extends AbstractController
             $designer = $designerMap[$key] ?? [];
             $wantsOrdered = ($designer['list_style'] ?? null) === 'ol';
             $preventOrphans = !empty($designer['prevent_orphans']);
+            $topBlankLine = !empty($designer['top_blank_line']);
+            $bottomBlankLine = !empty($designer['bottom_blank_line']);
 
             // Non-greedy match of the <w:p>...</w:p> containing the placeholder.
             // The negative lookahead on </w:p> keeps us inside one paragraph.
@@ -3562,7 +3834,7 @@ class TemplateXController extends AbstractController
             $replacementCount = 0;
             $newXml = preg_replace_callback(
                 $pattern,
-                function (array $match) use ($placeholder, $items, $wantsOrdered, $preventOrphans, $orderedNumId, $bulletNumId, &$replacementCount): string {
+                function (array $match) use ($placeholder, $items, $wantsOrdered, $preventOrphans, $topBlankLine, $bottomBlankLine, $orderedNumId, $bulletNumId, &$replacementCount): string {
                     $replacementCount++;
                     $paragraph = $match[0];
 
@@ -3586,6 +3858,9 @@ class TemplateXController extends AbstractController
                     }
 
                     $out = '';
+                    if ($topBlankLine) {
+                        $out .= $this->buildBlankSpacerParagraph($paragraph);
+                    }
                     $lastIdx = count($items) - 1;
                     foreach ($items as $idx => $item) {
                         // The last item drops `keepNext` even when preventing orphans,
@@ -3595,6 +3870,9 @@ class TemplateXController extends AbstractController
                             : $paragraphForItem;
                         $escaped = $this->escapeForWordXml($item);
                         $out .= str_replace($placeholder, $escaped, $paraForThisItem);
+                    }
+                    if ($bottomBlankLine) {
+                        $out .= $this->buildBlankSpacerParagraph($paragraph);
                     }
                     return $out;
                 },
@@ -3647,6 +3925,29 @@ class TemplateXController extends AbstractController
             $paragraphXml,
             1
         ) ?? $paragraphXml;
+    }
+
+    /**
+     * Build an empty Word paragraph used as a "blank line" before/after a
+     * list. We strip out the source paragraph's bullet numPr so the spacer
+     * does not show a stray bullet, but otherwise inherit its run/paragraph
+     * properties (font, indentation, alignment) so the spacer's height
+     * matches the surrounding list visually.
+     */
+    private function buildBlankSpacerParagraph(string $sourceParagraphXml): string
+    {
+        // Best-effort: pull the original <w:pPr> if present so the spacer's
+        // line-height matches the list. Strip <w:numPr> to avoid showing a
+        // bullet. Strip <w:keepNext/> so the spacer doesn't glue to the
+        // next paragraph.
+        $pPr = '';
+        if (preg_match('#<w:pPr\b[^>]*>.*?</w:pPr>#s', $sourceParagraphXml, $m)) {
+            $pPr = $m[0];
+            $pPr = preg_replace('#<w:numPr\b.*?</w:numPr>#s', '', $pPr) ?? $pPr;
+            $pPr = preg_replace('#<w:keepNext\s*/>#', '', $pPr) ?? $pPr;
+        }
+
+        return '<w:p>' . $pPr . '</w:p>';
     }
 
     /**
@@ -4278,6 +4579,204 @@ class TemplateXController extends AbstractController
      * placeholder variants appears (or used to appear — we also peek at the
      * post-cleaned template to be safe) inside the table.
      *
+     * Post-pass: rewrite [[SYNCB|state|on|off]] placeholders left behind by
+     * processCheckboxes() into proper Word content-control checkboxes
+     * (`<w:sdt>` with `<w14:checkbox>`). The result is a generated DOCX where
+     * every Synaform-rendered checkbox is fully clickable in Word 2010+,
+     * pre-set to the resolved state, and uses the designer's chosen glyph
+     * pair for the visible state.
+     *
+     * Best-effort and non-fatal: if the DOCX cannot be opened or the regex
+     * finds nothing, the document keeps the static glyph fallback (which is
+     * visually identical, just not interactive).
+     */
+    private function convertCheckboxMarkersToContentControls(string $docxPath): void
+    {
+        if (!is_file($docxPath)) {
+            return;
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            $this->logger->warning('Failed to open DOCX for checkbox SDT post-pass', ['path' => $docxPath]);
+
+            return;
+        }
+
+        $xml = $zip->getFromName('word/document.xml');
+        if ($xml === false) {
+            $zip->close();
+
+            return;
+        }
+
+        $count = 0;
+        $hasW14 = str_contains($xml, 'xmlns:w14=');
+
+        // Match a single Word run that contains the SYNCB marker anywhere
+        // inside its <w:t>…</w:t> (text may have arbitrary surrounding
+        // characters because PhpWord's setValue replaces only the
+        // {{placeholder}} substring inside whatever text node hosted it).
+        // We capture:
+        //   1 = the rPr block (preserved on the surviving runs so the
+        //       generated DOCX keeps the template's font/size/color),
+        //   2 = the literal <w:t …> opening tag (with its xml:space attr
+        //       intact),
+        //   3 = text before the marker,
+        //   4 = state ("on"/"off"),
+        //   5 = checked glyph,
+        //   6 = unchecked glyph,
+        //   7 = text after the marker.
+        // The body uses [^<]* to stay inside a single text node (no nested
+        // elements), which is exactly what PhpWord setValue produces.
+        $pattern = '#<w:r\b[^>]*>(<w:rPr\b[^/]*?>.*?</w:rPr>|<w:rPr\b[^/]*?/>)?(<w:t\b[^>]*>)([^<]*?)\[\[SYNCB\|(on|off)\|([^|]+)\|([^\]]+)\]\]([^<]*?)</w:t></w:r>#s';
+
+        // Iterate so that runs containing multiple SYNCB markers all get
+        // converted. Each pass splits one marker out into its own SDT plus
+        // up to two surrounding text-only runs; subsequent passes find
+        // any remaining markers in the freshly created text-only runs.
+        // Cap the loop to a sane number of iterations as a safety net
+        // against pathological inputs.
+        $newXml = $xml;
+        for ($i = 0; $i < 64; ++$i) {
+            $passCount = 0;
+            $newXml = preg_replace_callback(
+                $pattern,
+                function (array $match) use (&$count, &$passCount): string {
+                    ++$count;
+                    ++$passCount;
+                    $rPr = $match[1] ?? '';
+                    $tOpen = $match[2];
+                    $before = $match[3];
+                    $state = $match[4];
+                    $checkedGlyph = $match[5];
+                    $uncheckedGlyph = $match[6];
+                    $after = $match[7];
+
+                    // Force xml:space="preserve" on surviving text fragments
+                    // so leading/trailing whitespace around the original
+                    // placeholder is not collapsed by Word's XML parser.
+                    $tOpenPreserved = $this->ensureXmlSpacePreserve($tOpen);
+
+                    $out = '';
+                    if ($before !== '') {
+                        $out .= '<w:r>' . $rPr . $tOpenPreserved . $before . '</w:t></w:r>';
+                    }
+                    $out .= $this->buildCheckboxSdtXml($state === 'on', $checkedGlyph, $uncheckedGlyph);
+                    if ($after !== '') {
+                        $out .= '<w:r>' . $rPr . $tOpenPreserved . $after . '</w:t></w:r>';
+                    }
+
+                    return $out;
+                },
+                $newXml
+            );
+
+            if ($newXml === null) {
+                $zip->close();
+
+                return;
+            }
+            if ($passCount === 0) {
+                break;
+            }
+        }
+
+        if ($count === 0) {
+            $zip->close();
+
+            return;
+        }
+
+        // Word's content-control checkbox lives in the w14 namespace. Older
+        // templates (Word 2007) may not declare it — inject it on the root
+        // <w:document> element so Word/LibreOffice render the SDT correctly.
+        if (!$hasW14) {
+            $newXml = preg_replace(
+                '#<w:document\b([^>]*?)>#',
+                '<w:document$1 xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">',
+                $newXml,
+                1
+            ) ?? $newXml;
+        }
+
+        $zip->addFromString('word/document.xml', $newXml);
+        $zip->close();
+    }
+
+    /**
+     * Build a Word content-control checkbox (`<w:sdt>` with `<w14:checkbox>`)
+     * pre-set to $checked. The visible state shows $checkedGlyph or
+     * $uncheckedGlyph depending on $checked. Uses MS Gothic for the symbol
+     * because that's the font Word's UI inserts for checkbox content
+     * controls and it ships on every Office install.
+     */
+    private function buildCheckboxSdtXml(bool $checked, string $checkedGlyph, string $uncheckedGlyph): string
+    {
+        $checkedFlag = $checked ? '1' : '0';
+        $glyph = $checked ? $checkedGlyph : $uncheckedGlyph;
+        $checkedHex = $this->glyphToHex($checkedGlyph, '2612');
+        $uncheckedHex = $this->glyphToHex($uncheckedGlyph, '2610');
+        // Random per-control id so multiple checkboxes do not collide.
+        $id = random_int(1, 2_147_483_647);
+        $glyphXml = htmlspecialchars($glyph, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+
+        return '<w:sdt>'
+            . '<w:sdtPr>'
+            .   '<w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic" w:cs="MS Gothic" w:hint="eastAsia"/></w:rPr>'
+            .   '<w:id w:val="' . $id . '"/>'
+            .   '<w14:checkbox>'
+            .     '<w14:checked w14:val="' . $checkedFlag . '"/>'
+            .     '<w14:checkedState w14:val="' . $checkedHex . '" w14:font="MS Gothic"/>'
+            .     '<w14:uncheckedState w14:val="' . $uncheckedHex . '" w14:font="MS Gothic"/>'
+            .   '</w14:checkbox>'
+            . '</w:sdtPr>'
+            . '<w:sdtContent>'
+            .   '<w:r><w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic" w:cs="MS Gothic" w:hint="eastAsia"/></w:rPr><w:t xml:space="preserve">' . $glyphXml . '</w:t></w:r>'
+            . '</w:sdtContent>'
+            . '</w:sdt>';
+    }
+
+    /**
+     * Ensure a `<w:t …>` opening tag carries `xml:space="preserve"` so the
+     * surrounding whitespace from the original template text is honoured
+     * after we split a run around a SYNCB marker. PhpWord uses this
+     * attribute pattern itself, so we just inject it when missing.
+     */
+    private function ensureXmlSpacePreserve(string $wtOpen): string
+    {
+        if (str_contains($wtOpen, 'xml:space=')) {
+            return $wtOpen;
+        }
+
+        return preg_replace('#<w:t\b#', '<w:t xml:space="preserve"', $wtOpen, 1) ?? $wtOpen;
+    }
+
+    /**
+     * Convert a single character to its 4-digit upper-hex Unicode codepoint
+     * for the `w14:val` attribute on checkbox state declarations. Falls back
+     * to $default when the input is empty or the codepoint cannot be derived
+     * (e.g. the designer used a multi-character emoji).
+     */
+    private function glyphToHex(string $glyph, string $default): string
+    {
+        if ($glyph === '') {
+            return $default;
+        }
+        $arr = function_exists('mb_str_split') ? mb_str_split($glyph, 1, 'UTF-8') : preg_split('//u', $glyph, -1, PREG_SPLIT_NO_EMPTY);
+        $first = is_array($arr) && $arr !== [] ? $arr[0] : '';
+        if ($first === '') {
+            return $default;
+        }
+        $cp = mb_ord($first, 'UTF-8');
+        if (!is_int($cp) || $cp <= 0) {
+            return $default;
+        }
+
+        return strtoupper(str_pad(dechex($cp), 4, '0', STR_PAD_LEFT));
+    }
+
+    /**
      * @param array<string, mixed>                $arrays       group => rows[]
      * @param array<string, array<string, mixed>> $designerMap  varKey => designer
      */

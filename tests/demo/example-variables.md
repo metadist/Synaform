@@ -1,6 +1,6 @@
 # Example Variables — Fashion HR Candidate Profile
 
-This is a freshly transcribed, TemplateX-friendly version of the original
+This is a freshly transcribed, Synaform-friendly version of the original
 HR "variable-list" document used as the source of truth for a German-language
 fashion-industry candidate-profile workflow.
 

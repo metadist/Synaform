@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 /**
  * Phase C regression test — proves that a target template with real
- * Word tables (<w:tbl>) gets filled correctly by TemplateX:
+ * Word tables (<w:tbl>) gets filled correctly by Synaform:
  *
  *   1. A header+template-row table with N-suffix placeholders like
  *      {{stations.time.N}} is multiplied by PhpWord's cloneRow() into
@@ -15,14 +15,14 @@ declare(strict_types=1);
  *      <w:tc>) is filled directly by setValue() — no row multiplication
  *      needed, but the cells must end up with the expected text.
  *
- * This is the exact algorithm used by TemplateXController::processRowGroups()
- * (see templatex-plugin/backend/Controller/TemplateXController.php, the
+ * This is the exact algorithm used by SynaformController::processRowGroups()
+ * (see synaform-plugin/backend/Controller/SynaformController.php, the
  * `cloneRow($anchorField, $count)` path). We drive PhpWord directly here
  * so the test has no Symfony / HTTP / DB dependencies.
  *
  * Runs inside the Synaplan backend container (uses its bundled PhpWord):
  *
- *   docker compose exec backend php /plugins/templatex/tests/phase-c-tables.php
+ *   docker compose exec backend php /plugins/synaform/tests/phase-c-tables.php
  *
  * or, from the repo, via the Makefile target (see below).
  *
@@ -78,8 +78,8 @@ $scalars = [
 //    does in processRowGroups() and fillScalars().
 // -------------------------------------------------------------------
 $tp = new TemplateProcessor($out);
-// TemplateX uses {{…}} placeholder syntax, not PhpWord's default ${…}.
-// See templatex-plugin/backend/Controller/TemplateXController.php where
+// Synaform uses {{…}} placeholder syntax, not PhpWord's default ${…}.
+// See synaform-plugin/backend/Controller/SynaformController.php where
 // the same two calls follow `new TemplateProcessor(...)`.
 $tp->setMacroOpeningChars('{{');
 $tp->setMacroClosingChars('}}');

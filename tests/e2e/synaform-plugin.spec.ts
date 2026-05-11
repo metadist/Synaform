@@ -1,5 +1,5 @@
 /**
- * E2E Tests for the TemplateX Plugin
+ * E2E Tests for the Synaform Plugin
  *
  * Tests the full plugin lifecycle:
  *   1. Plugin activation and setup
@@ -14,12 +14,12 @@
  *
  * Prerequisites:
  *   - Synaplan running with frontend on localhost:5173, backend on localhost:8000
- *   - TemplateX plugin installed for admin user
+ *   - Synaform plugin installed for admin user
  *   - At least one AI provider configured (Anthropic, OpenAI, or Ollama)
  *   - Tika running for PDF text extraction
  *
  * Run with:
- *   npx playwright test tests/e2e/templatex-plugin.spec.ts
+ *   npx playwright test tests/e2e/synaform-plugin.spec.ts
  */
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import path from 'path'
@@ -54,7 +54,7 @@ async function api(
   path: string,
   data?: unknown,
 ) {
-  const url = `${API_URL}/api/v1/user/1/plugins/templatex${path}`
+  const url = `${API_URL}/api/v1/user/1/plugins/synaform${path}`
   const opts: Record<string, unknown> = { headers: { Cookie: cookie } }
   if (data !== undefined) opts.data = data
 
@@ -82,7 +82,7 @@ async function loginUI(page: Page) {
 // API-level tests
 // ---------------------------------------------------------------------------
 
-test.describe('TemplateX API Tests', () => {
+test.describe('Synaform API Tests', () => {
   let cookie: string
 
   test.beforeAll(async ({ request }) => {
@@ -126,7 +126,7 @@ test.describe('TemplateX API Tests', () => {
   test('upload template and detect placeholders', async ({ request }) => {
     const templatePath = path.join(FIXTURES_DIR, 'test_template.docx')
     const res = await request.post(
-      `${API_URL}/api/v1/user/1/plugins/templatex/templates`,
+      `${API_URL}/api/v1/user/1/plugins/synaform/templates`,
       {
         headers: { Cookie: cookie },
         multipart: {
@@ -205,7 +205,7 @@ test.describe('TemplateX API Tests', () => {
     // Upload CV
     const cvPath = path.join(FIXTURES_DIR, 'cv_mueller_fashion.pdf')
     const uploadRes = await request.post(
-      `${API_URL}/api/v1/user/1/plugins/templatex/candidates/${candidateId}/upload-cv`,
+      `${API_URL}/api/v1/user/1/plugins/synaform/candidates/${candidateId}/upload-cv`,
       {
         headers: { Cookie: cookie },
         multipart: {
@@ -305,7 +305,7 @@ test.describe('TemplateX API Tests', () => {
 
     const cvPath = path.join(FIXTURES_DIR, 'cv_schmidt_retail.pdf')
     await request.post(
-      `${API_URL}/api/v1/user/1/plugins/templatex/candidates/${candidateId}/upload-cv`,
+      `${API_URL}/api/v1/user/1/plugins/synaform/candidates/${candidateId}/upload-cv`,
       {
         headers: { Cookie: cookie },
         multipart: {
@@ -336,7 +336,7 @@ test.describe('TemplateX API Tests', () => {
 
     const cvPath = path.join(FIXTURES_DIR, 'cv_weber_design.pdf')
     await request.post(
-      `${API_URL}/api/v1/user/1/plugins/templatex/candidates/${candidateId}/upload-cv`,
+      `${API_URL}/api/v1/user/1/plugins/synaform/candidates/${candidateId}/upload-cv`,
       {
         headers: { Cookie: cookie },
         multipart: {
@@ -359,14 +359,14 @@ test.describe('TemplateX API Tests', () => {
 // UI-level tests
 // ---------------------------------------------------------------------------
 
-test.describe('TemplateX UI Tests', () => {
+test.describe('Synaform UI Tests', () => {
   test.beforeEach(async ({ page }) => {
     await loginUI(page)
   })
 
   test('plugin page loads with collections-first nav', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
 
     const navBar = page.locator('nav').first()
     await expect(navBar.locator('button[data-nav="collections"]')).toBeVisible()
@@ -374,16 +374,16 @@ test.describe('TemplateX UI Tests', () => {
   })
 
   test('collections list shows the default collection card', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
     await expect(page.locator('[data-open-collection]').first()).toBeVisible()
   })
 
   test('opening a collection reveals all tabs', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
     await page.locator('[data-open-collection]').first().click()
@@ -395,8 +395,8 @@ test.describe('TemplateX UI Tests', () => {
   })
 
   test('datasets tab inside a collection is reachable', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
     await page.locator('[data-open-collection]').first().click()
@@ -415,8 +415,8 @@ test.describe('TemplateX UI Tests', () => {
   })
 
   test('variables tab shows the default collection fields', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
     await page.locator('[data-open-collection]').first().click()
@@ -429,8 +429,8 @@ test.describe('TemplateX UI Tests', () => {
   })
 
   test('settings tab allows configuration', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex#tx-settings`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform#tx-settings`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
     await page.click('[data-nav="settings"]')
@@ -444,8 +444,8 @@ test.describe('TemplateX UI Tests', () => {
   })
 
   test('dataset detail exposes extraction and generation sections', async ({ page }) => {
-    await page.goto(`${BASE_URL}/plugins/templatex`)
-    await page.waitForSelector('text=TemplateX', { timeout: 15_000 })
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
     await page.locator('[data-open-collection]').first().click()
