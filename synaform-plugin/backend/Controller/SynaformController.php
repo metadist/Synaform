@@ -294,6 +294,12 @@ class SynaformController extends AbstractController
             $preview = null;
         }
 
+        // Optional language metadata for the target template. The AI extraction
+        // step uses this so values returned for placeholders are written in the
+        // template's intended language (e.g. an English template still gets
+        // English values even when extracting from a German CV).
+        $language = $this->normalizeLanguage($request->request->get('language'));
+
         $templateData = [
             'id' => $templateId,
             'name' => $name,
@@ -301,6 +307,7 @@ class SynaformController extends AbstractController
             'placeholders' => $placeholders,
             'placeholder_count' => count($placeholders),
             'preview' => $preview,
+            'language' => $language,
             'created_at' => date('c'),
             'updated_at' => date('c'),
         ];
@@ -336,6 +343,44 @@ class SynaformController extends AbstractController
             'success' => true,
             'template' => $template,
         ]);
+    }
+
+    #[Route('/templates/{templateId}', name: 'templates_update', methods: ['PATCH'])]
+    #[OA\Patch(
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}',
+        summary: 'Update template metadata (currently: name, language)',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Template updated')]
+    public function templatesUpdate(int $userId, string $templateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $template = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId);
+        if (!$template) {
+            return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $data = json_decode($request->getContent(), true) ?? [];
+
+        if (array_key_exists('name', $data)) {
+            $name = trim((string) ($data['name'] ?? ''));
+            if ($name !== '') {
+                $template['name'] = $name;
+            }
+        }
+
+        if (array_key_exists('language', $data)) {
+            $template['language'] = $this->normalizeLanguage($data['language']);
+        }
+
+        $template['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId, $template);
+
+        return $this->json(['success' => true, 'template' => $template]);
     }
 
     #[Route('/templates/{templateId}', name: 'templates_delete', methods: ['DELETE'])]
@@ -1267,8 +1312,9 @@ class SynaformController extends AbstractController
 
             $form = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, $entry['form_id'] ?? 'default');
             $formFields = $form['fields'] ?? [];
+            $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
 
-            $prompt = $this->buildExtractionPrompt($rawText, $formFields);
+            $prompt = $this->buildExtractionPrompt($rawText, $formFields, $extractionLanguage);
             $messages = [
                 ['role' => 'system', 'content' => 'You are a precise CV data extraction assistant. Return only valid JSON.'],
                 ['role' => 'user', 'content' => $prompt],
@@ -1414,9 +1460,19 @@ class SynaformController extends AbstractController
 
         $fieldsBlock = implode("\n", array_map(fn ($d) => '- ' . $d, $fieldDescriptions));
 
+        $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
+        $extractionLanguageName = $this->languageName($extractionLanguage);
+
         $prompt = <<<PROMPT
         You are an assistant that extracts form field values from documents.
         Below are the form fields that need to be filled, followed by the document text.
+
+        IMPORTANT - Output language: All free-text string values you return MUST be
+        written in {$extractionLanguageName}. If the source documents are in another
+        language, translate descriptive text (job titles, summaries, list items,
+        achievements, education descriptions, etc.) into {$extractionLanguageName}.
+        Proper nouns (people, company names, cities), email addresses, phone numbers,
+        URLs, and dates stay verbatim.
 
         For each field, extract the most appropriate value from the documents. Rules:
         - For "select" fields, ONLY return one of the allowed values listed in brackets, or null if not found.
@@ -2369,8 +2425,9 @@ class SynaformController extends AbstractController
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, 'default', $defaultForm);
     }
 
-    private function buildExtractionPrompt(string $rawText, array $formFields = []): string
+    private function buildExtractionPrompt(string $rawText, array $formFields = [], string $language = 'de'): string
     {
+        $languageName = $this->languageName($language);
         $fieldLines = [];
 
         $defaultScalars = [
@@ -2429,6 +2486,12 @@ class SynaformController extends AbstractController
         return <<<PROMPT
             You are extracting structured data from a CV/resume document. Return a JSON object with these fields. Use null for any field not found in the document. Do NOT invent or guess data.
 
+            IMPORTANT - Output language: All free-text values (job titles, descriptions,
+            list items, education entries, etc.) MUST be written in {$languageName}.
+            If the source document is in another language, translate descriptive text
+            into {$languageName}. Proper nouns (people, company names, cities), email
+            addresses, phone numbers, URLs and dates stay verbatim.
+
             Fields to extract:
             {$fieldsBlock}
 
@@ -2463,6 +2526,87 @@ class SynaformController extends AbstractController
         }
 
         return null;
+    }
+
+    /**
+     * Normalises a language value coming from the API (UI dropdown, REST
+     * payload, etc.) into a canonical 2-letter ISO code we use across the
+     * plugin. Falls back to '' (= "inherit from form") for unknown values.
+     */
+    private function normalizeLanguage(mixed $raw): string
+    {
+        if (!is_string($raw)) {
+            return '';
+        }
+        $code = strtolower(trim($raw));
+        if ($code === '') {
+            return '';
+        }
+        // Accept BCP-47 style "de-DE" by taking the primary subtag.
+        if (str_contains($code, '-')) {
+            $code = explode('-', $code, 2)[0];
+        }
+        $supported = ['de', 'en', 'es', 'fr', 'it', 'tr', 'pt', 'nl', 'pl'];
+
+        return in_array($code, $supported, true) ? $code : '';
+    }
+
+    /**
+     * Maps an ISO language code to a human readable language name we feed
+     * to the LLM. We always pass an English name regardless of UI locale
+     * because LLM providers respond more reliably to English instructions.
+     */
+    private function languageName(string $code): string
+    {
+        return match ($code) {
+            'de' => 'German',
+            'en' => 'English',
+            'es' => 'Spanish',
+            'fr' => 'French',
+            'it' => 'Italian',
+            'tr' => 'Turkish',
+            'pt' => 'Portuguese',
+            'nl' => 'Dutch',
+            'pl' => 'Polish',
+            default => 'German',
+        };
+    }
+
+    /**
+     * Decides which language the AI should write its extracted values in.
+     * Priority:
+     *   1. If the form's attached target templates declare a language and
+     *      they all agree, use that. (User picked DOCX templates in a
+     *      specific language; values must match.)
+     *   2. Otherwise fall back to the form/collection language.
+     *   3. Final fallback: 'de' (historical default).
+     */
+    private function resolveExtractionLanguage(int $userId, ?array $form): string
+    {
+        $templateIds = $form['template_ids'] ?? [];
+        $templateLanguages = [];
+        if (is_array($templateIds)) {
+            foreach ($templateIds as $tplId) {
+                if (!is_string($tplId) || $tplId === '') {
+                    continue;
+                }
+                $tpl = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $tplId);
+                $lang = $this->normalizeLanguage($tpl['language'] ?? null);
+                if ($lang !== '') {
+                    $templateLanguages[$lang] = true;
+                }
+            }
+        }
+        if (count($templateLanguages) === 1) {
+            return array_key_first($templateLanguages);
+        }
+
+        $formLang = $this->normalizeLanguage($form['language'] ?? null);
+        if ($formLang !== '') {
+            return $formLang;
+        }
+
+        return 'de';
     }
 
     private function buildImportParsePrompt(string $text): string

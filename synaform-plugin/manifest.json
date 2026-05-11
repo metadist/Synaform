@@ -37,6 +37,7 @@
     {"path": "/templates", "method": "GET", "description": "List DOCX templates"},
     {"path": "/templates", "method": "POST", "description": "Upload DOCX template"},
     {"path": "/templates/{templateId}", "method": "GET", "description": "Get template with placeholders"},
+    {"path": "/templates/{templateId}", "method": "PATCH", "description": "Update template metadata (name, language)"},
     {"path": "/templates/{templateId}", "method": "DELETE", "description": "Delete template"},
     {"path": "/templates/{templateId}/placeholders", "method": "GET", "description": "List detected placeholders"},
     {"path": "/templates/{templateId}/variable-suggestions", "method": "GET", "description": "Turn placeholders into ready-to-apply form fields (deterministic)"},
