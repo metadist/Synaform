@@ -378,6 +378,7 @@
     "ai_chat_role": "F\u00fchrt die Prompts hinter \u201eDateien lesen & Felder f\u00fcllen\u201c aus. Ein Aufruf pro Datensatz.",
     "ai_vision_label": "Bilderkennungs-KI",
     "ai_vision_role": "Liest Text aus JPG/PNG-Scans (und PDF-Fallback). Ein Aufruf pro Bild.",
+    "vision_mismatch": "Hinweis: synaplan-core ignoriert diese Auswahl und schickt Bildanfragen stattdessen an {provider}. Setze BCONFIG.ai.default_vision_provider, um das zu überschreiben.",
     "provider_default": "Provider-Standard",
     "cost_hint": "Hinweis: Bild-Scans sind der dominierende Kostenfaktor \u2014 jedes JPG/PNG l\u00f6st einen Vision-KI-Roundtrip aus (typisch 5\u201360 s). Office-Dokumente (PDF/DOCX/\u2026) werden zuerst lokal per Tika gelesen und gehen nur als Fallback an die Vision-KI, wenn Tika leeren oder schlechten Text liefert."
   },

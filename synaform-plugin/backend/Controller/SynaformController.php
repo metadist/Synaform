@@ -194,15 +194,31 @@ class SynaformController extends AbstractController
             'error' => $tikaProbe['error'],
         ];
 
-        // AI configuration: ask ModelConfigService for the user's defaults
-        // for the two capabilities Synaform actually uses.
-        //   - chat = information processing (parse-documents + extract LLM call)
-        //   - vision = image processing (Vision-AI fallback for raw scans)
-        $aiCfg = $this->modelConfigService->getUserAiConfig($userId);
-        $chatProvider = $aiCfg['chat']['provider'] ?? null;
-        $chatModelId = $aiCfg['chat']['model'] ?? null;
-        $visionProvider = $aiCfg['vision']['provider'] ?? null;
-        $visionModelId = $aiCfg['vision']['model'] ?? null;
+        // AI configuration. The chat capability is straightforward; the
+        // vision capability has a real-vs-effective split because of how
+        // synaplan-core resolves it:
+        //   - The settings UI writes the user's pick to
+        //     BCONFIG.DEFAULTMODEL.PIC2TEXT (a model id).
+        //   - But App\AI\Service\AiFacade::analyzeImage() asks
+        //     ModelConfigService::getDefaultProvider($userId, 'vision'),
+        //     which only consults BCONFIG.ai.default_vision_provider — a
+        //     row that very rarely exists. When it doesn't, the lookup
+        //     falls through to findFallbackProvider('vision'), which
+        //     returns the first available pic2text provider in DB
+        //     order. That is usually NOT the model the user just picked.
+        // Surface both so the dashboard truth-tells: "you picked X, the
+        // pipeline will actually use Y until that gets fixed".
+        $chatModelId = $this->modelConfigService->getDefaultModel('CHAT', $userId);
+        $chatProvider = $chatModelId ? $this->modelConfigService->getProviderForModel((int) $chatModelId) : null;
+
+        $picTextModelId = $this->modelConfigService->getDefaultModel('PIC2TEXT', $userId);
+        $picTextProvider = $picTextModelId ? $this->modelConfigService->getProviderForModel((int) $picTextModelId) : null;
+        $picTextModelName = $picTextModelId ? $this->modelConfigService->getModelName((int) $picTextModelId) : null;
+
+        $effectiveVisionProvider = $this->modelConfigService->getDefaultProvider($userId, 'vision');
+        $visionMismatch = $picTextProvider !== null
+            && $effectiveVisionProvider !== null
+            && strcasecmp((string) $picTextProvider, (string) $effectiveVisionProvider) !== 0;
 
         $ai = [
             'chat' => [
@@ -213,9 +229,17 @@ class SynaformController extends AbstractController
                 'description' => 'Runs the AI prompts behind "Read files & auto-fill" and the variable-resolution extraction step. Called once per dataset, after all source documents have been turned into text.',
             ],
             'vision' => [
-                'provider' => $visionProvider,
-                'model_id' => $visionModelId,
-                'model_name' => $visionModelId ? $this->modelConfigService->getModelName((int) $visionModelId) : null,
+                // The model the user actually picked in the synaplan UI
+                // ("Bilderkennung (Bild → Text)" → BCONFIG.DEFAULTMODEL.PIC2TEXT).
+                'provider' => $picTextProvider,
+                'model_id' => $picTextModelId,
+                'model_name' => $picTextModelName,
+                // The provider AiFacade::analyzeImage() will actually call
+                // for this user. Different from `provider` above when the
+                // synaplan-core fallback chain ignores PIC2TEXT and walks
+                // its own pic2text tag list in DB order.
+                'effective_provider' => $effectiveVisionProvider,
+                'mismatch' => $visionMismatch,
                 'role' => 'image_processing',
                 'description' => 'Reads text out of uploaded JPG/PNG scans and out of low-quality PDF pages (fallback). Called once per image; this is the dominant cost when the dataset sources are scans.',
             ],
