@@ -365,6 +365,22 @@
     "back_to_html": "Canl\u0131 \u00f6nizlemeye d\u00f6n",
     "pdf_unavailable": "Ger\u00e7ek PDF \u00f6nizlemesi i\u00e7in backend'de libreoffice gereklidir. HTML canl\u0131 \u00f6nizlemesi yine \u00e7al\u0131\u015f\u0131r; libreoffice (veya gotenberg sidecar) kurarsan PDF yolu etkinle\u015fir."
   },
+  "dashboard": {
+    "title": "Sistem durumu",
+    "refresh": "Yenile",
+    "loading": "Servisler kontrol ediliyor\u2026",
+    "empty": "Hen\u00fcz durum verisi yok.",
+    "tika_label": "Apache Tika",
+    "tika_role": "Yerel belge metin \u00e7\u0131kar\u0131c\u0131 (PDF, DOCX, XLSX, PPTX\u2026).",
+    "tika_ok": "eri\u015filebilir",
+    "tika_down": "eri\u015filemiyor",
+    "ai_chat_label": "Bilgi i\u015fleme YZ",
+    "ai_chat_role": "\u201cDosyalar\u0131 oku & alanlar\u0131 doldur\u201d arkas\u0131ndaki promptlar\u0131 \u00e7al\u0131\u015ft\u0131r\u0131r. Veri k\u00fcmesi ba\u015f\u0131na bir \u00e7a\u011fr\u0131.",
+    "ai_vision_label": "G\u00f6r\u00fcnt\u00fc i\u015fleme YZ",
+    "ai_vision_role": "JPG/PNG taramalar\u0131ndan (ve PDF yede\u011finden) metin okur. G\u00f6rsel ba\u015f\u0131na bir \u00e7a\u011fr\u0131.",
+    "provider_default": "sa\u011flay\u0131c\u0131 varsay\u0131lan\u0131",
+    "cost_hint": "\u0130pucu: g\u00f6r\u00fcnt\u00fc taramalar\u0131 bask\u0131n maliyettir \u2014 her JPG/PNG bir Vision-YZ gidi\u015f-d\u00f6n\u00fc\u015f\u00fc tetikler (genelde 5\u201360 sn). Office belgeleri \u00f6nce yerel Tika ile okunur ve yaln\u0131zca Tika bo\u015f/d\u00fc\u015f\u00fck kaliteli metin d\u00f6nd\u00fcrd\u00fc\u011f\u00fcnde Vision-YZ'ye ge\u00e7er."
+  },
   "export": {
     "title": "Veri k\u00fcmelerini d\u0131\u015fa aktar",
     "subtitle": "Bu Collection\u2019daki t\u00fcm veri k\u00fcmelerini d\u00fcz CSV olarak indirin \u2014 her veri k\u00fcmesi bir sat\u0131r, her de\u011fi\u015fken bir s\u00fctun.",

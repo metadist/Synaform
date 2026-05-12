@@ -13,6 +13,7 @@
   "routes": [
     {"path": "/setup-check", "method": "GET", "description": "Check plugin setup status"},
     {"path": "/setup", "method": "POST", "description": "Initialize plugin with defaults"},
+    {"path": "/dashboard", "method": "GET", "description": "Plugin dashboard: Tika + AI status, plugin counts"},
     {"path": "/config", "method": "GET", "description": "Get plugin configuration"},
     {"path": "/config", "method": "PUT", "description": "Update plugin configuration"},
     {"path": "/forms", "method": "GET", "description": "List form definitions"},

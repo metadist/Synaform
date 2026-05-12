@@ -365,6 +365,22 @@
     "back_to_html": "Zur\u00fcck zur Live-Vorschau",
     "pdf_unavailable": "Die echte PDF-Vorschau ben\u00f6tigt libreoffice im Backend. Die HTML-Live-Vorschau oben funktioniert weiterhin. Installieren Sie libreoffice (oder einen Gotenberg-Sidecar), um die PDF-Ansicht zu aktivieren."
   },
+  "dashboard": {
+    "title": "Systemstatus",
+    "refresh": "Aktualisieren",
+    "loading": "Dienste werden gepr\u00fcft\u2026",
+    "empty": "Noch keine Statusdaten.",
+    "tika_label": "Apache Tika",
+    "tika_role": "Lokale Textextraktion f\u00fcr Dokumente (PDF, DOCX, XLSX, PPTX\u2026).",
+    "tika_ok": "erreichbar",
+    "tika_down": "nicht erreichbar",
+    "ai_chat_label": "Informations-KI",
+    "ai_chat_role": "F\u00fchrt die Prompts hinter \u201eDateien lesen & Felder f\u00fcllen\u201c aus. Ein Aufruf pro Datensatz.",
+    "ai_vision_label": "Bilderkennungs-KI",
+    "ai_vision_role": "Liest Text aus JPG/PNG-Scans (und PDF-Fallback). Ein Aufruf pro Bild.",
+    "provider_default": "Provider-Standard",
+    "cost_hint": "Hinweis: Bild-Scans sind der dominierende Kostenfaktor \u2014 jedes JPG/PNG l\u00f6st einen Vision-KI-Roundtrip aus (typisch 5\u201360 s). Office-Dokumente (PDF/DOCX/\u2026) werden zuerst lokal per Tika gelesen und gehen nur als Fallback an die Vision-KI, wenn Tika leeren oder schlechten Text liefert."
+  },
   "export": {
     "title": "Datens\u00e4tze exportieren",
     "subtitle": "Laden Sie alle Datens\u00e4tze dieser Collection als flache CSV herunter \u2013 eine Zeile pro Datensatz, eine Spalte pro Variable.",

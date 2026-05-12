@@ -365,6 +365,22 @@
     "back_to_html": "Back to live preview",
     "pdf_unavailable": "True-preview PDF requires libreoffice on the backend host. The HTML live preview above still works; add libreoffice (or a gotenberg sidecar) to enable the PDF path."
   },
+  "dashboard": {
+    "title": "System status",
+    "refresh": "Refresh",
+    "loading": "Probing services\u2026",
+    "empty": "No status data yet.",
+    "tika_label": "Apache Tika",
+    "tika_role": "Local document text extractor (PDF, DOCX, XLSX, PPTX\u2026).",
+    "tika_ok": "reachable",
+    "tika_down": "unreachable",
+    "ai_chat_label": "Information processing AI",
+    "ai_chat_role": "Runs the prompts behind \u201cRead files & auto-fill\u201d. One call per dataset.",
+    "ai_vision_label": "Image processing AI",
+    "ai_vision_role": "Reads text out of JPG/PNG scans (and PDF fallback). One call per image.",
+    "provider_default": "provider default",
+    "cost_hint": "Tip: image scans are the dominant cost \u2014 each JPG/PNG triggers one Vision-AI roundtrip (typically 5\u201360 s). Document files (PDF/DOCX/\u2026) go through local Tika first and only fall back to Vision-AI when Tika returns empty/low-quality text."
+  },
   "export": {
     "title": "Export Datasets",
     "subtitle": "Download all datasets in this Collection as a flat CSV \u2014 one row per dataset, one column per variable.",
