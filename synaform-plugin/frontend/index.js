@@ -110,6 +110,13 @@ export default {
       // suppresses the overdue banner for the current session even if datasets
       // remain past their expiry date. The user explicitly clicked Cancel.
       retentionBannerDismissed: false,
+
+      // Plugin dashboard payload (Tika + AI status). Lazy-loaded the
+      // first time the user opens the overview tab.
+      dashboard: null,
+      dashboardLoading: false,
+      dashboardError: null,
+      dashboardLoadedAt: 0,
     };
 
     // =========================================================================
@@ -1355,6 +1362,7 @@ export default {
       return `<div class="space-y-4">
         ${stats}
         ${callout}
+        ${renderSystemStatusCard()}
         <div class="tx-card p-5">
           <h3 class="text-sm font-semibold mb-3">${T("collection.overview_steps_title")}</h3>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${stepsMarkup}</div>
@@ -1367,6 +1375,115 @@ export default {
           <div class="space-y-1.5">${recentRows}</div>
         </div>
       </div>`;
+    }
+
+    // ---------------------------------------------------------------------
+    // Plugin dashboard — Tika status + AI provider/model overview
+    // ---------------------------------------------------------------------
+
+    function renderSystemStatusCard() {
+      const d = state.dashboard;
+      const loading = state.dashboardLoading;
+      const err = state.dashboardError;
+
+      const header = `<div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-semibold flex items-center gap-2">${ICONS.gear} ${T("dashboard.title")}</h3>
+        <button data-action="dashboard-refresh" class="tx-btn tx-btn-sm tx-btn-ghost" ${loading ? "disabled" : ""} title="${T("dashboard.refresh")}">
+          ${loading ? `<span class="animate-spin inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full"></span>` : ICONS.refresh}
+          <span class="text-xs">${T("dashboard.refresh")}</span>
+        </button>
+      </div>`;
+
+      let body = "";
+      if (loading && !d) {
+        body = `<div class="flex items-center gap-2 text-sm tx-secondary py-4">
+          <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
+          ${T("dashboard.loading")}
+        </div>`;
+      } else if (err && !d) {
+        body = `<p class="text-sm" style="color:var(--status-error)">${ICONS.warning} ${escHtml(err)}</p>`;
+      } else if (d) {
+        body = renderSystemStatusBody(d);
+      } else {
+        body = `<p class="text-sm tx-secondary">${T("dashboard.empty")}</p>`;
+      }
+
+      return `<div class="tx-card p-5">${header}${body}</div>`;
+    }
+
+    function renderSystemStatusBody(d) {
+      const tika = d.tika || {};
+      const ai = d.ai || {};
+      const tikaOk = !!tika.reachable;
+      const tikaColor = tikaOk
+        ? "var(--status-success)"
+        : "var(--status-error)";
+      const tikaIcon = tikaOk ? ICONS.check : ICONS.warning;
+      const tikaText = tikaOk
+        ? `${T("dashboard.tika_ok")} · ${escHtml(tika.version || "—")} · ${tika.roundtrip_ms || 0} ms`
+        : `${T("dashboard.tika_down")} (HTTP ${tika.http_code || 0}${tika.error ? ` — ${escHtml(tika.error)}` : ""})`;
+
+      const aiRow = (label, slot, role) => {
+        const provider = slot.provider || "—";
+        const model =
+          slot.model_name ||
+          (slot.model_id
+            ? "id " + slot.model_id
+            : T("dashboard.provider_default"));
+        const colorBg = slot.provider
+          ? "background:var(--brand-alpha-light);color:var(--brand)"
+          : "background:var(--bg-chip);color:var(--txt-secondary)";
+        return `<div class="flex items-start justify-between gap-3 py-2.5">
+          <div class="min-w-0 flex-1">
+            <div class="text-xs uppercase tracking-wider tx-secondary font-semibold">${escHtml(label)}</div>
+            <div class="text-xs tx-secondary mt-0.5">${escHtml(role)}</div>
+          </div>
+          <div class="text-right">
+            <span class="tx-badge" style="${colorBg}">${escHtml(provider)}</span>
+            <div class="text-xs tx-secondary mt-1 font-mono">${escHtml(model)}</div>
+          </div>
+        </div>`;
+      };
+
+      return `<div class="space-y-1">
+        <div class="flex items-center justify-between gap-3 py-2.5 border-b" style="border-color:var(--divider)">
+          <div class="min-w-0 flex-1">
+            <div class="text-xs uppercase tracking-wider tx-secondary font-semibold">${T("dashboard.tika_label")}</div>
+            <div class="text-xs tx-secondary mt-0.5">${T("dashboard.tika_role")}</div>
+            <div class="text-xs tx-secondary mt-0.5 font-mono">${escHtml(tika.url || "—")}</div>
+          </div>
+          <div class="text-right" style="color:${tikaColor}">
+            <span class="text-sm font-medium flex items-center justify-end gap-1.5">${tikaIcon} ${tikaText}</span>
+          </div>
+        </div>
+        ${aiRow(T("dashboard.ai_chat_label"), ai.chat || {}, T("dashboard.ai_chat_role"))}
+        <div class="border-t" style="border-color:var(--divider)"></div>
+        ${aiRow(T("dashboard.ai_vision_label"), ai.vision || {}, T("dashboard.ai_vision_role"))}
+        <div class="text-xs tx-secondary pt-3 mt-1 border-t" style="border-color:var(--divider)">
+          ${T("dashboard.cost_hint")}
+        </div>
+      </div>`;
+    }
+
+    async function fetchDashboard(force = false) {
+      const ageMs = Date.now() - (state.dashboardLoadedAt || 0);
+      if (!force && state.dashboard && ageMs < 60_000) return;
+      state.dashboardLoading = true;
+      state.dashboardError = null;
+      render();
+      try {
+        const res = await api("/dashboard");
+        if (res && res.success) {
+          state.dashboard = res;
+          state.dashboardLoadedAt = Date.now();
+        } else {
+          state.dashboardError = res?.error || "Dashboard request failed";
+        }
+      } catch (err) {
+        state.dashboardError = err.message;
+      }
+      state.dashboardLoading = false;
+      render();
     }
 
     function statCard(label, value, icon, tab) {
@@ -3414,6 +3531,9 @@ export default {
         });
       }
 
+      // Plugin dashboard (system status card on the overview tab)
+      bindDashboardEvents();
+
       // Variables tab
       bindVariablesEvents();
 
@@ -4099,6 +4219,27 @@ export default {
       if (form) form.classList.remove("hidden");
       if (nameInput && !nameInput.value)
         nameInput.value = file.name.replace(/\.docx$/i, "");
+    }
+
+    // --- Dashboard (system status card) events ---
+
+    function bindDashboardEvents() {
+      // Only fetch on the overview tab. Lazy / cached: fetchDashboard()
+      // skips the network call when fresh data is already in memory.
+      if (
+        state.view === "collection" &&
+        (state.tab === "overview" || !state.tab)
+      ) {
+        if (!state.dashboard && !state.dashboardLoading) {
+          fetchDashboard(false);
+        }
+      }
+      el.querySelector('[data-action="dashboard-refresh"]')?.addEventListener(
+        "click",
+        () => {
+          fetchDashboard(true);
+        },
+      );
     }
 
     // --- Datasets events ---

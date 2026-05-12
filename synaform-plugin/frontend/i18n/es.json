@@ -365,6 +365,22 @@
     "back_to_html": "Volver a la vista previa",
     "pdf_unavailable": "La vista real en PDF necesita libreoffice en el backend. La vista previa HTML sigue funcionando; instala libreoffice (o un sidecar gotenberg) para habilitar el PDF."
   },
+  "dashboard": {
+    "title": "Estado del sistema",
+    "refresh": "Actualizar",
+    "loading": "Sondeando servicios\u2026",
+    "empty": "A\u00fan no hay datos de estado.",
+    "tika_label": "Apache Tika",
+    "tika_role": "Extractor local de texto de documentos (PDF, DOCX, XLSX, PPTX\u2026).",
+    "tika_ok": "accesible",
+    "tika_down": "no accesible",
+    "ai_chat_label": "IA de procesamiento de informaci\u00f3n",
+    "ai_chat_role": "Ejecuta los prompts detr\u00e1s de \u00abLeer archivos y autocompletar\u00bb. Una llamada por dataset.",
+    "ai_vision_label": "IA de procesamiento de im\u00e1genes",
+    "ai_vision_role": "Lee texto de escaneos JPG/PNG (y fallback de PDF). Una llamada por imagen.",
+    "provider_default": "predeterminado del proveedor",
+    "cost_hint": "Sugerencia: los escaneos son el coste dominante \u2014 cada JPG/PNG dispara un viaje de ida y vuelta a la IA de visi\u00f3n (5\u201360 s). Los documentos Office se leen primero con Tika local y solo recurren a la IA de visi\u00f3n si Tika devuelve texto vac\u00edo o de baja calidad."
+  },
   "export": {
     "title": "Exportar datasets",
     "subtitle": "Descarga todos los datasets de esta Collection como CSV plano \u2014 una fila por dataset, una columna por variable.",

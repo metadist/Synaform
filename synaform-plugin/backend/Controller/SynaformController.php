@@ -165,6 +165,118 @@ class SynaformController extends AbstractController
         ]);
     }
 
+    #[Route('/dashboard', name: 'dashboard', methods: ['GET'])]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/synaform/dashboard',
+        summary: 'Plugin dashboard: Tika status, configured AI models, plugin counts',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Dashboard payload')]
+    public function dashboard(int $userId, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        // Tika probe — direct curl against /version. Self-contained so the
+        // dashboard works even if TikaClient is reconfigured later. Times
+        // the round-trip so the UI can flag a slow/degraded Tika service.
+        $tikaUrl = rtrim((string) ($_ENV['TIKA_BASE_URL'] ?? 'http://tika:9998'), '/');
+        $tikaProbe = $this->probeHttpEndpoint($tikaUrl . '/version');
+        $tika = [
+            'enabled' => true,
+            'url' => $tikaUrl,
+            'reachable' => $tikaProbe['ok'],
+            'http_code' => $tikaProbe['http'],
+            'roundtrip_ms' => $tikaProbe['ms'],
+            'version' => $tikaProbe['ok'] ? trim((string) $tikaProbe['body']) : null,
+            'error' => $tikaProbe['error'],
+        ];
+
+        // AI configuration: ask ModelConfigService for the user's defaults
+        // for the two capabilities Synaform actually uses.
+        //   - chat = information processing (parse-documents + extract LLM call)
+        //   - vision = image processing (Vision-AI fallback for raw scans)
+        $aiCfg = $this->modelConfigService->getUserAiConfig($userId);
+        $chatProvider = $aiCfg['chat']['provider'] ?? null;
+        $chatModelId = $aiCfg['chat']['model'] ?? null;
+        $visionProvider = $aiCfg['vision']['provider'] ?? null;
+        $visionModelId = $aiCfg['vision']['model'] ?? null;
+
+        $ai = [
+            'chat' => [
+                'provider' => $chatProvider,
+                'model_id' => $chatModelId,
+                'model_name' => $chatModelId ? $this->modelConfigService->getModelName((int) $chatModelId) : null,
+                'role' => 'information_processing',
+                'description' => 'Runs the AI prompts behind "Read files & auto-fill" and the variable-resolution extraction step. Called once per dataset, after all source documents have been turned into text.',
+            ],
+            'vision' => [
+                'provider' => $visionProvider,
+                'model_id' => $visionModelId,
+                'model_name' => $visionModelId ? $this->modelConfigService->getModelName((int) $visionModelId) : null,
+                'role' => 'image_processing',
+                'description' => 'Reads text out of uploaded JPG/PNG scans and out of low-quality PDF pages (fallback). Called once per image; this is the dominant cost when the dataset sources are scans.',
+            ],
+        ];
+
+        // Plugin-level counts so the dashboard can also act as a quick
+        // status snapshot without the user opening every tab.
+        $counts = [
+            'forms' => $this->pluginData->count($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM),
+            'templates' => $this->pluginData->count($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE),
+            'candidates' => $this->pluginData->count($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE),
+        ];
+
+        return $this->json([
+            'success' => true,
+            'tika' => $tika,
+            'ai' => $ai,
+            'counts' => $counts,
+            'extraction_strategies' => [
+                'native_text' => 'text/plain, text/markdown, text/csv, text/html — instant',
+                'tika' => 'PDF, DOCX, XLSX, PPTX — local Tika, ~ms',
+                'vision_ai' => 'JPG, PNG, GIF, WEBP — Vision AI roundtrip, ~5–60 s per image',
+                'rasterize_vision' => 'PDFs whose Tika output is empty/low-quality — Ghostscript + Vision AI per page',
+            ],
+            'generated_at' => date('c'),
+        ]);
+    }
+
+    /**
+     * Lightweight HTTP probe used by the dashboard to surface the Tika
+     * (and potentially other) service status. Returns the HTTP code,
+     * round-trip time in ms, raw body and any low-level cURL error so the
+     * UI can show "reachable / degraded / down" with one glance.
+     *
+     * @return array{ok: bool, http: int, ms: int, body: string, error: string}
+     */
+    private function probeHttpEndpoint(string $url, int $timeoutSec = 3): array
+    {
+        $t0 = microtime(true);
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeoutSec,
+            CURLOPT_CONNECTTIMEOUT => $timeoutSec,
+            CURLOPT_USERAGENT => 'Synaform-Dashboard/1.0',
+        ]);
+        $body = curl_exec($ch);
+        $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = curl_error($ch) ?: '';
+        curl_close($ch);
+        $ms = (int) ((microtime(true) - $t0) * 1000);
+
+        return [
+            'ok' => $http >= 200 && $http < 300,
+            'http' => $http,
+            'ms' => $ms,
+            'body' => is_string($body) ? $body : '',
+            'error' => $err,
+        ];
+    }
+
     #[Route('/config', name: 'config_get', methods: ['GET'])]
     #[OA\Get(
         path: '/api/v1/user/{userId}/plugins/synaform/config',
