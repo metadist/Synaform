@@ -72,7 +72,22 @@ final class TemplateHtmlPreviewService
 
         $doc = new \DOMDocument();
         $doc->preserveWhiteSpace = true;
-        @$doc->loadXML($xml);
+        // Use libxml's error queue instead of `@` so genuine XML parse
+        // problems (malformed DOCX, truncated upload, etc.) make it into
+        // the application log instead of being silently dropped.
+        $previousInternalErrors = libxml_use_internal_errors(true);
+        $loaded = $doc->loadXML($xml);
+        $errors = libxml_get_errors();
+        libxml_clear_errors();
+        libxml_use_internal_errors($previousInternalErrors);
+        if (!$loaded) {
+            $messages = array_map(static fn (\LibXMLError $e): string => trim($e->message), $errors);
+            $this->logger->warning('TemplateHtmlPreviewService: invalid document.xml', [
+                'errors' => array_slice($messages, 0, 3),
+            ]);
+
+            return $this->emptyResult();
+        }
 
         $xpath = new \DOMXPath($doc);
         $xpath->registerNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
@@ -195,26 +210,17 @@ final class TemplateHtmlPreviewService
     /**
      * Flatten all <w:r> runs inside the paragraph, handle placeholder tokenisation
      * across run boundaries, and emit span-wrapped HTML.
+     *
+     * Walks the paragraph's children in document order so that runs nested
+     * inside containers like `<w:hyperlink>`, `<w:smartTag>`, `<w:fldSimple>`,
+     * `<w:sdt>` etc. are still visible to the preview. Without this,
+     * hyperlink anchor text and other inline-wrapped content silently
+     * disappears from the rendered preview.
      */
     private function renderRuns(\DOMElement $p, \DOMXPath $xpath, array &$state): string
     {
-        // 1. Collect runs: text + merged rPr-derived style.
         $runs = [];
-        foreach ($xpath->query('./w:r', $p) as $run) {
-            if (!$run instanceof \DOMElement) {
-                continue;
-            }
-            $rStyle = $this->runStyle($run, $xpath);
-            $text = '';
-            foreach ($xpath->query('.//w:t', $run) as $tNode) {
-                $text .= $tNode->nodeValue ?? '';
-            }
-            // Line breaks inside a run
-            foreach ($xpath->query('.//w:br', $run) as $_) {
-                $text .= "\n";
-            }
-            $runs[] = ['text' => $text, 'style' => $rStyle];
-        }
+        $this->collectRuns($p, $xpath, $runs);
 
         if (empty($runs)) {
             return '';
@@ -235,6 +241,77 @@ final class TemplateHtmlPreviewService
         }
 
         return $this->flattenToHtml($flat, $runMap, $runs, $state);
+    }
+
+    /**
+     * Recursively walk paragraph children in document order, pushing every
+     * `<w:r>` into $runs and recursing into inline containers
+     * (`<w:hyperlink>`, `<w:smartTag>`, `<w:fldSimple>`, `<w:sdt>`,
+     * `<w:sdtContent>`) so their wrapped runs are still picked up.
+     * Skips known non-run inline structures (proofErr, bookmarkStart, …).
+     *
+     * Also handles paragraph-level `<w:br>` and `<w:tab>` siblings (PhpWord
+     * sometimes emits these outside a run): they get appended to the
+     * previous run's text so the line break / tab still lands in the
+     * correct position in the flat text stream.
+     *
+     * @param array<int, array{text: string, style: array<string, mixed>}> $runs (out)
+     */
+    private function collectRuns(\DOMElement $node, \DOMXPath $xpath, array &$runs): void
+    {
+        static $recurseInto = ['hyperlink', 'smartTag', 'fldSimple', 'sdt', 'sdtContent', 'customXml'];
+
+        foreach ($node->childNodes as $child) {
+            if (!$child instanceof \DOMElement) {
+                continue;
+            }
+            $local = $child->localName;
+            if ($local === 'r') {
+                $runs[] = [
+                    'text'  => $this->runText($child),
+                    'style' => $this->runStyle($child, $xpath),
+                ];
+            } elseif (in_array($local, $recurseInto, true)) {
+                $this->collectRuns($child, $xpath, $runs);
+            } elseif ($local === 'br' || $local === 'tab') {
+                $whitespace = $local === 'br' ? "\n" : "\t";
+                if ($runs === []) {
+                    $runs[] = ['text' => $whitespace, 'style' => []];
+                } else {
+                    $runs[count($runs) - 1]['text'] .= $whitespace;
+                }
+            }
+        }
+    }
+
+    /**
+     * Build a run's visible text by walking its children in document
+     * order so that `<w:t>`, `<w:br>`, and `<w:tab>` end up at their real
+     * positions instead of all line-breaks being moved to the run's tail.
+     */
+    private function runText(\DOMElement $run): string
+    {
+        $text = '';
+        foreach ($run->childNodes as $child) {
+            if (!$child instanceof \DOMElement) {
+                continue;
+            }
+            switch ($child->localName) {
+                case 't':
+                    $text .= $child->nodeValue ?? '';
+                    break;
+                case 'br':
+                    $text .= "\n";
+                    break;
+                case 'tab':
+                    $text .= "\t";
+                    break;
+                    // Other run children (rPr, drawing, fldChar, instrText, …)
+                    // do not contribute visible characters to the live preview.
+            }
+        }
+
+        return $text;
     }
 
     /**
