@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.1.0";
+const TX_VERSION = "v3.2.1";
 
 export default {
   mount(el, context) {
@@ -62,8 +62,16 @@ export default {
       urlAdding: false,
       urlAddError: null,
 
-      // Live preview
-      previewVisible: true,
+      // Tabbed dataset detail view: "sources" | "details" | "variables"
+      // | "generate". The old single-page layout was extremely long; the
+      // tabs scope the user to one phase of the flow at a time.
+      datasetTab: "sources",
+
+      // Live preview — shown as a modal overlay so the dataset form can use
+      // the full screen width. Customers asked for this because the
+      // side-by-side layout was cutting the variables column in half on
+      // typical screens.
+      previewVisible: false,
       previewTemplateId: null,
       previewSkeleton: null,
       previewLoading: false,
@@ -632,7 +640,11 @@ export default {
       if (!state.selectedDataset) return;
       const c = collectionById(state.collectionId);
       if (!c) return;
-      const rootEl = el?.querySelector("#tx-preview-root");
+      // The preview lives in the body-level modal portal now; fall back to
+      // el for older code paths just in case.
+      const rootEl =
+        modalPortal?.querySelector("#tx-preview-root") ||
+        el?.querySelector("#tx-preview-root");
       if (!rootEl) return;
       const values = buildPreviewValueMap(c, state.selectedDataset);
       applyPreviewValues(rootEl, c, values);
@@ -909,12 +921,13 @@ export default {
       .tx-callout { padding: .75rem 1rem; border-radius: .5rem; background: var(--brand-alpha-light); color: var(--txt-primary); font-size: .8125rem; }
       .tx-danger-zone { border: 1px solid color-mix(in srgb, var(--status-error) 40%, transparent); border-radius: .75rem; padding: 1.25rem; background: color-mix(in srgb, var(--status-error) 6%, var(--bg-card)); }
 
-      /* Live preview (Phase 4b) */
-      .tx-split { display: grid; gap: 1rem; grid-template-columns: 1fr; }
-      @media (min-width: 1100px) { .tx-split.has-preview { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; } }
-      .tx-preview-panel { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: hidden; display: flex; flex-direction: column; }
-      .tx-preview-panel .tx-preview-toolbar { display: flex; align-items: center; gap: .5rem; padding: .5rem .75rem; border-bottom: 1px solid var(--divider); background: var(--bg-card); }
-      .tx-preview-panel .tx-preview-viewport { flex: 1; overflow: auto; padding: 1.25rem; background: #ffffff; color: #1a1a1a; border-radius: 0 0 .75rem .75rem; }
+      /* Live preview — rendered as a wide modal overlay so the dataset form
+         can use the full screen width when the preview is closed. */
+      .tx-modal--wide { max-width: min(1200px, 95vw); }
+      .tx-modal--preview { padding: 0; max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
+      .tx-preview-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+      .tx-preview-panel .tx-preview-toolbar { display: flex; align-items: center; gap: .5rem; padding: .5rem .75rem; border-bottom: 1px solid var(--divider); background: var(--bg-card); flex: 0 0 auto; }
+      .tx-preview-panel .tx-preview-viewport { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 1.25rem; background: #ffffff; color: #1a1a1a; }
       .tx-preview { font-family: "Calibri", "Helvetica Neue", Arial, sans-serif; font-size: 11pt; line-height: 1.35; max-width: 780px; margin: 0 auto; color: #1a1a1a; }
       .tx-preview h1 { font-size: 18pt; font-weight: 700; margin: .6em 0 .3em; color: #1a1a1a; }
       .tx-preview h2 { font-size: 14pt; font-weight: 700; margin: .6em 0 .3em; }
@@ -942,6 +955,84 @@ export default {
     // Render engine
     // =========================================================================
 
+    // Body-level portal for modal overlays so they escape every nested
+    // scrolling/stacking context the synaplan main layout creates around the
+    // plugin host (header, sidebar, surface-card, etc.). Created lazily on
+    // first render and removed when the plugin host is unmounted.
+    let modalPortal = null;
+    let portalCleanupObserver = null;
+
+    function ensureModalPortal() {
+      if (modalPortal && modalPortal.isConnected) return modalPortal;
+      const doc = el.ownerDocument || document;
+      modalPortal = doc.createElement("div");
+      modalPortal.className = "tx tx-modal-portal";
+      doc.body.appendChild(modalPortal);
+
+      // When the plugin host is wiped (PluginView clears innerHTML on
+      // unmount/route change), tear down the portal so we don't leak it.
+      try {
+        portalCleanupObserver?.disconnect();
+        portalCleanupObserver = new MutationObserver(() => {
+          if (!el.isConnected || el.childNodes.length === 0) {
+            destroyModalPortal();
+          }
+        });
+        portalCleanupObserver.observe(el, { childList: true });
+      } catch (_e) {
+        // Defensive: if MutationObserver isn't available we just leak the
+        // portal until the page reloads — better than crashing on render.
+      }
+      return modalPortal;
+    }
+
+    function destroyModalPortal() {
+      try {
+        portalCleanupObserver?.disconnect();
+      } catch (_e) {
+        /* noop */
+      }
+      portalCleanupObserver = null;
+      if (modalPortal && modalPortal.parentNode) {
+        modalPortal.parentNode.removeChild(modalPortal);
+      }
+      modalPortal = null;
+    }
+
+    function renderModalPortal() {
+      // The page-level modal is always the dataset preview today. If we add
+      // more modals we route them through here.
+      const showPreview =
+        state.view === "datasets" &&
+        state.selectedDataset &&
+        state.previewVisible;
+
+      if (!showPreview) {
+        if (modalPortal) modalPortal.innerHTML = "";
+        return;
+      }
+
+      const c = collectionById(state.collectionId);
+      const d = state.selectedDataset;
+      if (!c || !d) {
+        if (modalPortal) modalPortal.innerHTML = "";
+        return;
+      }
+      const templates = collectionTemplates(c);
+      if (templates.length === 0) {
+        if (modalPortal) modalPortal.innerHTML = "";
+        return;
+      }
+
+      const portal = ensureModalPortal();
+      portal.innerHTML = `
+        <div class="tx-modal-bg" data-action="preview-hide">
+          <div class="tx-modal tx-modal--wide tx-modal--preview tx-preview-panel" id="tx-preview-panel" onclick="event.stopPropagation()">
+            ${renderDatasetPreviewPanel(c, d, templates)}
+          </div>
+        </div>`;
+    }
+
     function render() {
       el.innerHTML = `
         <style>${TX_STYLES}</style>
@@ -950,6 +1041,7 @@ export default {
           ${renderNav()}
           <div id="tx-content" class="mt-4">${renderView()}</div>
         </div>`;
+      renderModalPortal();
       bindEvents();
     }
 
@@ -1362,7 +1454,6 @@ export default {
       return `<div class="space-y-4">
         ${stats}
         ${callout}
-        ${renderSystemStatusCard()}
         <div class="tx-card p-5">
           <h3 class="text-sm font-semibold mb-3">${T("collection.overview_steps_title")}</h3>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">${stepsMarkup}</div>
@@ -1423,45 +1514,52 @@ export default {
         ? `${T("dashboard.tika_ok")} · ${escHtml(tika.version || "—")} · ${tika.roundtrip_ms || 0} ms`
         : `${T("dashboard.tika_down")} (HTTP ${tika.http_code || 0}${tika.error ? ` — ${escHtml(tika.error)}` : ""})`;
 
-      const aiRow = (label, slot, role) => {
-        const provider = slot.provider || "—";
-        const model =
+      // Each AI slot is rendered as a button so users can click straight
+      // through to the synaplan AI Models settings page with the right
+      // capability highlighted. The model name + provider come from the
+      // backend, which already cascades user → global default in
+      // ModelConfigService::getDefaultModel(); when only the platform
+      // default is configured we still render its real name.
+      const aiRow = (label, slot, role, capability) => {
+        const provider = slot.provider || "";
+        const modelName =
           slot.model_name ||
-          (slot.model_id
-            ? "id " + slot.model_id
-            : T("dashboard.provider_default"));
-        const colorBg = slot.provider
-          ? "background:var(--brand-alpha-light);color:var(--brand)"
-          : "background:var(--bg-chip);color:var(--txt-secondary)";
-        return `<div class="flex items-start justify-between gap-3 py-2.5">
+          (slot.model_id ? "id " + slot.model_id : "");
+        const hasModel = !!(modelName || provider);
+        const valueLine = hasModel
+          ? `<span class="tx-badge" style="background:var(--brand-alpha-light);color:var(--brand)">${escHtml(provider || "—")}</span>
+             <span class="font-mono text-xs ml-2">${escHtml(modelName || T("dashboard.provider_default"))}</span>`
+          : `<span class="tx-badge" style="background:var(--bg-chip);color:var(--txt-secondary)">${T("dashboard.unconfigured")}</span>`;
+
+        const cta = hasModel
+          ? T("dashboard.change_model")
+          : T("dashboard.configure_model");
+
+        return `<button type="button" data-action="open-ai-settings" data-capability="${escHtml(capability)}" class="w-full text-left flex items-start justify-between gap-3 py-3 px-3 rounded-md transition-colors hover:bg-[var(--brand-alpha-light)]" style="background:transparent;border:1px solid transparent">
           <div class="min-w-0 flex-1">
             <div class="text-xs uppercase tracking-wider tx-secondary font-semibold">${escHtml(label)}</div>
             <div class="text-xs tx-secondary mt-0.5">${escHtml(role)}</div>
+            <div class="mt-1.5 flex items-center flex-wrap gap-1">${valueLine}</div>
           </div>
-          <div class="text-right">
-            <span class="tx-badge" style="${colorBg}">${escHtml(provider)}</span>
-            <div class="text-xs tx-secondary mt-1 font-mono">${escHtml(model)}</div>
+          <div class="text-right flex flex-col items-end gap-1 shrink-0">
+            <span class="text-xs tx-link inline-flex items-center gap-1">${cta} ${ICONS.link}</span>
           </div>
-        </div>`;
+        </button>`;
       };
 
       return `<div class="space-y-1">
-        <div class="flex items-center justify-between gap-3 py-2.5 border-b" style="border-color:var(--divider)">
+        ${aiRow(T("dashboard.ai_chat_label"), ai.chat || {}, T("dashboard.ai_chat_role"), "CHAT")}
+        ${aiRow(T("dashboard.ai_vision_label"), ai.vision || {}, T("dashboard.ai_vision_role"), "PIC2TEXT")}
+        <div class="flex items-center justify-between gap-3 px-3 py-2 mt-2 rounded-md" style="background:var(--bg-app)">
           <div class="min-w-0 flex-1">
             <div class="text-xs uppercase tracking-wider tx-secondary font-semibold">${T("dashboard.tika_label")}</div>
-            <div class="text-xs tx-secondary mt-0.5">${T("dashboard.tika_role")}</div>
-            <div class="text-xs tx-secondary mt-0.5 font-mono">${escHtml(tika.url || "—")}</div>
+            <div class="text-xs tx-secondary mt-0.5">${T("dashboard.tika_role")} · <span class="font-mono">${escHtml(tika.url || "—")}</span></div>
           </div>
           <div class="text-right" style="color:${tikaColor}">
             <span class="text-sm font-medium flex items-center justify-end gap-1.5">${tikaIcon} ${tikaText}</span>
           </div>
         </div>
-        ${aiRow(T("dashboard.ai_chat_label"), ai.chat || {}, T("dashboard.ai_chat_role"))}
-        <div class="border-t" style="border-color:var(--divider)"></div>
-        ${aiRow(T("dashboard.ai_vision_label"), ai.vision || {}, T("dashboard.ai_vision_role"))}
-        <div class="text-xs tx-secondary pt-3 mt-1 border-t" style="border-color:var(--divider)">
-          ${T("dashboard.cost_hint")}
-        </div>
+        <div class="text-xs tx-secondary pt-2">${T("dashboard.cost_hint")}</div>
       </div>`;
     }
 
@@ -2546,12 +2644,12 @@ export default {
 
     function renderDatasetDetail(c) {
       const d = state.selectedDataset;
-      const templates = collectionTemplates(c);
-      const hasPreview = templates.length > 0 && state.previewVisible;
-      const canShowPreview = templates.length > 0 && !state.previewVisible;
 
       const retention = renderRetentionPicker(d);
       const expiryHint = renderExpiryHint(d);
+      // Header keeps the auto-delete dropdown, status badge and the
+      // delete button. The "Show preview" trigger was removed — it was
+      // confusing more than it helped.
       const header = `<div class="tx-card p-5">
         <div class="flex items-center justify-between gap-3 flex-wrap">
           <div class="min-w-0 flex-1">
@@ -2561,33 +2659,59 @@ export default {
           <div class="flex items-center gap-2 flex-wrap">
             ${retention}
             ${statusBadge(d.status || "draft")}
-            ${canShowPreview ? `<button data-action="preview-show" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("preview.show")}">${ICONS.doc} ${T("preview.show")}</button>` : ""}
             <button data-delete-dataset="${d.id}" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)">${ICONS.trash}</button>
           </div>
         </div>
       </div>`;
 
-      const leftColumn = `<div class="space-y-4">
-        ${renderDatasetDataSection(c, d)}
-        ${renderDatasetFilesSection(d)}
-        ${renderDatasetExtractionSection(d)}
-        ${renderDatasetVariablesSection(d)}
-        ${renderDatasetGenerateSection(c, d)}
-      </div>`;
+      // Four explicit tabs, in user-flow order. We use `data-dataset-tab`
+      // (NOT `data-tab`) so clicks don't bubble up to the global
+      // collection-level tab handler, which would otherwise hijack the
+      // navigation away from the dataset detail page.
+      const currentTab = state.datasetTab || "sources";
+      const tabs = [
+        { id: "sources", label: T("datasets.tab_sources") },
+        { id: "details", label: T("datasets.tab_details") },
+        { id: "variables", label: T("datasets.tab_variables") },
+        { id: "generate", label: T("datasets.tab_generate") },
+      ];
+      const tabNav = `<nav class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
+        ${tabs
+          .map(
+            (t) =>
+              `<button type="button" data-dataset-tab="${t.id}" class="tx-tab${currentTab === t.id ? " active" : ""}">${escHtml(t.label)}</button>`,
+          )
+          .join("")}
+      </nav>`;
 
-      const rightColumn = hasPreview
-        ? `<div class="tx-card tx-preview-panel" id="tx-preview-panel">${renderDatasetPreviewPanel(c, d, templates)}</div>`
-        : "";
-
-      const splitClass = hasPreview ? "tx-split has-preview" : "tx-split";
+      let tabBody = "";
+      switch (currentTab) {
+        case "details":
+          tabBody = renderDatasetDataSection(c, d);
+          break;
+        case "variables":
+          tabBody = `<div class="tx-card p-5">
+            <h4 class="text-sm font-semibold flex items-center gap-2 mb-1">${ICONS.sparkle} ${T("datasets.section_variables")}</h4>
+            <p class="text-xs tx-secondary mb-3">${T("datasets.section_variables_hint")}</p>
+            ${renderDatasetVariablesSection(d)}
+          </div>`;
+          break;
+        case "generate":
+          tabBody = renderDatasetGenerateSection(c, d);
+          break;
+        case "sources":
+        default:
+          tabBody = `<div class="space-y-4">
+            ${renderDatasetFilesSection(d)}
+            ${renderDatasetExtractionSection(d)}
+          </div>`;
+      }
 
       return `<div class="space-y-4">
         <button data-action="datasets-back" class="flex items-center gap-1 text-sm transition-colors" style="color:var(--txt-secondary)">${ICONS.back} ${T("app.back")}</button>
         ${header}
-        <div class="${splitClass}">
-          ${leftColumn}
-          ${rightColumn}
-        </div>
+        ${tabNav}
+        ${tabBody}
       </div>`;
     }
 
@@ -2618,12 +2742,12 @@ export default {
 
       let body = "";
       if (state.previewPdfUrl) {
-        body = `<div class="tx-preview-viewport" style="padding:0;background:#f6f6f6">
-          <div class="flex items-center gap-2 p-2" style="border-bottom:1px solid var(--divider);background:var(--bg-card)">
+        body = `<div class="tx-preview-viewport" style="padding:0;background:#f6f6f6;display:flex;flex-direction:column">
+          <div class="flex items-center gap-2 p-2" style="border-bottom:1px solid var(--divider);background:var(--bg-card);flex:0 0 auto">
             <span class="text-xs tx-secondary">${T("preview.showing_pdf")}</span>
             <button data-action="preview-back-html" class="tx-btn tx-btn-sm tx-btn-ghost ml-auto">${T("preview.back_to_html")}</button>
           </div>
-          <iframe src="${escHtml(state.previewPdfUrl)}" style="width:100%;height:calc(100vh - 9rem);border:0"></iframe>
+          <iframe src="${escHtml(state.previewPdfUrl)}" style="width:100%;flex:1 1 auto;min-height:60vh;border:0"></iframe>
         </div>`;
       } else if (state.previewLoading) {
         body = `<div class="tx-preview-missing">
@@ -2679,15 +2803,15 @@ export default {
         </form>`;
       }
       return `<div class="tx-card p-5">
-        <div class="flex items-center gap-2 mb-3">
-          <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2">${ICONS.variable} ${T("datasets.section_data")}</h4>
-          <span class="text-xs tx-secondary">— ${T("datasets.section_data_hint")}</span>
+        <div class="flex items-center gap-2 mb-1">
+          <h4 class="text-sm font-semibold flex items-center gap-2">${ICONS.variable} ${T("datasets.section_data")}</h4>
           ${
             fields.length > 1
               ? `<button data-action="toggle-reorder" class="ml-auto text-xs tx-link flex items-center gap-1">${ICONS.grip} ${isReordering ? T("app.done") : T("variables.reorder")}</button>`
               : ""
           }
         </div>
+        <p class="text-xs tx-secondary mb-3">${T("datasets.section_data_hint")}</p>
         ${inner}
       </div>`;
     }
@@ -3007,29 +3131,28 @@ export default {
       </div>`;
     }
 
+    /**
+     * Renders the "Resolved Variables" table without an outer card wrapper.
+     * Caller is responsible for placing it inside whatever container makes
+     * sense in the surrounding layout (the new Variables tab wraps it in
+     * a collapsible card; older callers wrapped it in their own tx-card).
+     */
     function renderDatasetVariablesSection(d) {
       if (state.datasetVariablesLoading) {
-        return `<div class="tx-card p-5">
-          <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2 mb-3">${ICONS.variable} ${T("datasets.section_variables")}</h4>
-          <div class="flex items-center gap-2 py-4">
-            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-            <span class="text-sm tx-secondary">${T("app.loading")}</span>
-          </div>
+        return `<div class="flex items-center gap-2 py-4">
+          <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
+          <span class="text-sm tx-secondary">${T("app.loading")}</span>
         </div>`;
       }
       const vars = state.datasetVariables;
       if (!vars || vars.length === 0) {
-        return `<div class="tx-card p-5">
-          <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2 mb-3">${ICONS.variable} ${T("datasets.section_variables")}</h4>
-          <p class="text-sm tx-secondary">${T("app.no_data")}</p>
-        </div>`;
+        return `<p class="text-sm tx-secondary">${T("app.no_data")}</p>`;
       }
       const regular = vars.filter((v) => v.type !== "table");
       const tables = vars.filter((v) => v.type === "table");
       const rows = regular.map((v) => renderVarRow(v, d.id)).join("");
       const tblGroups = tables.map((v) => renderTableGroup(v)).join("");
-      return `<div class="tx-card p-5">
-        <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2 mb-3">${ICONS.variable} ${T("datasets.section_variables")}</h4>
+      return `<div>
         <div class="overflow-x-auto">
           <table class="w-full text-left">
             <thead>
@@ -3335,10 +3458,6 @@ export default {
 
     function renderSettings() {
       const cfg = state.config || {};
-      const modelDisplay =
-        cfg.extraction_model && cfg.extraction_model !== "default"
-          ? cfg.extraction_model
-          : T("settings.model_auto");
       return `<div class="mt-4 space-y-4">
         <div class="tx-card p-6">
           <h3 class="text-lg font-semibold mb-4">${T("settings.title")}</h3>
@@ -3373,23 +3492,7 @@ export default {
             </div>
           </form>
         </div>
-        <div class="tx-card p-6">
-          <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary mb-3">${T("settings.info_title")}</h4>
-          <div class="space-y-2 text-sm">
-            <div class="flex justify-between py-1.5 tx-divider border-b">
-              <span class="tx-secondary">${T("settings.active_model")}</span>
-              <span class="font-mono font-medium">${escHtml(modelDisplay)}</span>
-            </div>
-            <div class="flex justify-between py-1.5 tx-divider border-b">
-              <span class="tx-secondary">${T("settings.default_language")}</span>
-              <span class="font-medium">${escHtml(T(`settings.lang_${cfg.default_language || "en"}`, cfg.default_language || "en"))}</span>
-            </div>
-            <div class="flex justify-between py-1.5">
-              <span class="tx-secondary">${T("settings.ui_language")}</span>
-              <span class="font-medium">${escHtml(T(`settings.lang_${_loadedLang || "en"}`, _loadedLang || "en"))}</span>
-            </div>
-          </div>
-        </div>
+        ${renderSystemStatusCard()}
       </div>`;
     }
 
@@ -4226,19 +4329,35 @@ export default {
     function bindDashboardEvents() {
       // Only fetch on the overview tab. Lazy / cached: fetchDashboard()
       // skips the network call when fresh data is already in memory.
-      if (
-        state.view === "collection" &&
-        (state.tab === "overview" || !state.tab)
-      ) {
-        if (!state.dashboard && !state.dashboardLoading) {
-          fetchDashboard(false);
-        }
+      // Lazy-load the dashboard only when the Settings tab is on screen
+      // — that's the only place the System Info card is rendered now.
+      const wantsDashboard = state.view === "settings";
+      if (wantsDashboard && !state.dashboard && !state.dashboardLoading) {
+        fetchDashboard(false);
       }
       el.querySelector('[data-action="dashboard-refresh"]')?.addEventListener(
         "click",
         () => {
           fetchDashboard(true);
         },
+      );
+
+      // "Configure model" / "Change model" buttons inside the System
+      // Info card. Each one points at the synaplan AI Models settings
+      // page with the right capability highlighted (CHAT / PIC2TEXT).
+      // We use pushState + a synthetic popstate so the host SPA's
+      // Vue Router picks up the change without a full reload.
+      el.querySelectorAll('[data-action="open-ai-settings"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          const cap = btn.dataset.capability || "ALL";
+          const target = `/config/ai-models?highlight=${encodeURIComponent(cap)}`;
+          try {
+            window.history.pushState({}, "", target);
+            window.dispatchEvent(new PopStateEvent("popstate"));
+          } catch (_e) {
+            window.location.href = target;
+          }
+        }),
       );
     }
 
@@ -4273,9 +4392,24 @@ export default {
           state.selectedDataset = null;
           state.newDatasetOpen = false;
           state.datasetId = null;
+          state.datasetTab = "sources";
           writeHash();
           render();
         },
+      );
+
+      // Dataset-detail tabs. Bound to a dedicated attribute so clicks
+      // don't collide with the global [data-tab] handler that switches
+      // collection-level tabs.
+      el.querySelectorAll("[data-dataset-tab]").forEach((btn) =>
+        btn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const next = btn.dataset.datasetTab;
+          if (!next || state.datasetTab === next) return;
+          state.datasetTab = next;
+          render();
+        }),
       );
 
       el.querySelectorAll("[data-open-dataset]").forEach((row) =>
@@ -4942,7 +5076,7 @@ export default {
     }
 
     function bindPreviewEvents(c, d) {
-      // "Show preview" toggle lives in the dataset header, outside the panel
+      // "Show preview" toggle lives in the dataset header, inside `el`.
       el.querySelector('[data-action="preview-show"]')?.addEventListener(
         "click",
         () => {
@@ -4951,7 +5085,19 @@ export default {
         },
       );
 
-      const panel = el.querySelector("#tx-preview-panel");
+      // Live input listener on the dataset form (delegated). Bind even when
+      // the modal is closed so values stay in sync if/when the user opens it.
+      const form = el.querySelector("#tx-entry-data-form");
+      if (form) {
+        const handler = () => schedulePreviewUpdate();
+        form.addEventListener("input", handler);
+        form.addEventListener("change", handler);
+      }
+
+      // The preview panel now lives in a body-level portal (see
+      // renderModalPortal). When the modal is closed the portal is empty
+      // and we have nothing else to bind.
+      const panel = modalPortal?.querySelector("#tx-preview-panel");
       if (!panel) return;
 
       const templates = collectionTemplates(c);
@@ -5001,24 +5147,17 @@ export default {
           });
         });
 
-      // Hide
-      panel
-        .querySelector('[data-action="preview-hide"]')
-        ?.addEventListener("click", () => {
-          state.previewVisible = false;
-          render();
-        });
-
-      // Live input listener on the dataset form (delegated). Only bind while
-      // the skeleton is present so we don't schedule pointless DOM updates.
-      if (state.previewSkeleton) {
-        const form = el.querySelector("#tx-entry-data-form");
-        if (form) {
-          const handler = () => schedulePreviewUpdate();
-          form.addEventListener("input", handler);
-          form.addEventListener("change", handler);
-        }
-      }
+      // Hide — both the toolbar close button and the modal backdrop use
+      // data-action="preview-hide". The modal body stops propagation so
+      // clicks inside the panel don't bubble up and close the overlay.
+      modalPortal
+        ?.querySelectorAll('[data-action="preview-hide"]')
+        .forEach((node) =>
+          node.addEventListener("click", () => {
+            state.previewVisible = false;
+            render();
+          }),
+        );
 
       // --- True-preview (PDF) path ---
       panel
@@ -5317,6 +5456,9 @@ export default {
         state.datasetVariables = null;
         state.editingVarKey = null;
         state.selectedGenerateTemplate = null;
+        // Always land on the upload tab so the user knows where files
+        // are managed; the other tabs are one click away.
+        state.datasetTab = "sources";
         await loadDatasetVariables(id);
       } catch (err) {
         showToast(err.message, "error");

@@ -1629,14 +1629,32 @@ class SynaformController extends AbstractController
                     $colType = (string) ($c['type'] ?? 'text');
                     return $key . ' (' . $label . ', type=' . $colType . ')';
                 }, $columns);
-                $listCols = array_values(array_filter(
-                    array_map(fn ($c) => ($c['type'] ?? 'text') === 'list' ? (string) ($c['key'] ?? '') : null, $columns),
-                ));
+                $flatListCols = [];
+                $structuredListCols = [];
+                foreach ($columns as $c) {
+                    if (!is_array($c) || ($c['type'] ?? '') !== 'list') {
+                        continue;
+                    }
+                    if ($this->isStructuredListColumn($c)) {
+                        $structuredListCols[] = (string) ($c['key'] ?? '');
+                    } else {
+                        $flatListCols[] = (string) ($c['key'] ?? '');
+                    }
+                }
                 $desc .= ' — columns: ' . implode(', ', $colDescs)
                     . '. [return as JSON array of objects with these column keys]';
-                if (!empty($listCols)) {
-                    $desc .= ' — the following columns must themselves be JSON arrays of short strings (one bullet per item, no markdown, no dashes, no numbering): '
-                        . implode(', ', $listCols);
+                if (!empty($flatListCols)) {
+                    $desc .= ' — the following columns must be JSON arrays of short strings, one bullet per item, no markdown, no dashes, no numbering: '
+                        . implode(', ', $flatListCols);
+                }
+                if (!empty($structuredListCols)) {
+                    $desc .= ' — the following columns are STRUCTURED HR-profile lists. Return a JSON array of strings that follow this pattern per position at the employer: '
+                        . '(1) optional date range header (e.g. "08/2024 – 07/2025") rendered as a bold sub-heading, '
+                        . '(2) the position title as a single string with no bullet prefix, '
+                        . '(3) one task per element afterwards. Use an empty string "" to separate two positions at the same employer. '
+                        . 'For a single-position station you may omit the date header — the first item is then the position title. '
+                        . 'Do NOT include "-", "•", "*" or numbering inside the strings; the renderer adds bullets automatically. '
+                        . 'Columns: ' . implode(', ', $structuredListCols);
                 }
             }
             $fieldDescriptions[] = $desc;
@@ -4517,9 +4535,13 @@ class SynaformController extends AbstractController
             return;
         }
 
-        // Map "group.col" → declared column `type`, so renderer knows whether
-        // the stored value is expected to be an array or a legacy string.
+        // Map "group.col" → declared column `type` and `structured` flag, so
+        // the renderer knows whether the stored value is an array or a legacy
+        // string AND whether array items should be classified into structured
+        // station blocks (date / position title / tasks) or rendered as a flat
+        // bullet list.
         $columnTypes = [];
+        $columnStructured = [];
         foreach ($formFields as $field) {
             if (($field['type'] ?? '') !== 'table' || empty($field['key'])) {
                 continue;
@@ -4529,7 +4551,10 @@ class SynaformController extends AbstractController
                 if (!is_array($col) || empty($col['key'])) {
                     continue;
                 }
-                $columnTypes["{$group}.{$col['key']}"] = (string) ($col['type'] ?? 'text');
+                $colKey = (string) $col['key'];
+                $combined = "{$group}.{$colKey}";
+                $columnTypes[$combined] = (string) ($col['type'] ?? 'text');
+                $columnStructured[$combined] = $this->isStructuredListColumn($col);
             }
         }
 
@@ -4560,6 +4585,10 @@ class SynaformController extends AbstractController
                 continue;
             }
             $columnType = $columnTypes[$richKey] ?? 'text';
+            // Default-on for stations.details (legacy back-compat: this column
+            // has always rendered with date / title / bullet structure when
+            // fed a multi-line string).
+            $structured = $columnStructured[$richKey] ?? ($richKey === 'stations.details');
 
             foreach ($rows as $i => $row) {
                 $num = $i + 1;
@@ -4590,12 +4619,12 @@ class SynaformController extends AbstractController
                     $pattern = '#<w:p\b[^>]*>(?:(?!</w:p>).)*?' . preg_quote($placeholder, '#') . '(?:(?!</w:p>).)*?</w:p>#s';
                     $replaced = preg_replace_callback(
                         $pattern,
-                        function (array $m) use ($raw, $columnType, $bulletNumId): string {
+                        function (array $m) use ($raw, $columnType, $bulletNumId, $structured): string {
                             $basePPr = '';
                             if (preg_match('#<w:pPr>.*?</w:pPr>#s', $m[0], $pm)) {
                                 $basePPr = $pm[0];
                             }
-                            return $this->renderRichColumnXml($raw, $columnType, $basePPr, $bulletNumId);
+                            return $this->renderRichColumnXml($raw, $columnType, $basePPr, $bulletNumId, $structured);
                         },
                         $xml
                     );
@@ -4623,22 +4652,43 @@ class SynaformController extends AbstractController
 
     /**
      * Render a rich column value into a sequence of <w:p> OOXML paragraphs.
-     * Array-typed values produce one bullet per item (no heuristic parsing);
-     * string-typed values go through the legacy parseStationDetails reader so
-     * "date range + dash bullets" prose keeps working for old datasets.
+     *
+     * Two array-shape paths:
+     *   - "structured" (auto-enabled for the `details` sub-field, opt-in via
+     *     designer for other columns): items are classified into date
+     *     headers, position titles and tasks (bullets). This mirrors what the
+     *     legacy {@see parseStationDetails} multi-line string path produces,
+     *     so HR templates render with the same date-bold + title-no-bullet +
+     *     tasks-as-bullets layout regardless of whether the data was stored
+     *     as a string or as a JSON array.
+     *   - "flat" (default for skill-style list columns like languages,
+     *     other_skills): every non-empty item becomes a bullet. Same behavior
+     *     as before this method existed.
+     *
+     * Multi-line string values still flow through {@see renderStationDetailsXml}
+     * for back-compat with datasets created before column-level types existed.
      *
      * @param array<int, mixed>|string|null $raw
      */
-    private function renderRichColumnXml(array|string|null $raw, string $columnType, string $basePPr, ?int $bulletNumId): string
-    {
+    private function renderRichColumnXml(
+        array|string|null $raw,
+        string $columnType,
+        string $basePPr,
+        ?int $bulletNumId,
+        bool $structured = false,
+    ): string {
         if (is_array($raw)) {
-            // Structured path: one bullet per non-empty item. Column type is
-            // `list` here (or anything else that naturally arrays); empty items
-            // are dropped so trailing input whitespace doesn't add blank lines.
-            $items = array_values(array_filter(
-                array_map(static fn ($v) => trim((string) $v), $raw),
-                static fn ($v) => $v !== '',
-            ));
+            $items = array_map(static fn ($v) => trim((string) $v), $raw);
+
+            if ($structured) {
+                $blocks = $this->classifyListItems($items);
+                if (empty($blocks)) {
+                    return '';
+                }
+                return $this->renderStationBlocksXml($blocks, $basePPr, $bulletNumId);
+            }
+
+            $items = array_values(array_filter($items, static fn ($v) => $v !== ''));
             if (empty($items)) {
                 return '';
             }
@@ -5219,27 +5269,134 @@ class SynaformController extends AbstractController
      */
     private function renderStationDetailsXml(string $details, string $basePPr, ?int $bulletNumId): string
     {
-        $blocks = $this->parseStationDetails($details);
+        return $this->renderStationBlocksXml($this->parseStationDetails($details), $basePPr, $bulletNumId);
+    }
+
+    /**
+     * Classify an array of plain string list items into the same date / title /
+     * bullet / spacer block sequence that {@see parseStationDetails} produces
+     * for multi-line strings. Lets HR-style "stations.details" lists be
+     * authored as JSON arrays AND keep the customer's expected layout:
+     *
+     *   - empty entry            → spacer (blank line between sub-positions)
+     *   - date-range pattern     → date header (rendered bold, no bullet)
+     *   - first non-empty item OR
+     *     item right after a date → position title (no bullet)
+     *   - everything else        → task bullet
+     *
+     * The state machine resets to "expecting title" after every date header,
+     * so multi-position stations naturally render as
+     *   DATE → TITLE → bullets (tasks)
+     *   DATE → TITLE → bullets (tasks)
+     * For a single-position station with no date in the array, the first
+     * item becomes the position title (without a bullet) and subsequent
+     * items render as task bullets — matching the customer's spec
+     * "Positionen haben keine Aufzählungszeichen, dann die Aufgaben als Liste".
+     *
+     * @param list<string>                                $items
+     * @return list<array{type: string, text?: string}>
+     */
+    private function classifyListItems(array $items): array
+    {
+        $dateRangePattern = '~^\s*\d{1,2}[./]\d{4}\s*[\-–—]{1,2}\s*(?:heute|today|laufend|\d{1,2}[./]\d{4})\s*$~iu';
+        $looseYearRange   = '~^\s*\d{4}\s*[\-–—]{1,2}\s*(?:heute|today|laufend|\d{4})\s*$~iu';
+        $bulletPrefix     = '~^[\-*•·–—]\s+(.*)$~u';
+
+        $blocks = [];
+        $expectingTitle = true;
+        foreach ($items as $item) {
+            $stripped = trim((string) $item);
+
+            if ($stripped === '') {
+                $blocks[] = ['type' => 'spacer'];
+                continue;
+            }
+
+            if (preg_match($dateRangePattern, $stripped) === 1 || preg_match($looseYearRange, $stripped) === 1) {
+                $blocks[] = ['type' => 'date', 'text' => $stripped];
+                $expectingTitle = true;
+                continue;
+            }
+
+            // Strip an explicit bullet prefix the AI or user may have left in
+            // ("- foo", "• foo", "* foo"); the renderer adds its own bullets.
+            if (preg_match($bulletPrefix, $stripped, $bm) === 1) {
+                $blocks[] = ['type' => 'bullet', 'text' => trim($bm[1])];
+                $expectingTitle = false;
+                continue;
+            }
+
+            if ($expectingTitle) {
+                $blocks[] = ['type' => 'text', 'text' => $stripped];
+                $expectingTitle = false;
+                continue;
+            }
+
+            $blocks[] = ['type' => 'bullet', 'text' => $stripped];
+        }
+
+        // Collapse consecutive spacers and trim leading/trailing ones.
+        $collapsed = [];
+        $lastSpacer = false;
+        foreach ($blocks as $b) {
+            if ($b['type'] === 'spacer') {
+                if ($lastSpacer) {
+                    continue;
+                }
+                $lastSpacer = true;
+            } else {
+                $lastSpacer = false;
+            }
+            $collapsed[] = $b;
+        }
+        while (!empty($collapsed) && $collapsed[0]['type'] === 'spacer') {
+            array_shift($collapsed);
+        }
+        while (!empty($collapsed) && end($collapsed)['type'] === 'spacer') {
+            array_pop($collapsed);
+        }
+
+        return $collapsed;
+    }
+
+    /**
+     * Render a pre-classified block sequence (from {@see parseStationDetails}
+     * or {@see classifyListItems}) into <w:p> paragraphs suitable for inlining
+     * inside a table cell. Shared between the legacy multi-line string path
+     * and the structured-array path so both render identically.
+     *
+     * @param list<array{type: string, text?: string}> $blocks
+     */
+    private function renderStationBlocksXml(array $blocks, string $basePPr, ?int $bulletNumId): string
+    {
         if (empty($blocks)) {
             return '';
         }
 
+        // Bullet paragraphs intentionally do NOT inherit the host paragraph's
+        // pPr, because that pPr already carries the host's bullet numId for
+        // exactly this purpose; reusing it verbatim would double-indent. We
+        // build a clean bullet pPr instead.
         $bulletPPr = $bulletNumId !== null
             ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
                 . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>'
             : '<w:pPr><w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
 
+        // Non-bullet paragraphs (date/title/spacer) inherit the host paragraph
+        // pPr but with any list-bullet numPr stripped — otherwise the title
+        // line would inherit the bullet styling from the host paragraph.
+        $plainPPr = $this->stripNumPr($basePPr);
+
         $out = '';
         foreach ($blocks as $b) {
             switch ($b['type']) {
                 case 'spacer':
-                    // Empty paragraph inheriting the cell default (vertical breath)
-                    $out .= '<w:p>' . $basePPr . '</w:p>';
+                    $out .= '<w:p>' . $plainPPr . '</w:p>';
                     break;
 
                 case 'date':
                     $text = $this->escapeForWordXml((string) ($b['text'] ?? ''));
-                    $out .= '<w:p>' . $basePPr
+                    $out .= '<w:p>' . $plainPPr
                         . '<w:r><w:rPr><w:b/></w:rPr>'
                         . '<w:t xml:space="preserve">' . $text . '</w:t></w:r>'
                         . '</w:p>';
@@ -5256,7 +5413,7 @@ class SynaformController extends AbstractController
                 case 'text':
                 default:
                     $text = $this->escapeForWordXml((string) ($b['text'] ?? ''));
-                    $out .= '<w:p>' . $basePPr
+                    $out .= '<w:p>' . $plainPPr
                         . '<w:r><w:t xml:space="preserve">' . $text . '</w:t></w:r>'
                         . '</w:p>';
                     break;
@@ -5264,5 +5421,44 @@ class SynaformController extends AbstractController
         }
 
         return $out;
+    }
+
+    /**
+     * Remove `<w:numPr>...</w:numPr>` from a paragraph's `<w:pPr>` block so a
+     * non-bullet paragraph (date header, position title, spacer) inherits the
+     * host's font / size / indent without inheriting its bullet bullet.
+     */
+    private function stripNumPr(string $pPrXml): string
+    {
+        if ($pPrXml === '') {
+            return '';
+        }
+        $stripped = preg_replace('#<w:numPr\b.*?</w:numPr>#s', '', $pPrXml);
+        return is_string($stripped) ? $stripped : $pPrXml;
+    }
+
+    /**
+     * Whether a table column should render its list items with structured
+     * date/title/bullet detection (the HR-profile layout) vs. flat bullets.
+     *
+     * Opt-in via designer flag (`structured: true` on the column) OR — for
+     * back-compat with HR templates that have always relied on this — by
+     * convention for any column whose key is `details`.
+     *
+     * @param array<string, mixed> $col
+     */
+    private function isStructuredListColumn(array $col): bool
+    {
+        if (($col['type'] ?? '') !== 'list') {
+            return false;
+        }
+        if (!empty($col['structured'])) {
+            return true;
+        }
+        $designer = $col['designer'] ?? null;
+        if (is_array($designer) && !empty($designer['structured'])) {
+            return true;
+        }
+        return strtolower((string) ($col['key'] ?? '')) === 'details';
     }
 }
