@@ -1855,7 +1855,7 @@ export default {
           <label class="tx-label">${T("variables.import_pick_template")}</label>
           <div class="flex items-center gap-2 flex-wrap">
             <select id="tx-tplimport-picker" class="tx-select" style="max-width:360px">${pickerOptions}</select>
-            <button data-action="variables-tplimport-load" class="tx-btn tx-btn-sm"${loading ? " disabled" : ""}>${ICONS.sparkle} ${T("variables.detect_placeholders")}</button>
+            <button data-action="variables-tplimport-load" class="tx-btn tx-btn-sm"${loading ? " disabled" : ""}>${ICONS.sparkle} ${T("templates.detect_placeholders")}</button>
           </div>
           <p class="text-xs tx-secondary">${T("variables.import_pick_template_hint")}</p>
         </div>
