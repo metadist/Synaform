@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.2.1";
+const TX_VERSION = "v3.2.2";
 
 export default {
   mount(el, context) {
@@ -1535,16 +1535,39 @@ export default {
           ? T("dashboard.change_model")
           : T("dashboard.configure_model");
 
-        return `<button type="button" data-action="open-ai-settings" data-capability="${escHtml(capability)}" class="w-full text-left flex items-start justify-between gap-3 py-3 px-3 rounded-md transition-colors hover:bg-[var(--brand-alpha-light)]" style="background:transparent;border:1px solid transparent">
-          <div class="min-w-0 flex-1">
-            <div class="text-xs uppercase tracking-wider tx-secondary font-semibold">${escHtml(label)}</div>
-            <div class="text-xs tx-secondary mt-0.5">${escHtml(role)}</div>
-            <div class="mt-1.5 flex items-center flex-wrap gap-1">${valueLine}</div>
-          </div>
-          <div class="text-right flex flex-col items-end gap-1 shrink-0">
-            <span class="text-xs tx-link inline-flex items-center gap-1">${cta} ${ICONS.link}</span>
-          </div>
-        </button>`;
+        // Curated recommendation chips. The backend filters to models
+        // actually present in this instance's catalogue and excludes
+        // the model the user is already on.
+        const recs = Array.isArray(slot.recommended) ? slot.recommended : [];
+        const recsBlock = recs.length
+          ? `<div class="mt-2 text-xs">
+              <div class="tx-secondary mb-1">${T("dashboard.recommended_label")}</div>
+              <div class="flex flex-wrap gap-1.5">
+                ${recs
+                  .map(
+                    (r) =>
+                      `<button type="button" data-action="open-ai-settings" data-capability="${escHtml(capability)}" class="tx-badge" title="${escHtml(r.reason || "")}" style="background:var(--bg-card);border:1px solid var(--divider);color:var(--txt-primary);cursor:pointer;font-weight:500">
+                        ${escHtml(r.label || r.name || "")}
+                      </button>`,
+                  )
+                  .join("")}
+              </div>
+            </div>`
+          : "";
+
+        return `<div class="rounded-md transition-colors" style="border:1px solid transparent">
+          <button type="button" data-action="open-ai-settings" data-capability="${escHtml(capability)}" class="w-full text-left flex items-start justify-between gap-3 py-3 px-3 rounded-md transition-colors hover:bg-[var(--brand-alpha-light)]" style="background:transparent;border:none;cursor:pointer">
+            <div class="min-w-0 flex-1">
+              <div class="text-xs uppercase tracking-wider tx-secondary font-semibold">${escHtml(label)}</div>
+              <div class="text-xs tx-secondary mt-0.5">${escHtml(role)}</div>
+              <div class="mt-1.5 flex items-center flex-wrap gap-1">${valueLine}</div>
+            </div>
+            <div class="text-right flex flex-col items-end gap-1 shrink-0">
+              <span class="text-xs tx-link inline-flex items-center gap-1">${cta} ${ICONS.link}</span>
+            </div>
+          </button>
+          ${recsBlock ? `<div class="px-3 pb-3">${recsBlock}</div>` : ""}
+        </div>`;
       };
 
       return `<div class="space-y-1">

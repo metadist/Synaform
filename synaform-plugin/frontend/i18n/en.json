@@ -387,6 +387,7 @@
     "unconfigured": "Not configured",
     "configure_model": "Configure",
     "change_model": "Change in settings",
+    "recommended_label": "Recommended for synaform (click to switch):",
     "cost_hint": "Tip: image scans are the dominant cost \u2014 each JPG/PNG triggers one Vision-AI roundtrip (typically 5\u201360 s). Document files (PDF/DOCX/\u2026) go through local Tika first and only fall back to Vision-AI when Tika returns empty/low-quality text."
   },
   "export": {

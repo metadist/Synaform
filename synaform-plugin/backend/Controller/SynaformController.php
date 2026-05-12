@@ -6,6 +6,7 @@ namespace Plugin\Synaform\Controller;
 
 use App\Entity\User;
 use App\Repository\ConfigRepository;
+use App\Repository\ModelRepository;
 use App\Repository\PluginDataRepository;
 use App\AI\Service\AiFacade;
 use App\Service\File\FileProcessor;
@@ -83,6 +84,7 @@ class SynaformController extends AbstractController
         private ConfigRepository $configRepository,
         private RateLimitService $rateLimitService,
         private ModelConfigService $modelConfigService,
+        private ModelRepository $modelRepository,
         private LoggerInterface $logger,
         private AiFacade $aiFacade,
         private FileProcessor $fileProcessor,
@@ -217,6 +219,7 @@ class SynaformController extends AbstractController
                 'model_name' => $chatModelId ? $this->modelConfigService->getModelName((int) $chatModelId) : null,
                 'role' => 'information_processing',
                 'description' => 'Runs the AI prompts behind "Read files & auto-fill" and the variable-resolution extraction step. Called once per dataset, after all source documents have been turned into text.',
+                'recommended' => $this->recommendedModelsFor('chat', (int) ($chatModelId ?? 0)),
             ],
             'vision' => [
                 'provider' => $picTextProvider,
@@ -224,6 +227,7 @@ class SynaformController extends AbstractController
                 'model_name' => $picTextModelName,
                 'role' => 'image_processing',
                 'description' => 'Reads text out of uploaded JPG/PNG scans and out of low-quality PDF pages (fallback). Called once per image; this is the dominant cost when the dataset sources are scans.',
+                'recommended' => $this->recommendedModelsFor('pic2text', (int) ($picTextModelId ?? 0)),
             ],
         ];
 
@@ -248,6 +252,77 @@ class SynaformController extends AbstractController
             ],
             'generated_at' => date('c'),
         ]);
+    }
+
+    /**
+     * Curated list of models we know give good results for synaform's
+     * specific workload (structured field extraction from documents and
+     * OCR on scanned PDFs/images). The frontend surfaces this in the
+     * System Info card so users coming back to a degraded extraction
+     * have a one-click route to a known-good model.
+     *
+     * Each entry is matched against the synaplan model catalogue (BMODELS)
+     * by `service` + `model_id` (= BPROVID). Entries that aren't in the
+     * catalogue are silently dropped so we never advertise a model the
+     * user can't actually pick.
+     *
+     * The currently configured model is excluded from the recommendation
+     * list — recommending what someone is already using just adds noise.
+     *
+     * @return list<array{service: string, model_id: string, label: string, reason: string}>
+     */
+    private function recommendedModelsFor(string $capability, int $currentModelId): array
+    {
+        $catalog = match ($capability) {
+            'chat' => [
+                ['service' => 'Anthropic', 'model_id' => 'claude-sonnet-4-6', 'label' => 'Claude Sonnet 4.6', 'reason' => 'Reliable structured JSON, strong field extraction.'],
+                ['service' => 'OpenAI',    'model_id' => 'gpt-5.4',           'label' => 'GPT-5.4',           'reason' => 'Best-in-class accuracy on long documents.'],
+                ['service' => 'Google',    'model_id' => 'gemini-2.5-pro',    'label' => 'Gemini 2.5 Pro',    'reason' => 'Excellent for long context + multilingual sources.'],
+                ['service' => 'Anthropic', 'model_id' => 'claude-haiku-4-5-20251001', 'label' => 'Claude Haiku 4.5', 'reason' => 'Fastest reliable JSON-mode option.'],
+            ],
+            'pic2text', 'vision' => [
+                ['service' => 'Google',    'model_id' => 'gemini-2.5-pro',  'label' => 'Gemini 2.5 Pro (Vision)',    'reason' => 'Best OCR quality, handles complex layouts.'],
+                ['service' => 'Anthropic', 'model_id' => 'claude-sonnet-4-6', 'label' => 'Claude Sonnet 4.6 (Vision)', 'reason' => 'Excellent on handwriting and noisy scans.'],
+                ['service' => 'OpenAI',    'model_id' => 'gpt-5.4',         'label' => 'GPT-5.4 (Vision)',           'reason' => 'Strong OCR + table extraction.'],
+                ['service' => 'Google',    'model_id' => 'gemini-2.5-flash', 'label' => 'Gemini 2.5 Flash (Vision)',  'reason' => 'Fast + cheap fallback for simple pages.'],
+            ],
+            default => [],
+        };
+
+        $tag = $capability === 'chat' ? 'chat' : 'pic2text';
+
+        // The same provider+model id can appear twice in BMODELS — once
+        // with tag=chat and once with tag=pic2text (e.g. Claude Sonnet
+        // 4.6 + Claude Sonnet 4.6 (Vision)). Pick the row that matches
+        // the capability we're recommending for.
+        $catalogEntries = $this->modelRepository->findByTag($tag, true);
+        $byKey = [];
+        foreach ($catalogEntries as $row) {
+            $byKey[strtolower($row->getService()) . '|' . strtolower($row->getProviderId() ?? '')] = $row;
+        }
+
+        $recommendations = [];
+        foreach ($catalog as $entry) {
+            $key = strtolower($entry['service']) . '|' . strtolower($entry['model_id']);
+            $model = $byKey[$key] ?? null;
+            if (!$model || $model->getId() === $currentModelId) {
+                continue;
+            }
+
+            $recommendations[] = [
+                'model_id' => $model->getId(),
+                'service' => $model->getService(),
+                'label' => $entry['label'],
+                'reason' => $entry['reason'],
+                'name' => $model->getProviderId() ?: $model->getName(),
+            ];
+
+            if (count($recommendations) >= 3) {
+                break;
+            }
+        }
+
+        return $recommendations;
     }
 
     /**
@@ -2713,24 +2788,123 @@ class SynaformController extends AbstractController
             PROMPT;
     }
 
+    /**
+     * Best-effort JSON extractor for LLM responses.
+     *
+     * Models in the wild like to wrap JSON in markdown fences, prepend
+     * "Here is the result:" prose, or — in the case of OpenAI's gpt-oss
+     * harmony format — leak `<|channel|>analysis<|message|>…<|end|>`
+     * reasoning markers into the assistant message. We strip those
+     * artefacts and then try a series of progressively looser parsers
+     * until one returns a valid associative array.
+     */
     private function parseJsonFromAiResponse(string $content): ?array
     {
+        $original = $content;
+
+        // 1. Strip Harmony / GPT-OSS channel markers like
+        //    "<|channel|>analysis<|message|>…<|end|>" so the residual
+        //    text still parses cleanly.
+        $content = preg_replace('/<\|[^|]+\|>/u', '', $content) ?? $content;
+
+        // 2. Strip leading "json" hint, BOM, zero-width chars, and trim.
+        $content = preg_replace('/^\xEF\xBB\xBF/', '', $content) ?? $content;
+        $content = trim($content);
+
+        // 3. Direct decode — happy path when the model behaved.
         $decoded = json_decode($content, true);
         if (is_array($decoded)) {
             return $decoded;
         }
 
-        if (preg_match('/```(?:json)?\s*\n?(.*?)\n?\s*```/s', $content, $match)) {
-            $decoded = json_decode($match[1], true);
+        // 4. ```json fenced block.
+        if (preg_match('/```(?:json|JSON)?\s*\n?([\s\S]*?)\n?\s*```/u', $content, $match)) {
+            $decoded = json_decode(trim($match[1]), true);
             if (is_array($decoded)) {
                 return $decoded;
             }
         }
 
-        if (preg_match('/\{[\s\S]*\}/', $content, $match)) {
+        // 5. Walk the content extracting every balanced { … } or [ … ]
+        //    block, trying each one in order. Reasoning prose often
+        //    contains its own brace-pairs ("{looks like this}") so we
+        //    can't just take the first hit.
+        $offset = 0;
+        while (($balanced = $this->extractBalancedJson($content, $offset)) !== null) {
+            $decoded = json_decode($balanced['text'], true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+            $offset = $balanced['end'];
+        }
+
+        // 6. Last resort: legacy regex (greedy, but fenced); helps when
+        //    the JSON itself is fine but the model also produced trailing
+        //    prose with braces inside it.
+        if (preg_match('/\{[\s\S]*\}/u', $content, $match)) {
             $decoded = json_decode($match[0], true);
             if (is_array($decoded)) {
                 return $decoded;
+            }
+        }
+
+        $this->logger->warning('Synaform: failed to extract JSON from AI response', [
+            'preview' => mb_substr($original, 0, 600),
+            'length' => strlen($original),
+        ]);
+
+        return null;
+    }
+
+    /**
+     * Pull the next balanced JSON object or array out of the haystack
+     * starting at $fromOffset. Walks character-by-character with a depth
+     * counter so we don't get tripped up by braces inside reasoning
+     * text or string contents.
+     *
+     * @return array{text: string, end: int}|null
+     */
+    private function extractBalancedJson(string $haystack, int $fromOffset = 0): ?array
+    {
+        $len = strlen($haystack);
+        for ($start = $fromOffset; $start < $len; $start++) {
+            $ch = $haystack[$start];
+            if ($ch !== '{' && $ch !== '[') {
+                continue;
+            }
+            $open = $ch;
+            $close = $ch === '{' ? '}' : ']';
+            $depth = 0;
+            $inString = false;
+            $escape = false;
+            for ($i = $start; $i < $len; $i++) {
+                $c = $haystack[$i];
+                if ($escape) {
+                    $escape = false;
+                    continue;
+                }
+                if ($c === '\\') {
+                    $escape = true;
+                    continue;
+                }
+                if ($c === '"') {
+                    $inString = !$inString;
+                    continue;
+                }
+                if ($inString) {
+                    continue;
+                }
+                if ($c === $open) {
+                    $depth++;
+                } elseif ($c === $close) {
+                    $depth--;
+                    if ($depth === 0) {
+                        return [
+                            'text' => substr($haystack, $start, $i - $start + 1),
+                            'end' => $i + 1,
+                        ];
+                    }
+                }
             }
         }
 

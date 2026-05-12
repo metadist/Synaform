@@ -387,6 +387,7 @@
     "unconfigured": "Nicht konfiguriert",
     "configure_model": "Einrichten",
     "change_model": "In den Einstellungen \u00e4ndern",
+    "recommended_label": "Empfohlen f\u00fcr Synaform (klicken zum Wechseln):",
     "cost_hint": "Hinweis: Bild-Scans sind der dominierende Kostenfaktor \u2014 jedes JPG/PNG l\u00f6st einen Vision-KI-Roundtrip aus (typisch 5\u201360 s). Office-Dokumente (PDF/DOCX/\u2026) werden zuerst lokal per Tika gelesen und gehen nur als Fallback an die Vision-KI, wenn Tika leeren oder schlechten Text liefert."
   },
   "export": {
