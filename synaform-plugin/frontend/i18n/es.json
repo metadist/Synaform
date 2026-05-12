@@ -378,7 +378,6 @@
     "ai_chat_role": "Ejecuta los prompts detr\u00e1s de \u00abLeer archivos y autocompletar\u00bb. Una llamada por dataset.",
     "ai_vision_label": "IA de procesamiento de im\u00e1genes",
     "ai_vision_role": "Lee texto de escaneos JPG/PNG (y fallback de PDF). Una llamada por imagen.",
-    "vision_mismatch": "Aviso: synaplan-core ignora esta selecci\u00f3n y enviar\u00e1 las llamadas de imagen a {provider}. Define BCONFIG.ai.default_vision_provider para forzar la elecci\u00f3n.",
     "provider_default": "predeterminado del proveedor",
     "cost_hint": "Sugerencia: los escaneos son el coste dominante \u2014 cada JPG/PNG dispara un viaje de ida y vuelta a la IA de visi\u00f3n (5\u201360 s). Los documentos Office se leen primero con Tika local y solo recurren a la IA de visi\u00f3n si Tika devuelve texto vac\u00edo o de baja calidad."
   },

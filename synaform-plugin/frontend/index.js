@@ -1433,23 +1433,10 @@ export default {
         const colorBg = slot.provider
           ? "background:var(--brand-alpha-light);color:var(--brand)"
           : "background:var(--bg-chip);color:var(--txt-secondary)";
-        // For the vision row the backend reports two providers: the one
-        // the user picked in the settings UI (slot.provider, derived
-        // from BCONFIG.DEFAULTMODEL.PIC2TEXT) and the one the runtime
-        // pipeline will actually use (slot.effective_provider, from
-        // AiFacade::analyzeImage's provider-resolution chain). Surface
-        // a warning when they disagree.
-        let runtimeNote = "";
-        if (slot.mismatch && slot.effective_provider) {
-          runtimeNote = `<div class="text-xs mt-1.5" style="color:var(--status-error)">
-            ${ICONS.warning} ${Tf("dashboard.vision_mismatch", { provider: slot.effective_provider })}
-          </div>`;
-        }
         return `<div class="flex items-start justify-between gap-3 py-2.5">
           <div class="min-w-0 flex-1">
             <div class="text-xs uppercase tracking-wider tx-secondary font-semibold">${escHtml(label)}</div>
             <div class="text-xs tx-secondary mt-0.5">${escHtml(role)}</div>
-            ${runtimeNote}
           </div>
           <div class="text-right">
             <span class="tx-badge" style="${colorBg}">${escHtml(provider)}</span>

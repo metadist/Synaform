@@ -378,7 +378,6 @@
     "ai_chat_role": "Runs the prompts behind \u201cRead files & auto-fill\u201d. One call per dataset.",
     "ai_vision_label": "Image processing AI",
     "ai_vision_role": "Reads text out of JPG/PNG scans (and PDF fallback). One call per image.",
-    "vision_mismatch": "Heads-up: synaplan-core ignores this selection and will route image calls to {provider} instead. Set BCONFIG.ai.default_vision_provider to override.",
     "provider_default": "provider default",
     "cost_hint": "Tip: image scans are the dominant cost \u2014 each JPG/PNG triggers one Vision-AI roundtrip (typically 5\u201360 s). Document files (PDF/DOCX/\u2026) go through local Tika first and only fall back to Vision-AI when Tika returns empty/low-quality text."
   },
