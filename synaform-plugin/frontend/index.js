@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.2.2";
+const TX_VERSION = "v3.2.3";
 
 export default {
   mount(el, context) {
@@ -2924,6 +2924,29 @@ export default {
         case "table": {
           const cols = field.columns || [];
           const rows = Array.isArray(value) ? value : [];
+
+          // Weighted column widths — list/textarea cells get the bulk of
+          // the row so multi-line content (HR profile tasks, notes) is
+          // readable. The compact text/date/number columns shrink.
+          //   list/textarea : weight 5 (≈ 60-66% with 1 wide + 2 narrow)
+          //   text          : weight 1.4
+          //   date / number : weight 1
+          // 8% is reserved for the trash-icon column.
+          const weightOf = (c) => {
+            const t = c.type || "text";
+            if (t === "list" || t === "textarea") return 5;
+            if (t === "date" || t === "number") return 1;
+            return 1.4;
+          };
+          const totalWeight = cols.reduce((s, c) => s + weightOf(c), 0) || 1;
+          const colWidths = cols.map(
+            (c) =>
+              `${((92 * weightOf(c)) / totalWeight).toFixed(2)}%`,
+          );
+          const colgroup = `<colgroup>${colWidths
+            .map((w) => `<col style="width:${w}">`)
+            .join("")}<col style="width:2.5rem"></colgroup>`;
+
           const hc = cols
             .map(
               (c) =>
@@ -2945,10 +2968,11 @@ export default {
                           .split(/\r?\n/)
                           .filter((s) => s.trim() !== "");
                     const txt = asArr.join("\n");
-                    return `<td class="py-1 px-1" style="vertical-align:top"><textarea name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" rows="${Math.max(2, asArr.length)}" class="tx-textarea text-xs" style="padding:.25rem .375rem;min-height:2.25rem;font-size:.75rem" placeholder="${T("datasets.table_list_placeholder")}">${escHtml(txt)}</textarea></td>`;
+                    const rows = Math.max(4, asArr.length);
+                    return `<td class="py-1.5 px-1.5" style="vertical-align:top"><textarea name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" rows="${rows}" class="tx-textarea text-sm" style="width:100%;display:block;box-sizing:border-box;padding:.4rem .55rem;min-height:5.25rem;resize:vertical;line-height:1.4" placeholder="${T("datasets.table_list_placeholder")}">${escHtml(txt)}</textarea></td>`;
                   }
                   if (colType === "textarea") {
-                    return `<td class="py-1 px-1" style="vertical-align:top"><textarea name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" rows="2" class="tx-textarea text-xs" style="padding:.25rem .375rem;font-size:.75rem">${escHtml(String(rawVal ?? ""))}</textarea></td>`;
+                    return `<td class="py-1.5 px-1.5" style="vertical-align:top"><textarea name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" rows="3" class="tx-textarea text-sm" style="width:100%;display:block;box-sizing:border-box;padding:.4rem .55rem;min-height:4.5rem;resize:vertical;line-height:1.4">${escHtml(String(rawVal ?? ""))}</textarea></td>`;
                   }
                   const inputType =
                     colType === "number"
@@ -2956,19 +2980,23 @@ export default {
                       : colType === "date"
                         ? "date"
                         : "text";
-                  return `<td class="py-1 px-1"><input type="${inputType}" name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" value="${escHtml(String(rawVal ?? ""))}" class="tx-input text-xs" style="padding:.25rem .375rem" /></td>`;
+                  return `<td class="py-1.5 px-1.5" style="vertical-align:top"><input type="${inputType}" name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" value="${escHtml(String(rawVal ?? ""))}" class="tx-input text-sm" style="width:100%;display:block;box-sizing:border-box;padding:.4rem .55rem" /></td>`;
                 })
                 .join("");
-              return `<tr class="tx-divider border-t">${cells}<td class="py-1 px-1 text-center" style="vertical-align:top"><button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button></td></tr>`;
+              return `<tr class="tx-divider border-t">${cells}<td class="py-1.5 px-1 text-center" style="vertical-align:top"><button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-1" style="color:var(--txt-secondary)">${ICONS.trash}</button></td></tr>`;
             })
             .join("");
           const empty =
             rows.length === 0
               ? `<tr><td colspan="${cols.length + 1}" class="py-3 text-center text-xs tx-secondary">${T("datasets.table_empty")}</td></tr>`
               : "";
-          input = `<div class="overflow-x-auto rounded" style="border:1px solid var(--divider)">
-            <table class="w-full text-left">
-              <thead><tr class="tx-divider border-b">${hc}<th class="py-1.5 px-2" style="width:2rem"></th></tr></thead>
+          // table-layout:fixed makes the colgroup widths authoritative —
+          // without it browsers fall back to content-based sizing and
+          // the list column gets squeezed by the inputs to its left.
+          input = `<div class="rounded" style="border:1px solid var(--divider);overflow:hidden">
+            <table class="w-full text-left" style="table-layout:fixed;width:100%">
+              ${colgroup}
+              <thead><tr class="tx-divider border-b">${hc}<th class="py-1.5 px-2"></th></tr></thead>
               <tbody>${dr}${empty}</tbody>
             </table>
           </div>
