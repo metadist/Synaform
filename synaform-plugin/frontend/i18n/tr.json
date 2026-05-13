@@ -348,7 +348,12 @@
     "url_refetch": "Yeniden al",
     "url_refreshed": "URL yeniden al\u0131nd\u0131",
     "url_fetched": "Al\u0131nd\u0131",
-    "url_fetch_warning": "Eklendi ancak al\u0131nan sonu\u00e7: {error}"
+    "url_fetch_warning": "Eklendi ancak al\u0131nan sonu\u00e7: {error}",
+    "section_variables_hint": "\u015eablonlar\u0131n g\u00f6rece\u011fi her anahtar ve de\u011ferin geldi\u011fi kaynak. \u0130stedi\u011finiz de\u011feri burada ge\u00e7ersiz k\u0131labilirsiniz.",
+    "tab_details": "Ayr\u0131nt\u0131lar\u0131 d\u00fczenle",
+    "tab_generate": "Belgeleri olu\u015ftur",
+    "tab_sources": "Kaynak belge y\u00fckle",
+    "tab_variables": "T\u00fcm de\u011fi\u015fkenler (geli\u015fmi\u015f)"
   },
   "preview": {
     "title": "Canl\u0131 \u00f6nizleme",
@@ -379,7 +384,11 @@
     "ai_vision_label": "G\u00f6r\u00fcnt\u00fc i\u015fleme YZ",
     "ai_vision_role": "JPG/PNG taramalar\u0131ndan (ve PDF yede\u011finden) metin okur. G\u00f6rsel ba\u015f\u0131na bir \u00e7a\u011fr\u0131.",
     "provider_default": "sa\u011flay\u0131c\u0131 varsay\u0131lan\u0131",
-    "cost_hint": "\u0130pucu: g\u00f6r\u00fcnt\u00fc taramalar\u0131 bask\u0131n maliyettir \u2014 her JPG/PNG bir Vision-YZ gidi\u015f-d\u00f6n\u00fc\u015f\u00fc tetikler (genelde 5\u201360 sn). Office belgeleri \u00f6nce yerel Tika ile okunur ve yaln\u0131zca Tika bo\u015f/d\u00fc\u015f\u00fck kaliteli metin d\u00f6nd\u00fcrd\u00fc\u011f\u00fcnde Vision-YZ'ye ge\u00e7er."
+    "cost_hint": "\u0130pucu: g\u00f6r\u00fcnt\u00fc taramalar\u0131 bask\u0131n maliyettir \u2014 her JPG/PNG bir Vision-YZ gidi\u015f-d\u00f6n\u00fc\u015f\u00fc tetikler (genelde 5\u201360 sn). Office belgeleri \u00f6nce yerel Tika ile okunur ve yaln\u0131zca Tika bo\u015f/d\u00fc\u015f\u00fck kaliteli metin d\u00f6nd\u00fcrd\u00fc\u011f\u00fcnde Vision-YZ'ye ge\u00e7er.",
+    "change_model": "Ayarlardan de\u011fi\u015ftir",
+    "configure_model": "Yap\u0131land\u0131r",
+    "recommended_label": "Synaform i\u00e7in \u00f6nerilen (de\u011fi\u015ftirmek i\u00e7in t\u0131klay\u0131n):",
+    "unconfigured": "Yap\u0131land\u0131r\u0131lmam\u0131\u015f"
   },
   "export": {
     "title": "Veri k\u00fcmelerini d\u0131\u015fa aktar",
