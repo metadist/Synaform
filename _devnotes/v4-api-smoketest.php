@@ -390,27 +390,107 @@ if ($zip->open($tmpOut) !== true) {
     fail("downloaded file is not a valid ZIP / DOCX");
 }
 $xml = $zip->getFromName('word/document.xml');
+$headerXmls = [];
+$footerXmls = [];
+for ($i = 0; $i < $zip->numFiles; ++$i) {
+    $entry = $zip->statIndex($i)['name'] ?? '';
+    if (preg_match('#^word/header\d*\.xml$#', $entry)) {
+        $headerXmls[$entry] = $zip->getFromName($entry) ?: '';
+    } elseif (preg_match('#^word/footer\d*\.xml$#', $entry)) {
+        $footerXmls[$entry] = $zip->getFromName($entry) ?: '';
+    }
+}
 $zip->close();
 if (!is_string($xml) || $xml === '') {
     fail("DOCX has no word/document.xml");
 }
 
-// 7a. leftover {{...}} placeholders?
-$leftover = [];
-if (preg_match_all('~<w:p\b[^>]*>(?:(?!</w:p>).)*?</w:p>~s', $xml, $paras)) {
-    foreach ($paras[0] as $p) {
-        $flat = '';
-        if (preg_match_all('~<w:t[^>]*>([^<]*)</w:t>~', $p, $tm)) {
-            $flat = implode('', $tm[1]);
-        }
-        if (preg_match_all('~\{\{([^{}]+)\}\}~', $flat, $phm)) {
-            foreach ($phm[1] as $k) {
-                $leftover[$k] = true;
+// 7a. leftover {{...}} placeholders — body + headers + footers.
+$collectLeftover = static function (string $xml): array {
+    $out = [];
+    if (preg_match_all('~<w:p\b[^>]*>(?:(?!</w:p>).)*?</w:p>~s', $xml, $paras)) {
+        foreach ($paras[0] as $p) {
+            $flat = '';
+            if (preg_match_all('~<w:t[^>]*>([^<]*)</w:t>~', $p, $tm)) {
+                $flat = implode('', $tm[1]);
+            }
+            if (preg_match_all('~\{\{([^{}]+)\}\}~', $flat, $phm)) {
+                foreach ($phm[1] as $k) {
+                    $out[$k] = true;
+                }
             }
         }
     }
+    return $out;
+};
+$leftover = $collectLeftover($xml);
+foreach ($headerXmls as $hxml) {
+    foreach ($collectLeftover($hxml) as $k => $_) {
+        $leftover[$k] = true;
+    }
+}
+foreach ($footerXmls as $fxml) {
+    foreach ($collectLeftover($fxml) as $k => $_) {
+        $leftover[$k] = true;
+    }
 }
 $leftoverList = array_keys($leftover);
+
+// 7a-bis. Header substitution check — the test dataset puts known sentinel
+// values in `fullname` / `target_position`. If the v4 hhff template's header
+// placeholders (`{{fullname}}` / `{{target_position}}` in the upper-right
+// "Profil von …" line) were correctly substituted, those sentinels must
+// appear in at least one header part. This is the assertion the customer
+// asked us to add; without it, regressions in cleanTemplateMacros's
+// header-pass would silently slip through.
+$headerSubsCheck = ['ok' => true, 'detail' => '(no headers in template — skipped)'];
+if (!empty($headerXmls)) {
+    $headerJoined = implode("\n", array_values($headerXmls));
+    $sentinels = [
+        'fullname'        => $fieldValues['fullname'] ?? null,
+        'target_position' => $fieldValues['target_position'] ?? null,
+    ];
+    $missingSentinels = [];
+    foreach ($sentinels as $key => $expected) {
+        if ($expected === null || $expected === '') {
+            continue;
+        }
+        // Word may break the substituted text across runs again, so collapse
+        // every header part down to its concatenated <w:t> text first.
+        $flatHeaderText = '';
+        if (preg_match_all('~<w:t[^>]*>([^<]*)</w:t>~', $headerJoined, $tm)) {
+            $flatHeaderText = implode('', $tm[1]);
+        }
+        if (str_contains($flatHeaderText, (string) $expected)) {
+            continue;
+        }
+        // Header may simply not USE this placeholder — check whether the
+        // pristine template carried it. Only fail if the template DID and
+        // the substitution was lost.
+        $hadIt = false;
+        foreach ($headerXmls as $hxml) {
+            $flat = '';
+            if (preg_match_all('~<w:t[^>]*>([^<]*)</w:t>~', $hxml, $tm)) {
+                $flat = implode('', $tm[1]);
+            }
+            if (str_contains($flat, '{{' . $key . '}}') || str_contains($hxml, '{{' . $key . '}}')) {
+                $hadIt = true;
+                break;
+            }
+        }
+        if ($hadIt) {
+            $missingSentinels[] = "$key (expected \"$expected\")";
+        }
+    }
+    if (empty($missingSentinels)) {
+        $headerSubsCheck['detail'] = sprintf('OK — %d header part(s) processed', count($headerXmls));
+    } else {
+        $headerSubsCheck = [
+            'ok' => false,
+            'detail' => 'header placeholders not substituted: ' . implode(', ', $missingSentinels),
+        ];
+    }
+}
 
 // 7b. font tally on body runs.
 $fontTally = [];
@@ -464,7 +544,11 @@ http('DELETE', "$base/templates/$templateId", null, $cookies);
 $exitCode = 0;
 $problems = [];
 if (!empty($leftoverList)) {
-    $problems[] = "leftover placeholders: " . implode(', ', $leftoverList);
+    $problems[] = "leftover placeholders (body+headers+footers): " . implode(', ', $leftoverList);
+    $exitCode = 1;
+}
+if (!$headerSubsCheck['ok']) {
+    $problems[] = $headerSubsCheck['detail'];
     $exitCode = 1;
 }
 if ($totalRuns > 0 && $totalRuns - $noFontRuns < 0.5 * $totalRuns) {
@@ -486,6 +570,7 @@ if ($exitCode === 0) {
     printf("  - generate via /generate endpoint:  OK (document %s)\n", $documentId);
     printf("  - download + DOCX integrity:        OK (%d bytes)\n", $bytes);
     printf("  - placeholder substitution:         OK (no leftover {{...}})\n");
+    printf("  - header/footer substitution:       %s\n", $headerSubsCheck['detail']);
     printf("  - font preservation:                OK (%s)\n", implode(', ', array_map(
         static fn ($k, $v) => $k . ' × ' . $v,
         array_keys($fontTally),

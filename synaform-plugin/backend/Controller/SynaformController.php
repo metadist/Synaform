@@ -2531,40 +2531,44 @@ class SynaformController extends AbstractController
             return [];
         }
 
-        $xml = $zip->getFromName('word/document.xml');
-        $zip->close();
-
-        if ($xml === false) {
-            return [];
-        }
-
-        // Strip namespace prefixes from tags so DOMDocument can find elements by local name
-        $xml = preg_replace('/<(\/?)(?:w|mc|r|wp|wps|a|v|o):/', '<$1', $xml);
-        $xml = preg_replace('/\s+xmlns[^=]*="[^"]*"/', '', $xml);
-
-        $doc = new \DOMDocument();
-        @$doc->loadXML($xml);
-
-        $paragraphs = $doc->getElementsByTagName('p');
+        // Walk every part that can carry placeholder text — main body, every
+        // header part, every footer part — so a `{{fullname}}` that lives in
+        // a Word header is detected by "Detect placeholders" and surfaces in
+        // the Variables tab, the same way body placeholders do.
         $found = [];
-
-        foreach ($paragraphs as $paragraph) {
-            $text = '';
-            $runs = $paragraph->getElementsByTagName('r');
-            foreach ($runs as $run) {
-                $tNodes = $run->getElementsByTagName('t');
-                foreach ($tNodes as $t) {
-                    $text .= $t->textContent;
-                }
+        foreach ($this->collectDocumentPartNames($zip) as $partName) {
+            $xml = $zip->getFromName($partName);
+            if ($xml === false) {
+                continue;
             }
 
-            if (preg_match_all('/\{\{([^}]+)\}\}/', $text, $matches)) {
-                foreach ($matches[1] as $key) {
-                    $key = trim($key);
-                    $found[$key] = true;
+            // Strip namespace prefixes from tags so DOMDocument can find elements by local name
+            $xml = preg_replace('/<(\/?)(?:w|mc|r|wp|wps|a|v|o):/', '<$1', $xml);
+            $xml = preg_replace('/\s+xmlns[^=]*="[^"]*"/', '', $xml);
+
+            $doc = new \DOMDocument();
+            @$doc->loadXML($xml);
+
+            $paragraphs = $doc->getElementsByTagName('p');
+            foreach ($paragraphs as $paragraph) {
+                $text = '';
+                $runs = $paragraph->getElementsByTagName('r');
+                foreach ($runs as $run) {
+                    $tNodes = $run->getElementsByTagName('t');
+                    foreach ($tNodes as $t) {
+                        $text .= $t->textContent;
+                    }
+                }
+
+                if (preg_match_all('/\{\{([^}]+)\}\}/', $text, $matches)) {
+                    foreach ($matches[1] as $key) {
+                        $key = trim($key);
+                        $found[$key] = true;
+                    }
                 }
             }
         }
+        $zip->close();
 
         $placeholders = [];
         foreach (array_keys($found) as $key) {
@@ -4055,35 +4059,75 @@ class SynaformController extends AbstractController
             return $cleanedPath;
         }
 
-        $xml = $zip->getFromName('word/document.xml');
-        if ($xml === false) {
-            $zip->close();
-            return $cleanedPath;
+        // Apply the same normalisation to every "document part" that can carry
+        // placeholder text: the main body PLUS every word/header*.xml and
+        // word/footer*.xml. Without this, placeholders that the customer put
+        // into a Word header / footer ("Profil von {{fullname}}") never get
+        // replaced — PhpWord's setValue does walk those parts on its own, but
+        // it cannot find a placeholder whose `{{` and `}}` were split across
+        // multiple `<w:r>` runs by Word's autocorrect, and this method's
+        // job is to defragment those runs so PhpWord can see them.
+        foreach ($this->collectDocumentPartNames($zip) as $partName) {
+            $xml = $zip->getFromName($partName);
+            if ($xml === false) {
+                continue;
+            }
+
+            $xml = preg_replace('/\{(<[^>]*>)*\{/', '{{', $xml);
+            $xml = preg_replace('/\}(<[^>]*>)*\}/', '}}', $xml);
+
+            $xml = preg_replace_callback('/\{\{(.*?)\}\}/s', function ($match) {
+                $inner = strip_tags($match[1]);
+                $inner = preg_replace('/\s+/', '', $inner);
+                return '{{' . trim($inner) . '}}';
+            }, $xml);
+
+            // Font preservation pass: every paragraph that hosts a {{placeholder}}
+            // gets its placeholder runs guaranteed an explicit <w:rPr> with the
+            // surrounding font/size, so the values that PhpWord swaps in keep the
+            // designer-intended typeface instead of falling back to the document
+            // default (Times New Roman / theme.minorHAnsi). Critical when the
+            // template was authored in Word with a non-default body font (e.g.
+            // Arial, Helvetica-Light) and the placeholder runs lost their explicit
+            // font during Word autocorrect / cut-paste.
+            $xml = $this->normalizePlaceholderRunFonts($xml);
+
+            $zip->addFromString($partName, $xml);
         }
 
-        $xml = preg_replace('/\{(<[^>]*>)*\{/', '{{', $xml);
-        $xml = preg_replace('/\}(<[^>]*>)*\}/', '}}', $xml);
-
-        $xml = preg_replace_callback('/\{\{(.*?)\}\}/s', function ($match) {
-            $inner = strip_tags($match[1]);
-            $inner = preg_replace('/\s+/', '', $inner);
-            return '{{' . trim($inner) . '}}';
-        }, $xml);
-
-        // Font preservation pass: every paragraph that hosts a {{placeholder}}
-        // gets its placeholder runs guaranteed an explicit <w:rPr> with the
-        // surrounding font/size, so the values that PhpWord swaps in keep the
-        // designer-intended typeface instead of falling back to the document
-        // default (Times New Roman / theme.minorHAnsi). Critical when the
-        // template was authored in Word with a non-default body font (e.g.
-        // Arial, Helvetica-Light) and the placeholder runs lost their explicit
-        // font during Word autocorrect / cut-paste.
-        $xml = $this->normalizePlaceholderRunFonts($xml);
-
-        $zip->addFromString('word/document.xml', $xml);
         $zip->close();
 
         return $cleanedPath;
+    }
+
+    /**
+     * Return the names of every "document part" inside a DOCX zip that can
+     * carry user-visible text and therefore placeholders: the main body
+     * (`word/document.xml`) plus every `word/header*.xml` and
+     * `word/footer*.xml`. Order is stable so callers can iterate
+     * deterministically.
+     *
+     * Note: footnotes / endnotes / glossary parts are intentionally excluded
+     * — neither Synaform's templates nor any production workflow we know of
+     * places `{{placeholders}}` there, and including them would also expose
+     * us to PhpWord's known-flaky behaviour around those parts.
+     *
+     * @return list<string>
+     */
+    private function collectDocumentPartNames(\ZipArchive $zip): array
+    {
+        $names = ['word/document.xml'];
+        for ($i = 0; $i < $zip->numFiles; ++$i) {
+            $stat = $zip->statIndex($i);
+            $entry = $stat['name'] ?? '';
+            if ($entry === '' || $entry === 'word/document.xml') {
+                continue;
+            }
+            if (preg_match('#^word/(header|footer)\d*\.xml$#', $entry)) {
+                $names[] = $entry;
+            }
+        }
+        return $names;
     }
 
     /**
@@ -5261,10 +5305,32 @@ class SynaformController extends AbstractController
             return;
         }
 
-        $xml = $zip->getFromName('word/document.xml');
-        if ($xml === false) {
-            $zip->close();
+        // Run the SYNCB → SDT conversion on every part that PhpWord's setValue
+        // touched (main body + every header + every footer). Without the
+        // header/footer pass, a checkbox the customer placed inside a header
+        // ("[ ] Vertraulich") would render as `[[SYNCB|on|☒|☐]]` literal text
+        // in the final DOCX.
+        foreach ($this->collectDocumentPartNames($zip) as $partName) {
+            $this->convertCheckboxMarkersInPart($zip, $partName);
+        }
 
+        $zip->close();
+    }
+
+    /**
+     * Convert every `[[SYNCB|state|✓|✗]]` marker inside a single document
+     * part into a real Word content-control checkbox. Splits one Word run
+     * into up to two surviving text-runs plus an `<w:sdt>` per marker, and
+     * loops so a single run carrying multiple markers is fully converted.
+     *
+     * Side effects: writes the rewritten XML back into the zip, and ensures
+     * the part's root element declares `xmlns:w14` so Word/LibreOffice
+     * actually render the SDT.
+     */
+    private function convertCheckboxMarkersInPart(\ZipArchive $zip, string $partName): void
+    {
+        $xml = $zip->getFromName($partName);
+        if ($xml === false) {
             return;
         }
 
@@ -5287,7 +5353,26 @@ class SynaformController extends AbstractController
         //   7 = text after the marker.
         // The body uses [^<]* to stay inside a single text node (no nested
         // elements), which is exactly what PhpWord setValue produces.
-        $pattern = '#<w:r\b[^>]*>(<w:rPr\b[^/]*?>.*?</w:rPr>|<w:rPr\b[^/]*?/>)?(<w:t\b[^>]*>)([^<]*?)\[\[SYNCB\|(on|off)\|([^|]+)\|([^\]]+)\]\]([^<]*?)</w:t></w:r>#s';
+        //
+        // The rPr inner content uses a tempered greedy token so the lazy
+        // `.*?</w:rPr>` cannot backtrack across a run boundary. Without this
+        // guard, on the SECOND iteration of the loop (when the previous
+        // iteration just emitted an SDT directly before a remaining
+        // SYNCB-bearing run), the regex would start at the SDT-internal
+        // `<w:r>`, fail to find SYNCB inside that run's `<w:t>`, then
+        // backtrack the rPr's `.*?` to the *next* `</w:rPr>` — which lives
+        // inside the leftover run AFTER `</w:sdtContent></w:sdt>`. The
+        // engine would then match successfully but the captured rPr would
+        // contain the closing SDT tags. The replacement re-emits that rPr
+        // twice (around the new SDT), producing an over-closed SDT and a
+        // bare `<w:r>`, which Word + LibreOffice both reject as malformed.
+        // Replicate with the test in `_devnotes/v4-api-smoketest.php` on
+        // the v4 hhff template and inspect `word/document.xml` for an
+        // unbalanced `<w:sdt>` count.
+        $rPrInner = '(?:(?!</w:rPr>|<w:r\b|</w:r>).)*?';
+        $rPrAlt = '(<w:rPr\b[^/]*?>' . $rPrInner . '</w:rPr>|<w:rPr\b[^/]*?/>)?';
+        $pattern = '#<w:r\b[^>]*>' . $rPrAlt
+            . '(<w:t\b[^>]*>)([^<]*?)\[\[SYNCB\|(on|off)\|([^|]+)\|([^\]]+)\]\]([^<]*?)</w:t></w:r>#s';
 
         // Iterate so that runs containing multiple SYNCB markers all get
         // converted. Each pass splits one marker out into its own SDT plus
@@ -5331,8 +5416,6 @@ class SynaformController extends AbstractController
             );
 
             if ($newXml === null) {
-                $zip->close();
-
                 return;
             }
             if ($passCount === 0) {
@@ -5341,25 +5424,25 @@ class SynaformController extends AbstractController
         }
 
         if ($count === 0) {
-            $zip->close();
-
             return;
         }
 
         // Word's content-control checkbox lives in the w14 namespace. Older
-        // templates (Word 2007) may not declare it — inject it on the root
-        // <w:document> element so Word/LibreOffice render the SDT correctly.
+        // templates (Word 2007) may not declare it — inject it on the part's
+        // root element (`<w:document>` for the body, `<w:hdr>` for headers,
+        // `<w:ftr>` for footers) so Word/LibreOffice render the SDT
+        // correctly. Without this, the SDT renders as plain text instead of
+        // a clickable checkbox.
         if (!$hasW14) {
             $newXml = preg_replace(
-                '#<w:document\b([^>]*?)>#',
-                '<w:document$1 xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">',
+                '#<w:(document|hdr|ftr)\b([^>]*?)>#',
+                '<w:$1$2 xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">',
                 $newXml,
                 1
             ) ?? $newXml;
         }
 
-        $zip->addFromString('word/document.xml', $newXml);
-        $zip->close();
+        $zip->addFromString($partName, $newXml);
     }
 
     /**

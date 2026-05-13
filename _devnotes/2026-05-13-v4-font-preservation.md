@@ -161,7 +161,146 @@ Net diff: 1 file, +205 / -16 lines.
 
 - All offline regression tests still pass:
   `phase-a-lists.php`, `phase-b-stations.php`, `phase-c-tables.php`,
-  `phase-d-layout.php`, `phase-t-tableblock.php`.
+  `phase-d-layout.php`, `phase-t-tableblock.php`,
+  and the new `phase-e-checkbox-sdt.php` (see follow-up below).
 - New live bench documented above; can be re-run any time with
   `docker compose exec backend php /tmp/synaform-template-bench.php
   /tmp/v4/Profil_hhff_DE_v4.docx /tmp/v4/Profil_NeedleHaystack_DE_v4.docx`.
+
+## Follow-up: SDT-overrun bug surfaced by the v4 hhff template
+
+After shipping the font-preservation pass, generating a real candidate
+through the v4 hhff template produced a DOCX that Word and LibreOffice
+both refused to open ("unbalanced `</w:sdt>` end tag"). Inspection of
+`word/document.xml` showed 2 `<w:sdt>` opens vs 3 `</w:sdt>` closes — the
+checkbox-SDT post-pass had emitted one orphan close + a bare `<w:r>` for
+the second SYNCB marker in the same paragraph.
+
+### Root cause
+
+`convertCheckboxMarkersToContentControls()` runs in a loop because a
+single Word run can contain multiple `[[SYNCB|…]]` markers (the
+canonical hhff `{{checkb.X.yes}} Ja     {{checkb.X.no}} Nein` shape
+emits two markers inside one `<w:t>`). The regex was:
+
+```
+<w:r\b[^>]*>(<w:rPr\b[^/]*?>.*?</w:rPr>|<w:rPr\b[^/]*?/>)?(<w:t…>) … SYNCB … </w:t></w:r>
+```
+
+On iteration 2, the regex engine scanned forward, hit the `<w:r>`
+inside the SDT that iteration 1 had just emitted, found no SYNCB inside
+its `<w:t>`, and **backtracked the lazy `.*?` in the rPr alternative
+until it found the next `</w:rPr>`** — which lives inside the leftover
+*next* run, AFTER `</w:sdtContent></w:sdt>`. The match then succeeded,
+but the captured rPr fragment now contained the SDT-close. The
+replacement re-emitted that rPr twice (around `$before` and `$after`),
+producing one extra `</w:sdtContent></w:sdt>` and a bare `<w:r>` for
+the second checkbox glyph.
+
+Reproduction is deterministic and embedded in the new
+`tests/phase-e-checkbox-sdt.php`.
+
+### Fix
+
+Replace the unconstrained inner with a tempered greedy token that can
+never cross a run boundary or reach beyond its own `</w:rPr>`:
+
+```
+<w:rPr\b[^/]*?>(?:(?!</w:rPr>|<w:r\b|</w:r>).)*?</w:rPr>
+```
+
+This keeps the existing capture semantics (rPr / tOpen / before / after)
+intact while making the regex impossible to backtrack past a run
+boundary.
+
+### Verification
+
+Re-running the smoke test against the v4 hhff template:
+
+```
+Generated DOCX (80.4 KB)
+  Total runs in body: 86
+  with explicit rFonts: 86
+  Fonts seen: Arial(84), MS Gothic(2)
+  Leftover {{…}}: none
+  <w:sdt> opens=2 closes=2  -> balanced
+  <w:sdtContent> opens=2 closes=2  -> balanced
+  XML parses OK
+```
+
+Compare with the broken pre-fix output the customer hit:
+86,694 bytes, 137 runs, 2 opens / 3 closes — Word refused.
+
+Net diff: 1 file, +28 / -3 lines (regex tightening + comment).
+New test: `tests/phase-e-checkbox-sdt.php` (1 file, +153 lines).
+
+## Follow-up: header / footer placeholder substitution
+
+Customer-reported, same v4 hhff template: the `{{fullname}}` /
+`{{target_position}}` placeholders in the upper-right "Profil von …"
+header line never got replaced. The body was perfect; the header still
+showed the literal `{{...}}`.
+
+### Root cause
+
+Every Synaform pre/post pass (`cleanTemplateMacros`,
+`extractPlaceholders`, `expandTableBlocks`, `expandListParagraphs`,
+`cloneParagraphGroupsPrepass`, `expandRichRowColumns`,
+`applyTableLayoutHelpers`, `convertCheckboxMarkersToContentControls`)
+operated on `word/document.xml` only. PhpWord's own
+`TemplateProcessor::setValue()` does walk `word/header*.xml` and
+`word/footer*.xml` automatically — but it cannot find a placeholder
+whose `{{` and `}}` were split across multiple `<w:r>` runs by Word's
+autocorrect / cut-paste, and that's exactly the state of every
+freshly-authored .docx. The defragmentation step lives inside
+`cleanTemplateMacros`, so when that step skipped the headers, PhpWord's
+`getVariables()` reported header placeholders as 200-character XML
+fragments (`</w:t></w:r><w:proofErr.../>...header_name...`) instead of
+the clean key `header_name`, and `setValue('header_name', '…')` never
+matched any node in the header.
+
+### Fix
+
+- Introduced `collectDocumentPartNames(\ZipArchive $zip)` that returns
+  `['word/document.xml', 'word/header1.xml', 'word/header2.xml',
+  'word/footer1.xml', …]`.
+- `cleanTemplateMacros()` now loops over every part — both the
+  brace-defragmentation and the new font-preservation pass apply to
+  body + headers + footers.
+- `extractPlaceholders()` likewise scans every part, so "Detect
+  placeholders" picks up header/footer-only variables too (not the
+  case before — a header-only `{{slug}}` wasn't visible in the
+  Variables tab).
+- `convertCheckboxMarkersToContentControls()` was split into a
+  per-part `convertCheckboxMarkersInPart()` that runs on body +
+  headers + footers, with the `xmlns:w14` injection extended from
+  `<w:document>` to also cover `<w:hdr>` and `<w:ftr>` roots so SDT
+  checkboxes inside a header still render as clickable controls.
+- Tables/lists (`expandListParagraphs`, `expandTableBlocks`,
+  `cloneParagraphGroupsPrepass`, `expandRichRowColumns`,
+  `applyTableLayoutHelpers`) are intentionally **left body-only**:
+  multi-row data structures inside a Word header are vanishingly rare
+  and the engine assumptions (single section / cantSplit) don't apply
+  cleanly there. SCALAR + checkbox placeholders in headers/footers are
+  fully supported; tables/lists in headers/footers are documented as a
+  current limitation.
+
+### Verification
+
+Bench output for v4 hhff DE after the header/footer pass:
+
+```
+Generated DOCX (82.3 KB)
+  body runs with explicit rFonts: 82/82
+  header substitution: OK — Alex Beispiel + Head of Marketing both present
+  no leftover {{…}} in body or headers
+```
+
+Both `tests/phase-h-headers-footers.php` (synthetic split-run header +
+clean footer; offline) and `_devnotes/v4-api-smoketest.php` (full HTTP
+upload+generate against the real hhff template, with sentinel-check on
+`word/header*.xml`) now PASS and would catch any regression that puts
+the passes back into body-only mode.
+
+Net diff: 1 file (`SynaformController.php`), +95 / -34 lines.
+New test: `tests/phase-h-headers-footers.php` (1 file, +178 lines).
