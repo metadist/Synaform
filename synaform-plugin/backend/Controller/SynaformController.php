@@ -4070,10 +4070,311 @@ class SynaformController extends AbstractController
             return '{{' . trim($inner) . '}}';
         }, $xml);
 
+        // Font preservation pass: every paragraph that hosts a {{placeholder}}
+        // gets its placeholder runs guaranteed an explicit <w:rPr> with the
+        // surrounding font/size, so the values that PhpWord swaps in keep the
+        // designer-intended typeface instead of falling back to the document
+        // default (Times New Roman / theme.minorHAnsi). Critical when the
+        // template was authored in Word with a non-default body font (e.g.
+        // Arial, Helvetica-Light) and the placeholder runs lost their explicit
+        // font during Word autocorrect / cut-paste.
+        $xml = $this->normalizePlaceholderRunFonts($xml);
+
         $zip->addFromString('word/document.xml', $xml);
         $zip->close();
 
         return $cleanedPath;
+    }
+
+    /**
+     * For every paragraph that contains a `{{placeholder}}`, rewrite the runs
+     * that contribute to the placeholder text so each carries a complete
+     * `<w:rPr>` with the paragraph's dominant `<w:rFonts>` (and `<w:sz>` /
+     * `<w:szCs>` if available). Pure-formatting bookkeeping — we never touch
+     * the actual run text or the placeholder syntax.
+     *
+     * The "dominant" font/size for a paragraph is, in order of preference:
+     *   1. The font/size on the first non-empty run in the paragraph that
+     *      already declares one,
+     *   2. otherwise the most common run rFonts/sz/szCs across the WHOLE
+     *      document (a "document-wide fallback"). This is what fixes
+     *      templates whose placeholder runs were created without any explicit
+     *      font (e.g. NH-style templates where the body paragraphs all rely
+     *      on the document default that points at the wrong theme font).
+     *   3. otherwise the run is left untouched and falls back to the
+     *      document-default behaviour — same as before this pass existed.
+     */
+    private function normalizePlaceholderRunFonts(string $xml): string
+    {
+        $documentWide = $this->detectDocumentDominantRunStyle($xml);
+
+        $paraPattern = '#<w:p\b[^>]*>(?:(?!</w:p>).)*?</w:p>#s';
+        $rewritten = preg_replace_callback(
+            $paraPattern,
+            function (array $m) use ($documentWide): string {
+                $paraXml = $m[0];
+
+                // Quick reject: only paragraphs that mention {{ matter.
+                if (strpos($paraXml, '{{') === false) {
+                    return $paraXml;
+                }
+
+                $dominant = $this->detectDominantRunStyle($paraXml);
+
+                // Fill any missing slot from the document-wide signal so a
+                // placeholder paragraph that has no explicit font of its
+                // own still ends up with a font baked in.
+                if ($dominant['rFonts'] === '' && $documentWide['rFonts'] !== '') {
+                    $dominant['rFonts'] = $documentWide['rFonts'];
+                }
+                if ($dominant['sz'] === '' && $documentWide['sz'] !== '') {
+                    $dominant['sz'] = $documentWide['sz'];
+                }
+                if ($dominant['szCs'] === '' && $documentWide['szCs'] !== '') {
+                    $dominant['szCs'] = $documentWide['szCs'];
+                }
+
+                if ($dominant['rFonts'] === '' && $dominant['sz'] === '' && $dominant['szCs'] === '') {
+                    // No font signal anywhere — leave the paragraph alone.
+                    return $paraXml;
+                }
+
+                return preg_replace_callback(
+                    '#<w:r\b[^>]*>(.*?)</w:r>#s',
+                    function (array $rm) use ($dominant): string {
+                        return $this->ensureRunHasFont($rm[0], $dominant);
+                    },
+                    $paraXml
+                ) ?? $paraXml;
+            },
+            $xml
+        );
+        return is_string($rewritten) ? $rewritten : $xml;
+    }
+
+    /**
+     * Walk every run in the document and return the most common `<w:rFonts>`
+     * (and `<w:sz>`, `<w:szCs>`) declaration. "Most common" is tallied by
+     * exact serialised XML fragment so we keep schema-valid, complete tags
+     * (e.g. `<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>` rather
+     * than guessing one from raw font names).
+     *
+     * This intentionally ignores theme-only declarations
+     * (`w:asciiTheme="minorHAnsi"`) because those resolve via theme1.xml to
+     * "Calibri" (or similar) which is rarely what the template author wanted
+     * for placeholder content — they nearly always typed the placeholder into
+     * a paragraph that already used a concrete font.
+     *
+     * @return array{rFonts: string, sz: string, szCs: string}
+     */
+    private function detectDocumentDominantRunStyle(string $xml): array
+    {
+        $fontTallies = [];
+        $szTallies = [];
+        $szCsTallies = [];
+
+        if (preg_match_all('#<w:r\b[^>]*>(?:(?!</w:r>).)*?</w:r>#s', $xml, $rm)) {
+            foreach ($rm[0] as $runXml) {
+                if (!preg_match('#<w:rPr\b[^>]*>(.*?)</w:rPr>#s', $runXml, $rprm)) {
+                    continue;
+                }
+                $rPrInner = $rprm[1];
+                if (preg_match('#<w:rFonts\b[^>]*/?>#', $rPrInner, $fm)) {
+                    $tag = $fm[0];
+                    // Skip theme-only declarations (no concrete font name).
+                    if (strpos($tag, 'w:ascii=') !== false || strpos($tag, 'w:hAnsi=') !== false) {
+                        $fontTallies[$tag] = ($fontTallies[$tag] ?? 0) + 1;
+                    }
+                }
+                if (preg_match('#<w:sz\b[^>]*/?>#', $rPrInner, $sm)) {
+                    $szTallies[$sm[0]] = ($szTallies[$sm[0]] ?? 0) + 1;
+                }
+                if (preg_match('#<w:szCs\b[^>]*/?>#', $rPrInner, $sm2)) {
+                    $szCsTallies[$sm2[0]] = ($szCsTallies[$sm2[0]] ?? 0) + 1;
+                }
+            }
+        }
+        return [
+            'rFonts' => $this->topTallyKey($fontTallies),
+            'sz'     => $this->topTallyKey($szTallies),
+            'szCs'   => $this->topTallyKey($szCsTallies),
+        ];
+    }
+
+    /**
+     * Helper: return the key with the highest count from a string => int map,
+     * or '' if the map is empty.
+     *
+     * @param array<string, int> $tallies
+     */
+    private function topTallyKey(array $tallies): string
+    {
+        if (empty($tallies)) {
+            return '';
+        }
+        arsort($tallies);
+        return (string) array_key_first($tallies);
+    }
+
+    /**
+     * Inspect a paragraph's runs and return the first font / size declaration
+     * we find. Returns serialised XML fragments ready to splice into a `<w:rPr>`.
+     *
+     * @return array{rFonts: string, sz: string, szCs: string}
+     */
+    private function detectDominantRunStyle(string $paraXml): array
+    {
+        $rFonts = '';
+        $sz = '';
+        $szCs = '';
+        if (preg_match_all('#<w:r\b[^>]*>(.*?)</w:r>#s', $paraXml, $rm)) {
+            foreach ($rm[1] as $runInner) {
+                if (!preg_match('#<w:rPr\b[^>]*>(.*?)</w:rPr>#s', $runInner, $rprm)) {
+                    continue;
+                }
+                $rPrInner = $rprm[1];
+                if ($rFonts === '' && preg_match('#<w:rFonts\b[^>]*/?>#', $rPrInner, $fm)) {
+                    $rFonts = $fm[0];
+                }
+                if ($sz === '' && preg_match('#<w:sz\b[^>]*/?>#', $rPrInner, $sm)) {
+                    $sz = $sm[0];
+                }
+                if ($szCs === '' && preg_match('#<w:szCs\b[^>]*/?>#', $rPrInner, $sm2)) {
+                    $szCs = $sm2[0];
+                }
+                if ($rFonts !== '' && $sz !== '' && $szCs !== '') {
+                    break;
+                }
+            }
+        }
+        return ['rFonts' => $rFonts, 'sz' => $sz, 'szCs' => $szCs];
+    }
+
+    /**
+     * Make sure a single `<w:r>...</w:r>` carries the dominant font/size
+     * properties. If the run has no `<w:rPr>`, one is injected at the
+     * canonical position (immediately after the opening `<w:r>`). If it has
+     * a `<w:rPr>` already, missing rFonts / sz / szCs are appended without
+     * disturbing existing formatting (bold, italic, colour, language, …).
+     *
+     * @param array{rFonts: string, sz: string, szCs: string} $dominant
+     */
+    private function ensureRunHasFont(string $runXml, array $dominant): string
+    {
+        // Already has rPr? Add only what's missing.
+        if (preg_match('#<w:rPr\b[^>]*>(.*?)</w:rPr>#s', $runXml, $rprm)) {
+            $rPrFull = $rprm[0];
+            $rPrInner = $rprm[1];
+            $needRFonts = $dominant['rFonts'] !== '' && !preg_match('#<w:rFonts\b#', $rPrInner);
+            $needSz     = $dominant['sz']     !== '' && !preg_match('#<w:sz\b#', $rPrInner);
+            $needSzCs   = $dominant['szCs']   !== '' && !preg_match('#<w:szCs\b#', $rPrInner);
+            if (!$needRFonts && !$needSz && !$needSzCs) {
+                return $runXml;
+            }
+            // <w:rFonts> must come first inside <w:rPr> per the OOXML schema
+            // (CT_RPr orders rFonts/b/i/sz/szCs/...). Inject it at the start
+            // of the rPr inner; sz / szCs after that is still schema-valid
+            // because everything we add precedes the existing children.
+            $injection = '';
+            if ($needRFonts) {
+                $injection .= $dominant['rFonts'];
+            }
+            if ($needSz) {
+                $injection .= $dominant['sz'];
+            }
+            if ($needSzCs) {
+                $injection .= $dominant['szCs'];
+            }
+            $newRPrInner = $injection . $rPrInner;
+            $newRPr = preg_replace(
+                '#<w:rPr\b[^>]*>.*?</w:rPr>#s',
+                '<w:rPr>' . $newRPrInner . '</w:rPr>',
+                $rPrFull,
+                1
+            ) ?? $rPrFull;
+            return str_replace($rPrFull, $newRPr, $runXml);
+        }
+
+        // No <w:rPr> at all — inject a fresh one right after `<w:r…>`.
+        $injection = '';
+        if ($dominant['rFonts'] !== '') {
+            $injection .= $dominant['rFonts'];
+        }
+        if ($dominant['sz'] !== '') {
+            $injection .= $dominant['sz'];
+        }
+        if ($dominant['szCs'] !== '') {
+            $injection .= $dominant['szCs'];
+        }
+        if ($injection === '') {
+            return $runXml;
+        }
+        return preg_replace(
+            '#<w:r\b([^>]*)>#',
+            '<w:r$1><w:rPr>' . addcslashes($injection, '\\$') . '</w:rPr>',
+            $runXml,
+            1
+        ) ?? $runXml;
+    }
+
+    /**
+     * Pull the first non-empty run's `<w:rPr>` block out of a paragraph so it
+     * can be reused on Phase B-generated child runs (bullet items, date
+     * headers in stations.details, …). Returns an empty string if no run in
+     * the paragraph declares an rPr — the caller is expected to handle that
+     * gracefully (the child runs then degrade to the document default font,
+     * which is the pre-fix behaviour).
+     */
+    private function extractFirstRunRPr(string $paraXml): string
+    {
+        if (!preg_match_all('#<w:r\b[^>]*>(.*?)</w:r>#s', $paraXml, $rm)) {
+            return '';
+        }
+        foreach ($rm[1] as $idx => $runInner) {
+            // Skip runs with no visible text — they often only carry
+            // bookmarkStart/instrText etc. and their rPr may be a
+            // hyperlink/colour that we don't want to propagate to bullets.
+            $hasText = false;
+            if (preg_match_all('#<w:t\b[^>]*>([^<]*)</w:t>#s', $runInner, $tm)) {
+                foreach ($tm[1] as $txt) {
+                    if (trim($txt) !== '') {
+                        $hasText = true;
+                        break;
+                    }
+                }
+            }
+            if (!$hasText) {
+                continue;
+            }
+            if (preg_match('#<w:rPr\b[^>]*>.*?</w:rPr>#s', $runInner, $rprm)) {
+                return $rprm[0];
+            }
+            // First text-bearing run had no rPr — fall through to the next
+            // one in case it carries the font; some templates wrap a
+            // placeholder in 1 plain run + 1 styled run.
+        }
+        return '';
+    }
+
+    /**
+     * Take an `<w:rPr>...</w:rPr>` fragment and return a copy with `<w:b/>`
+     * guaranteed inside it. Used so date headers in stations.details inherit
+     * the host font but are still rendered bold. Empty input yields a minimal
+     * bold-only rPr (matches the pre-fix behaviour for templates with no
+     * detectable host run rPr).
+     */
+    private function mergeRPrAddBold(string $baseRPr): string
+    {
+        if ($baseRPr === '') {
+            return '<w:rPr><w:b/></w:rPr>';
+        }
+        if (preg_match('#<w:b\s*/>#', $baseRPr)) {
+            return $baseRPr;
+        }
+        // Insert <w:b/> immediately after the opening <w:rPr...> tag so it
+        // stays at the front of the rPr child list (close to schema order).
+        $injected = preg_replace('#(<w:rPr\b[^>]*>)#', '$1<w:b/>', $baseRPr, 1);
+        return is_string($injected) ? $injected : $baseRPr;
     }
 
     /**
@@ -4795,10 +5096,24 @@ class SynaformController extends AbstractController
                         $pattern,
                         function (array $m) use ($raw, $columnType, $bulletNumId, $structured): string {
                             $basePPr = '';
-                            if (preg_match('#<w:pPr>.*?</w:pPr>#s', $m[0], $pm)) {
+                            if (preg_match('#<w:pPr\b[^>]*>.*?</w:pPr>#s', $m[0], $pm)) {
                                 $basePPr = $pm[0];
                             }
-                            return $this->renderRichColumnXml($raw, $columnType, $basePPr, $bulletNumId, $structured);
+                            // Inherit the placeholder run's rPr (font/size/colour)
+                            // so generated bullets/date headers stay in the same
+                            // typeface as the surrounding cell content. Without
+                            // this, the new <w:r>s would fall back to the
+                            // document default font, which is rarely what the
+                            // template designer picked.
+                            $baseRPr = $this->extractFirstRunRPr($m[0]);
+                            return $this->renderRichColumnXml(
+                                $raw,
+                                $columnType,
+                                $basePPr,
+                                $bulletNumId,
+                                $structured,
+                                $baseRPr,
+                            );
                         },
                         $xml
                     );
@@ -4850,6 +5165,7 @@ class SynaformController extends AbstractController
         string $basePPr,
         ?int $bulletNumId,
         bool $structured = false,
+        string $baseRPr = '',
     ): string {
         if (is_array($raw)) {
             $items = array_map(static fn ($v) => trim((string) $v), $raw);
@@ -4859,14 +5175,14 @@ class SynaformController extends AbstractController
                 if (empty($blocks)) {
                     return '';
                 }
-                return $this->renderStationBlocksXml($blocks, $basePPr, $bulletNumId);
+                return $this->renderStationBlocksXml($blocks, $basePPr, $bulletNumId, $baseRPr);
             }
 
             $items = array_values(array_filter($items, static fn ($v) => $v !== ''));
             if (empty($items)) {
                 return '';
             }
-            return $this->renderBulletList($items, $basePPr, $bulletNumId);
+            return $this->renderBulletList($items, $basePPr, $bulletNumId, $baseRPr);
         }
 
         // Legacy string path: keep the date-header / dash-bullet heuristic so
@@ -4875,7 +5191,7 @@ class SynaformController extends AbstractController
         if (trim($str) === '') {
             return '';
         }
-        return $this->renderStationDetailsXml($str, $basePPr, $bulletNumId);
+        return $this->renderStationDetailsXml($str, $basePPr, $bulletNumId, $baseRPr);
     }
 
     /**
@@ -4885,7 +5201,7 @@ class SynaformController extends AbstractController
      *
      * @param list<string> $items
      */
-    private function renderBulletList(array $items, string $basePPr, ?int $bulletNumId): string
+    private function renderBulletList(array $items, string $basePPr, ?int $bulletNumId, string $baseRPr = ''): string
     {
         $bulletPPr = $bulletNumId !== null
             ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
@@ -4897,7 +5213,7 @@ class SynaformController extends AbstractController
             $text = $this->escapeForWordXml($item);
             $prefix = $bulletNumId !== null ? '' : '• ';
             $out .= '<w:p>' . $bulletPPr
-                . '<w:r><w:t xml:space="preserve">' . $prefix . $text . '</w:t></w:r>'
+                . '<w:r>' . $baseRPr . '<w:t xml:space="preserve">' . $prefix . $text . '</w:t></w:r>'
                 . '</w:p>';
         }
         return $out;
@@ -5441,9 +5757,9 @@ class SynaformController extends AbstractController
      *   entry; bullet paragraphs reference it via <w:numPr>. When null, bullets
      *   degrade to a character "•" prefix with a hanging indent.
      */
-    private function renderStationDetailsXml(string $details, string $basePPr, ?int $bulletNumId): string
+    private function renderStationDetailsXml(string $details, string $basePPr, ?int $bulletNumId, string $baseRPr = ''): string
     {
-        return $this->renderStationBlocksXml($this->parseStationDetails($details), $basePPr, $bulletNumId);
+        return $this->renderStationBlocksXml($this->parseStationDetails($details), $basePPr, $bulletNumId, $baseRPr);
     }
 
     /**
@@ -5541,7 +5857,7 @@ class SynaformController extends AbstractController
      *
      * @param list<array{type: string, text?: string}> $blocks
      */
-    private function renderStationBlocksXml(array $blocks, string $basePPr, ?int $bulletNumId): string
+    private function renderStationBlocksXml(array $blocks, string $basePPr, ?int $bulletNumId, string $baseRPr = ''): string
     {
         if (empty($blocks)) {
             return '';
@@ -5561,6 +5877,10 @@ class SynaformController extends AbstractController
         // line would inherit the bullet styling from the host paragraph.
         $plainPPr = $this->stripNumPr($basePPr);
 
+        // Pre-compute a bold rPr that merges the host run's font/size/colour
+        // (so date headers stay in the cell's font) with a forced <w:b/>.
+        $dateRPr = $this->mergeRPrAddBold($baseRPr);
+
         $out = '';
         foreach ($blocks as $b) {
             switch ($b['type']) {
@@ -5571,7 +5891,7 @@ class SynaformController extends AbstractController
                 case 'date':
                     $text = $this->escapeForWordXml((string) ($b['text'] ?? ''));
                     $out .= '<w:p>' . $plainPPr
-                        . '<w:r><w:rPr><w:b/></w:rPr>'
+                        . '<w:r>' . $dateRPr
                         . '<w:t xml:space="preserve">' . $text . '</w:t></w:r>'
                         . '</w:p>';
                     break;
@@ -5580,7 +5900,7 @@ class SynaformController extends AbstractController
                     $text = $this->escapeForWordXml((string) ($b['text'] ?? ''));
                     $prefix = $bulletNumId !== null ? '' : '• ';
                     $out .= '<w:p>' . $bulletPPr
-                        . '<w:r><w:t xml:space="preserve">' . $prefix . $text . '</w:t></w:r>'
+                        . '<w:r>' . $baseRPr . '<w:t xml:space="preserve">' . $prefix . $text . '</w:t></w:r>'
                         . '</w:p>';
                     break;
 
@@ -5588,7 +5908,7 @@ class SynaformController extends AbstractController
                 default:
                     $text = $this->escapeForWordXml((string) ($b['text'] ?? ''));
                     $out .= '<w:p>' . $plainPPr
-                        . '<w:r><w:t xml:space="preserve">' . $text . '</w:t></w:r>'
+                        . '<w:r>' . $baseRPr . '<w:t xml:space="preserve">' . $text . '</w:t></w:r>'
                         . '</w:p>';
                     break;
             }
