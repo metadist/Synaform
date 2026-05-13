@@ -13,7 +13,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # v5: first release built on Node.js 24 — required for compatibility
+        # with the GitHub-hosted runner once Node.js 20 is removed
+        # (https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/).
+        # The action behaves identically to v4 for our usage; no input changes.
+        uses: actions/checkout@v5
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -31,9 +35,14 @@ jobs:
             synaform-plugin/backend/
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        # v5: also Node 24-based. The new automatic package-manager cache
+        # only kicks in when `package.json` declares a `packageManager`
+        # field, which we don't — so behaviour is unchanged for us.
+        uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          # Node 20 hit EOL in April 2026; Node 22 is the current Active LTS
+          # and is what we ship in our local docker-compose `frontend` image.
+          node-version: "22"
 
       - name: Install prettier
         run: npm install --no-save prettier
