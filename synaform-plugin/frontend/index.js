@@ -1523,8 +1523,7 @@ export default {
       const aiRow = (label, slot, role, capability) => {
         const provider = slot.provider || "";
         const modelName =
-          slot.model_name ||
-          (slot.model_id ? "id " + slot.model_id : "");
+          slot.model_name || (slot.model_id ? "id " + slot.model_id : "");
         const hasModel = !!(modelName || provider);
         const valueLine = hasModel
           ? `<span class="tx-badge" style="background:var(--brand-alpha-light);color:var(--brand)">${escHtml(provider || "—")}</span>
@@ -2940,8 +2939,7 @@ export default {
           };
           const totalWeight = cols.reduce((s, c) => s + weightOf(c), 0) || 1;
           const colWidths = cols.map(
-            (c) =>
-              `${((92 * weightOf(c)) / totalWeight).toFixed(2)}%`,
+            (c) => `${((92 * weightOf(c)) / totalWeight).toFixed(2)}%`,
           );
           const colgroup = `<colgroup>${colWidths
             .map((w) => `<col style="width:${w}">`)
