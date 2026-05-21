@@ -444,6 +444,124 @@ test.describe('Synaform UI Tests', () => {
     await expect(page.locator('[data-testid="setup-section-templates"]')).toBeVisible()
   })
 
+  test('Collections list shows the Set up split-button with menu options', async ({ page }) => {
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(2000)
+
+    // Split button = primary action + chevron toggle for the dropdown.
+    const primary = page.locator('[data-testid="setup-splitbutton-primary-new"]')
+    const chevron = page.locator('[data-testid="setup-splitbutton-chevron-new"]')
+    await expect(primary).toBeVisible()
+    await expect(chevron).toBeVisible()
+
+    // Open the dropdown and verify all four entry points + the menu items
+    // each carry their guidance hint.
+    await chevron.click()
+    const menu = page.locator('[data-testid="setup-menu-new"]')
+    await expect(menu).toBeVisible()
+    for (const mode of ['wizard', 'template', 'text', 'manual']) {
+      await expect(menu.locator(`[data-testid="setup-menu-item-${mode}"]`)).toBeVisible()
+    }
+
+    // Backdrop click closes the menu (dropdown UX safety net).
+    await page.locator('[data-action="setup-menu-close"]').click({ position: { x: 5, y: 5 } })
+    await expect(menu).toHaveCount(0)
+  })
+
+  test('split-button "wizard" mode creates a draft and lands on Set up', async ({ page, request }) => {
+    // Clean up any leftover drafts from a previous run so the assertion below
+    // is deterministic.
+    const cookie = await loginViaApi(request)
+    const formsBefore = await (await api(request, cookie, 'GET', '/forms')).json()
+    for (const f of formsBefore.forms || []) {
+      if (f.name?.startsWith('[Draft E2E]')) {
+        await api(request, cookie, 'DELETE', `/forms/${f.id}`)
+      }
+    }
+
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(2000)
+
+    await page.locator('[data-testid="setup-splitbutton-primary-new"]').click()
+
+    const modal = page.locator('#tx-collection-form')
+    await expect(modal).toBeVisible()
+    await modal.locator('input[name="name"]').fill('[Draft E2E] wizard draft')
+    await modal.locator('button[type="submit"]').click()
+
+    // Wizard / template / text modes land on Set up; manual lands on Overview.
+    await page.waitForSelector('[data-testid="setup-tab"]', { timeout: 10_000 })
+    await expect(page.locator('[data-tab="setup"].active')).toBeVisible()
+
+    // Go back to the Collections list and assert the new draft appears in
+    // the Drafts section (heuristic: 0 vars, 0 templates, 0 datasets).
+    // Two buttons carry data-nav="collections" on this page (the nav bar
+    // and the breadcrumb); .first() targets the nav-bar one deterministically.
+    await page.locator('button[data-nav="collections"]').first().click()
+    await page.waitForTimeout(800)
+    const draftsSection = page.locator('[data-testid="drafts-section"]')
+    await expect(draftsSection).toBeVisible()
+    await expect(draftsSection.locator('[data-testid="draft-card"]', { hasText: '[Draft E2E] wizard draft' })).toBeVisible()
+  })
+
+  test('Drafts section: Continue setup jumps to Set up tab', async ({ page, request }) => {
+    // Pre-seed a clean draft via the API so the test isn't coupled to a
+    // previous test's leftovers.
+    const cookie = await loginViaApi(request)
+    const create = await api(request, cookie, 'POST', '/forms', {
+      name: '[Draft E2E] resume me',
+      description: 'auto-discarded after the test',
+      language: 'en',
+      fields: [],
+    })
+    const created = await create.json()
+    const draftId = created.form.id
+
+    try {
+      await page.goto(`${BASE_URL}/plugins/synaform`)
+      await page.waitForSelector('[data-testid="drafts-section"]', { timeout: 10_000 })
+
+      const card = page.locator(`[data-testid="draft-card"][data-draft-id="${draftId}"]`)
+      await expect(card).toBeVisible()
+      await card.locator('[data-testid="draft-resume"]').click()
+      await page.waitForSelector('[data-testid="setup-tab"]', { timeout: 5000 })
+      await expect(page.locator('[data-tab="setup"].active')).toBeVisible()
+    } finally {
+      await api(request, cookie, 'DELETE', `/forms/${draftId}`)
+    }
+  })
+
+  test('Drafts section: Discard deletes the draft', async ({ page, request }) => {
+    const cookie = await loginViaApi(request)
+    const create = await api(request, cookie, 'POST', '/forms', {
+      name: '[Draft E2E] discard me',
+      description: 'will be deleted by the test',
+      language: 'en',
+      fields: [],
+    })
+    const created = await create.json()
+    const draftId = created.form.id
+
+    // Auto-accept the confirm() dialog the Discard button raises.
+    page.on('dialog', (dialog) => dialog.accept())
+
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('[data-testid="drafts-section"]', { timeout: 10_000 })
+
+    const card = page.locator(`[data-testid="draft-card"][data-draft-id="${draftId}"]`)
+    await expect(card).toBeVisible()
+    await card.locator('[data-testid="draft-discard"]').click()
+
+    await expect(card).toHaveCount(0, { timeout: 5000 })
+
+    // Belt-and-braces: the API also reports it gone.
+    const after = await (await api(request, cookie, 'GET', '/forms')).json()
+    const stillThere = after.forms?.find((f: { id: string }) => f.id === draftId)
+    expect(stillThere).toBeFalsy()
+  })
+
   test('kebab menu exposes Edit and Danger Zone', async ({ page }) => {
     await page.goto(`${BASE_URL}/plugins/synaform`)
     await page.waitForSelector('text=Synaform', { timeout: 15_000 })

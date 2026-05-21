@@ -47,7 +47,15 @@
   "collections": {
     "title": "Collections",
     "subtitle": "Una Collection agrupa las preguntas que haces, las plantillas que rellenas y cada dataset que recopilas.",
-    "new": "Nueva Collection",
+    "new": "Configurar Collection",
+    "drafts_title": "Borradores",
+    "drafts_hint": "Collections que has empezado pero a\u00fan no has configurado. Puedes retomarlas cuando quieras.",
+    "draft_badge": "Borrador",
+    "draft_resume": "Continuar configuraci\u00f3n",
+    "draft_discard_hint": "Eliminar este borrador",
+    "draft_discard_confirm": "\u00bfDescartar el borrador \u201c{name}\u201d? Esta acci\u00f3n no se puede deshacer.",
+    "draft_discarded": "Borrador descartado",
+    "draft_unnamed": "Borrador sin t\u00edtulo",
     "create_first": "Crea tu primera Collection",
     "empty": "A\u00fan no hay Collections.",
     "empty_hint": "Empieza creando una Collection. Dale un prop\u00f3sito (p. ej. \u201cAlta de candidatos\u201d), a\u00f1ade las preguntas que quieres responder, sube una plantilla objetivo y comienza a recopilar datasets.",
@@ -425,6 +433,17 @@
     "confirm_mismatch": "El nombre no coincide.",
     "confirm_delete_btn": "Entiendo \u2014 eliminar permanentemente",
     "deleted_toast": "Collection eliminada"
+  },
+  "setup": {
+    "menu_wizard": "Asistente guiado (recomendado)",
+    "menu_wizard_hint": "Recorre toda la configuraci\u00f3n paso a paso.",
+    "menu_from_template": "Empezar desde una plantilla Word",
+    "menu_from_template_hint": "Sube un .docx con {{placeholders}} \u2014 derivamos las variables.",
+    "menu_from_text": "Empezar desde una lista de variables pegada",
+    "menu_from_text_hint": "Pega una lista de campos y la IA los convertir\u00e1 en variables.",
+    "menu_manual": "Abrir editor manual",
+    "menu_manual_hint": "Salta el asistente y edita Variables y Plantillas a mano.",
+    "menu_more_options": "M\u00e1s opciones de configuraci\u00f3n"
   },
   "settings": {
     "title": "Ajustes",

@@ -45,6 +45,18 @@ export default {
       collectionMenuOpen: false,
       dangerOpen: false,
 
+      // Split "Set up Collection" button (Collections list + Overview).
+      // Holds the id of the currently-open dropdown so multiple
+      // instances on the same page don't fight over a single open flag.
+      // The primary click runs the guided-wizard flow; the dropdown
+      // exposes the per-entry-point shortcuts and the manual escape
+      // hatch. PR3 will replace the wizard stub with the real modal.
+      setupMenuOpen: null,
+      // Which split-button mode the user picked when opening the
+      // create-collection editor — drives where we land after save
+      // ("manual" -> Overview tab, anything else -> Set up tab).
+      pendingSetupMode: null,
+
       // Dataset editing state
       datasetsSearch: "",
       datasetsSortNewest: true,
@@ -791,6 +803,7 @@ export default {
         state.newCollectionOpen = false;
         state.collectionMenuOpen = false;
         state.dangerOpen = false;
+        state.setupMenuOpen = null;
       }
       if (updates.view === "collection" || updates.tab) {
         state.collectionMenuOpen = false;
@@ -1174,17 +1187,157 @@ export default {
     // Collections list view
     // =========================================================================
 
+    /**
+     * A Collection is treated as a "draft" when the user has created the
+     * shell but not yet defined any variables or attached any templates
+     * and hasn't gathered any datasets either. This heuristic intentionally
+     * also covers Collections created through the new split-button "guided
+     * wizard" entry point so users can pick up where they left off without
+     * any backend schema changes. Once the user adds a single variable,
+     * uploads a template, or saves a dataset, the Collection graduates
+     * out of the Drafts section automatically.
+     */
+    function isDraftCollection(c) {
+      const vars = c.fields?.length || 0;
+      const tpls = collectionTemplates(c).length;
+      const dsets = datasetsForCollection(c.id).length;
+      return vars === 0 && tpls === 0 && dsets === 0;
+    }
+
+    /**
+     * Split-button for setup-time entry points. The primary click runs the
+     * "guided wizard" path; the dropdown exposes the per-entry-point
+     * shortcuts and a manual escape hatch. PR2 wires every option to the
+     * existing manual New-Collection modal (the wizard ships in PR3); the
+     * entry-point mode is forwarded via `data-mode` so the wizard can
+     * later choose which step to land on.
+     *
+     * `id` distinguishes multiple instances on the same page (Collections
+     * list, Drafts banner, etc.) so the dropdown state doesn't bleed.
+     */
+    function renderSetupSplitButton(id, opts = {}) {
+      const label = opts.label || T("collections.new");
+      const size = opts.size === "sm" ? "tx-btn-sm" : "";
+      const open = state.setupMenuOpen === id;
+      const dropdownItems = [
+        {
+          mode: "wizard",
+          icon: ICONS.sparkle,
+          label: T("setup.menu_wizard"),
+          hint: T("setup.menu_wizard_hint"),
+          primary: true,
+        },
+        {
+          mode: "template",
+          icon: ICONS.file,
+          label: T("setup.menu_from_template"),
+          hint: T("setup.menu_from_template_hint"),
+        },
+        {
+          mode: "text",
+          icon: ICONS.upload,
+          label: T("setup.menu_from_text"),
+          hint: T("setup.menu_from_text_hint"),
+        },
+        { divider: true },
+        {
+          mode: "manual",
+          icon: ICONS.edit,
+          label: T("setup.menu_manual"),
+          hint: T("setup.menu_manual_hint"),
+        },
+      ];
+
+      const menu = open
+        ? `<div data-action="setup-menu-close" style="position:fixed;inset:0;z-index:30"></div>
+           <div role="menu" data-testid="setup-menu-${escHtml(id)}" class="tx-card" style="position:absolute;top:calc(100% + .25rem);right:0;min-width:18rem;z-index:31;padding:.375rem 0;box-shadow:0 8px 24px rgba(0,0,0,.16)">
+             ${dropdownItems
+               .map((item) => {
+                 if (item.divider) {
+                   return `<div style="height:1px;background:var(--divider);margin:.25rem 0"></div>`;
+                 }
+                 return `<button data-action="setup-action" data-mode="${item.mode}" data-id="${escHtml(id)}" data-testid="setup-menu-item-${item.mode}" role="menuitem" class="w-full text-left flex items-start gap-2 px-3 py-2 text-sm tx-row" style="border-radius:0;background:transparent;box-shadow:none">
+                   <span style="color:var(--brand);flex-shrink:0;margin-top:.125rem">${item.icon}</span>
+                   <span class="flex-1">
+                     <span class="block font-medium${item.primary ? "" : ""}">${escHtml(item.label)}</span>
+                     ${item.hint ? `<span class="block text-xs tx-secondary mt-0.5">${escHtml(item.hint)}</span>` : ""}
+                   </span>
+                 </button>`;
+               })
+               .join("")}
+           </div>`
+        : "";
+
+      return `<div style="position:relative;display:inline-flex" data-testid="setup-splitbutton-${escHtml(id)}">
+        <button data-action="setup-action" data-mode="wizard" data-id="${escHtml(id)}" data-testid="setup-splitbutton-primary-${escHtml(id)}" class="tx-btn ${size}" style="border-top-right-radius:0;border-bottom-right-radius:0">
+          ${ICONS.sparkle} <span>${escHtml(label)}</span>
+        </button>
+        <button data-action="setup-menu-toggle" data-id="${escHtml(id)}" data-testid="setup-splitbutton-chevron-${escHtml(id)}" aria-haspopup="menu" aria-expanded="${open ? "true" : "false"}" aria-label="${T("setup.menu_more_options")}" class="tx-btn ${size}" style="border-top-left-radius:0;border-bottom-left-radius:0;border-left:1px solid color-mix(in srgb, #000 18%, transparent);padding-left:.5rem;padding-right:.5rem">
+          ${ICONS.chevDown}
+        </button>
+        ${menu}
+      </div>`;
+    }
+
+    function renderDraftsSection(drafts) {
+      if (drafts.length === 0) return "";
+      const cards = drafts
+        .map(
+          (
+            d,
+          ) => `<div class="tx-row p-4 flex items-center justify-between gap-3" data-testid="draft-card" data-draft-id="${escHtml(d.id)}">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <span style="color:var(--status-warning,#d97706)">${ICONS.clock}</span>
+                <span class="font-semibold truncate">${escHtml(d.name)}</span>
+                <span class="tx-badge" style="background:color-mix(in srgb, var(--status-warning,#d97706) 14%, transparent);color:var(--status-warning,#d97706)">${T("collections.draft_badge")}</span>
+              </div>
+              ${d.description ? `<p class="text-xs tx-secondary mt-1 line-clamp-2">${escHtml(d.description)}</p>` : ""}
+              <div class="text-xs tx-secondary mt-1">${T("app.created")}: ${formatDate(d.created_at)}</div>
+            </div>
+            <div class="flex items-center gap-2 flex-shrink-0">
+              <button data-action="draft-resume" data-id="${escHtml(d.id)}" data-testid="draft-resume" class="tx-btn tx-btn-sm">
+                ${ICONS.sparkle} ${T("collections.draft_resume")}
+              </button>
+              <button data-action="draft-discard" data-id="${escHtml(d.id)}" data-name="${escHtml(d.name)}" data-testid="draft-discard" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)" title="${T("collections.draft_discard_hint")}">
+                ${ICONS.trash}
+              </button>
+            </div>
+          </div>`,
+        )
+        .join("");
+      return `<section data-testid="drafts-section" class="space-y-2">
+        <div class="flex items-center gap-2">
+          <h3 class="text-sm font-semibold uppercase tracking-wider tx-secondary">${T("collections.drafts_title")} (${drafts.length})</h3>
+          <span class="text-xs tx-secondary">— ${T("collections.drafts_hint")}</span>
+        </div>
+        <div class="space-y-1.5">${cards}</div>
+      </section>`;
+    }
+
     function renderCollectionsList() {
       const q = state.collectionsSearch.trim().toLowerCase();
-      const list = (state.forms || []).filter((f) => {
-        if (!q) return true;
-        return (
-          f.name?.toLowerCase().includes(q) ||
-          f.description?.toLowerCase().includes(q)
-        );
-      });
+      const allForms = state.forms || [];
+      const drafts = allForms
+        .filter((f) => isDraftCollection(f))
+        .filter((f) => {
+          if (!q) return true;
+          return (
+            f.name?.toLowerCase().includes(q) ||
+            f.description?.toLowerCase().includes(q)
+          );
+        });
+      const ready = allForms
+        .filter((f) => !isDraftCollection(f))
+        .filter((f) => {
+          if (!q) return true;
+          return (
+            f.name?.toLowerCase().includes(q) ||
+            f.description?.toLowerCase().includes(q)
+          );
+        });
 
-      const cards = list
+      const cards = ready
         .map((c) => {
           const datasets = datasetsForCollection(c.id);
           const templates = collectionTemplates(c);
@@ -1231,20 +1384,23 @@ export default {
           </div>
           <div class="flex items-center gap-2">
             ${
-              state.forms.length > 0
+              allForms.length > 0
                 ? `<div class="relative">
                     <span class="absolute top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" style="left:12px">${ICONS.search}</span>
                     <input id="tx-collections-search" type="text" value="${escHtml(state.collectionsSearch)}" placeholder="${T("app.search")}" class="tx-input" style="padding-left:36px;min-width:220px" />
                   </div>`
                 : ""
             }
-            <button data-action="new-collection" class="tx-btn">${ICONS.plus} ${T("collections.new")}</button>
+            ${renderSetupSplitButton("new")}
           </div>
         </div>
+        ${renderDraftsSection(drafts)}
         ${
-          state.forms.length === 0
+          allForms.length === 0
             ? emptyHelp
-            : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards}</div>`
+            : ready.length === 0
+              ? ""
+              : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards}</div>`
         }
         ${state.newCollectionOpen ? renderCollectionEditor() : ""}
         ${renderHelpModal()}
@@ -3702,14 +3858,77 @@ export default {
         }),
       );
 
-      // New collection
+      // New collection (legacy direct trigger — kept for backwards
+      // compatibility with any external code that still fires it; the
+      // split button now drives the main entry points)
       el.querySelector('[data-action="new-collection"]')?.addEventListener(
         "click",
         () => {
           state.newCollectionOpen = true;
           state.editingCollection = null;
+          state.setupMenuOpen = null;
           render();
         },
+      );
+
+      // Setup split-button: primary click + per-mode dropdown items.
+      // PR2 wires every mode to the existing manual New-Collection
+      // modal; PR3 will replace the wizard/template/text branches
+      // with the real wizard modal. The mode is stashed on state so
+      // post-create code (e.g. land on Set up tab vs Overview) can
+      // honour the chosen entry point.
+      el.querySelectorAll('[data-action="setup-action"]').forEach((btn) =>
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const mode = btn.dataset.mode || "wizard";
+          state.setupMenuOpen = null;
+          state.pendingSetupMode = mode;
+          state.newCollectionOpen = true;
+          state.editingCollection = null;
+          render();
+        }),
+      );
+      el.querySelectorAll('[data-action="setup-menu-toggle"]').forEach((btn) =>
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.id || "default";
+          state.setupMenuOpen = state.setupMenuOpen === id ? null : id;
+          render();
+        }),
+      );
+      el.querySelectorAll('[data-action="setup-menu-close"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          state.setupMenuOpen = null;
+          render();
+        }),
+      );
+
+      // Draft "Resume" / "Discard" buttons in the Drafts section
+      el.querySelectorAll('[data-action="draft-resume"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          navigate({
+            view: "collection",
+            collectionId: btn.dataset.id,
+            tab: "setup",
+          });
+        }),
+      );
+      el.querySelectorAll('[data-action="draft-discard"]').forEach((btn) =>
+        btn.addEventListener("click", async () => {
+          const name = btn.dataset.name || T("collections.draft_unnamed");
+          const ok = window.confirm(
+            Tf("collections.draft_discard_confirm", { name }),
+          );
+          if (!ok) return;
+          try {
+            await api(`/forms/${btn.dataset.id}`, { method: "DELETE" });
+            await fetchForms();
+            showToast(T("collections.draft_discarded"));
+            render();
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        }),
       );
       el.querySelector('[data-action="edit-collection"]')?.addEventListener(
         "click",
@@ -3726,6 +3945,7 @@ export default {
           btn.addEventListener("click", () => {
             state.newCollectionOpen = false;
             state.editingCollection = null;
+            state.pendingSetupMode = null;
             render();
           }),
       );
@@ -3792,11 +4012,18 @@ export default {
               });
               state.newCollectionOpen = false;
               state.editingCollection = null;
+              // Honor the split-button entry point: every mode except
+              // explicit "manual" jumps straight into the Set up tab so
+              // the user keeps momentum on the configuration work. PR3
+              // will swap this for the real wizard modal.
+              const mode = state.pendingSetupMode || "manual";
+              state.pendingSetupMode = null;
+              const landTab = mode === "manual" ? "overview" : "setup";
               await fetchForms();
               navigate({
                 view: "collection",
                 collectionId: res.form.id,
-                tab: "overview",
+                tab: landTab,
               });
             }
           } catch (err) {

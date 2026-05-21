@@ -47,7 +47,15 @@
   "collections": {
     "title": "Collections",
     "subtitle": "Eine Collection b\u00fcndelt die Fragen, die Sie stellen, die Vorlagen, die Sie f\u00fcllen, und alle Datens\u00e4tze, die Sie sammeln.",
-    "new": "Neue Collection",
+    "new": "Collection einrichten",
+    "drafts_title": "Entw\u00fcrfe",
+    "drafts_hint": "Begonnene Collections, deren Einrichtung noch nicht abgeschlossen ist. Jederzeit fortsetzbar.",
+    "draft_badge": "Entwurf",
+    "draft_resume": "Einrichtung fortsetzen",
+    "draft_discard_hint": "Diesen Entwurf l\u00f6schen",
+    "draft_discard_confirm": "Den Entwurf \u201e{name}\u201c wirklich verwerfen? Das kann nicht r\u00fcckg\u00e4ngig gemacht werden.",
+    "draft_discarded": "Entwurf verworfen",
+    "draft_unnamed": "Unbenannter Entwurf",
     "create_first": "Erste Collection anlegen",
     "empty": "Noch keine Collections.",
     "empty_hint": "Beginnen Sie mit einer Collection. Geben Sie ihr einen Zweck (z. B. \u201eKandidaten-Intake\u201c), legen Sie die zu erfassenden Fragen fest, laden Sie eine Zielvorlage hoch \u2013 und sammeln Sie Datens\u00e4tze.",
@@ -425,6 +433,17 @@
     "confirm_mismatch": "Der Name stimmt nicht \u00fcberein.",
     "confirm_delete_btn": "Verstanden \u2013 endg\u00fcltig l\u00f6schen",
     "deleted_toast": "Collection gel\u00f6scht"
+  },
+  "setup": {
+    "menu_wizard": "Gef\u00fchrter Assistent (empfohlen)",
+    "menu_wizard_hint": "Schritt f\u00fcr Schritt durch die gesamte Einrichtung.",
+    "menu_from_template": "Aus einer Word-Vorlage starten",
+    "menu_from_template_hint": "Eine .docx mit {{Platzhaltern}} hochladen \u2014 wir leiten die Variablen ab.",
+    "menu_from_text": "Aus einer eingef\u00fcgten Variablenliste starten",
+    "menu_from_text_hint": "Eine Feldliste einf\u00fcgen \u2013 die KI macht daraus Variablen.",
+    "menu_manual": "Manuellen Editor \u00f6ffnen",
+    "menu_manual_hint": "Assistent \u00fcberspringen und Variablen / Vorlagen direkt bearbeiten.",
+    "menu_more_options": "Weitere Einrichtungsoptionen"
   },
   "settings": {
     "title": "Einstellungen",

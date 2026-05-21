@@ -47,10 +47,18 @@
   "collections": {
     "title": "Collections",
     "subtitle": "A Collection bundles the questions you ask, the templates you fill, and every dataset you gather.",
-    "new": "New Collection",
+    "new": "Set up Collection",
     "create_first": "Create your first Collection",
     "empty": "No Collections yet.",
     "empty_hint": "Start by creating a Collection. Give it a purpose (e.g. \u201cCandidate intake\u201d), add the questions you need answered, upload a target template, and start collecting datasets.",
+    "drafts_title": "Drafts",
+    "drafts_hint": "Collections you started but haven\u2019t set up yet. Resume any time.",
+    "draft_badge": "Draft",
+    "draft_resume": "Continue setup",
+    "draft_discard_hint": "Delete this draft",
+    "draft_discard_confirm": "Discard the draft \u201c{name}\u201d? This cannot be undone.",
+    "draft_discarded": "Draft discarded",
+    "draft_unnamed": "Untitled draft",
     "card_datasets": "datasets",
     "card_datasets_one": "dataset",
     "card_templates": "templates",
@@ -425,6 +433,17 @@
     "confirm_mismatch": "The name doesn\u2019t match.",
     "confirm_delete_btn": "I understand \u2014 delete permanently",
     "deleted_toast": "Collection deleted"
+  },
+  "setup": {
+    "menu_wizard": "Guided wizard (recommended)",
+    "menu_wizard_hint": "Walk through the whole setup step by step.",
+    "menu_from_template": "Start from a Word template",
+    "menu_from_template_hint": "Upload a .docx with {{placeholders}} \u2014 we\u2019ll derive the variables.",
+    "menu_from_text": "Start from a pasted variable list",
+    "menu_from_text_hint": "Paste a list of fields and the AI will turn them into variables.",
+    "menu_manual": "Open manual editor",
+    "menu_manual_hint": "Skip the wizard and edit Variables and Templates by hand.",
+    "menu_more_options": "More setup options"
   },
   "settings": {
     "title": "Settings",
