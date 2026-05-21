@@ -990,7 +990,7 @@ export default {
       .tx-badge-image { background: color-mix(in srgb, var(--status-info, #3b82f6) 12%, transparent); color: var(--status-info, #3b82f6); border-color: color-mix(in srgb, var(--status-info, #3b82f6) 30%, transparent); }
       .tx-badge-plain { background: var(--bg-chip); color: var(--txt-secondary); border-color: var(--divider); }
       .tx-divider { border-color: var(--divider); }
-      .tx-drop { border: 2px dashed var(--divider); border-radius: .5rem; background: var(--bg-card); text-align: center; padding: 1.25rem; cursor: pointer; transition: border-color .15s, background .15s; }
+      .tx-drop { display: block; border: 2px dashed var(--divider); border-radius: .5rem; background: var(--bg-card); text-align: center; padding: 1.25rem; cursor: pointer; transition: border-color .15s, background .15s; }
       .tx-drop:hover { border-color: var(--brand); background: var(--brand-alpha-light); }
       .tx-help-trigger { display: inline-flex; align-items: center; justify-content: center; width: 1.1rem; height: 1.1rem; border-radius: 9999px; color: var(--txt-secondary); cursor: pointer; border: none; background: transparent; padding: 0; }
       .tx-help-trigger:hover { color: var(--brand); background: var(--brand-alpha-light); }
