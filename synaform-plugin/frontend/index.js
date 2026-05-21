@@ -38,6 +38,13 @@ export default {
       showTemplatesHelp: false,
       showExportHelp: false,
 
+      // Collection title kebab menu (Edit + Danger Zone). The Danger
+      // Zone used to be its own top-level tab, which made it too easy
+      // to land on accidentally — it now lives inside this menu and
+      // opens as a modal when picked.
+      collectionMenuOpen: false,
+      dangerOpen: false,
+
       // Dataset editing state
       datasetsSearch: "",
       datasetsSortNewest: true,
@@ -704,12 +711,16 @@ export default {
     // Router
     // =========================================================================
 
+    // Includes legacy tab names ("variables", "templates", "danger") so old
+    // bookmarks still parse cleanly — normalizeCollectionTab() then folds
+    // them into the new "setup" tab (or the Danger Zone modal).
     const VALID_TABS = [
       "overview",
+      "datasets",
+      "setup",
+      "export",
       "variables",
       "templates",
-      "datasets",
-      "export",
       "danger",
     ];
 
@@ -732,8 +743,27 @@ export default {
       const r = parseHash();
       state.view = r.view;
       state.collectionId = r.collectionId || null;
-      state.tab = r.tab || "overview";
+      state.tab = normalizeCollectionTab(r.tab || "overview");
       state.datasetId = r.datasetId || null;
+    }
+
+    // The Collection page used to expose six tabs (overview / variables /
+    // templates / datasets / export / danger). Variables and Templates are
+    // now folded behind a single "Set up" tab, and Danger Zone is a kebab
+    // menu modal. Legacy hashes are remapped so bookmarks still land on
+    // the right page; old #/danger requests pop the modal automatically.
+    function normalizeCollectionTab(tab) {
+      if (tab === "variables" || tab === "templates" || tab === "setup") {
+        return "setup";
+      }
+      if (tab === "danger") {
+        state.dangerOpen = true;
+        return "overview";
+      }
+      if (["overview", "datasets", "export"].includes(tab)) {
+        return tab;
+      }
+      return "overview";
     }
 
     function writeHash() {
@@ -748,6 +778,9 @@ export default {
     }
 
     async function navigate(updates) {
+      if (typeof updates.tab === "string") {
+        updates.tab = normalizeCollectionTab(updates.tab);
+      }
       Object.assign(state, updates);
       // Reset transient state per view
       if (updates.view && updates.view !== "collection") {
@@ -756,8 +789,11 @@ export default {
         state.selectedDataset = null;
         state.newDatasetOpen = false;
         state.newCollectionOpen = false;
+        state.collectionMenuOpen = false;
+        state.dangerOpen = false;
       }
       if (updates.view === "collection" || updates.tab) {
+        state.collectionMenuOpen = false;
         state.selectedDataset = null;
         state.datasetId = updates.datasetId || null;
         state.datasetVariables = null;
@@ -1265,14 +1301,30 @@ export default {
         </div>`;
       }
 
+      // The Collection cockpit was restructured so daily work (Datasets)
+      // is front and centre; setup (Variables + Target Templates) is
+      // folded behind a single "Set up" tab; the destructive Danger Zone
+      // moved into the kebab menu next to the title so users can't land
+      // on it by mistake.
       const tabs = [
         { id: "overview", label: T("collection.tab_overview") },
-        { id: "variables", label: T("collection.tab_variables") },
-        { id: "templates", label: T("collection.tab_templates") },
         { id: "datasets", label: T("collection.tab_datasets") },
+        { id: "setup", label: T("collection.tab_setup") },
         { id: "export", label: T("collection.tab_export") },
-        { id: "danger", label: T("collection.tab_danger"), danger: true },
       ];
+
+      const menu = state.collectionMenuOpen
+        ? `<div data-action="close-collection-menu" style="position:fixed;inset:0;z-index:30"></div>
+           <div role="menu" class="tx-card" style="position:absolute;top:calc(100% + .25rem);right:0;min-width:14rem;z-index:31;padding:.25rem 0;box-shadow:0 8px 24px rgba(0,0,0,.12)">
+             <button data-action="edit-collection" data-testid="menu-edit-collection" role="menuitem" class="w-full text-left flex items-center gap-2 px-3 py-2 text-sm tx-row" style="border-radius:0;background:transparent;box-shadow:none">
+               ${ICONS.edit} ${T("collection.menu_edit")}
+             </button>
+             <div style="height:1px;background:var(--divider);margin:.25rem 0"></div>
+             <button data-action="open-danger" data-testid="menu-open-danger" role="menuitem" class="w-full text-left flex items-center gap-2 px-3 py-2 text-sm tx-row" style="border-radius:0;background:transparent;box-shadow:none;color:var(--status-error)">
+               ${ICONS.trash} ${T("collection.menu_danger")}
+             </button>
+           </div>`
+        : "";
 
       return `<div class="mt-4 space-y-5">
         <div>
@@ -1285,41 +1337,78 @@ export default {
               </h2>
               ${c.description ? `<p class="text-sm tx-secondary mt-1">${escHtml(c.description)}</p>` : ""}
             </div>
-            <button data-action="edit-collection" class="tx-btn tx-btn-sm tx-btn-ghost">${ICONS.edit} ${T("app.edit")}</button>
+            <div style="position:relative">
+              <button data-action="toggle-collection-menu" data-testid="btn-collection-menu" aria-haspopup="menu" aria-expanded="${state.collectionMenuOpen ? "true" : "false"}" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("collection.menu_more")}" aria-label="${T("collection.menu_more")}">
+                <span aria-hidden="true" style="font-size:1.1rem;line-height:1;letter-spacing:.1em">\u22EF</span>
+              </button>
+              ${menu}
+            </div>
           </div>
         </div>
 
-        <nav class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
+        <nav data-testid="collection-tabs" class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
           ${tabs
             .map(
               (t) =>
-                `<button data-tab="${t.id}" class="tx-tab${state.tab === t.id ? " active" : ""}${t.danger ? " danger" : ""}">${t.label}</button>`,
+                `<button data-tab="${t.id}" class="tx-tab${state.tab === t.id ? " active" : ""}">${t.label}</button>`,
             )
             .join("")}
         </nav>
 
         <div>${renderCollectionTab(c)}</div>
         ${state.editingCollection && !state.newCollectionOpen ? renderCollectionEditor() : ""}
+        ${state.dangerOpen ? renderDangerModal(c) : ""}
         ${renderHelpModal()}
+      </div>`;
+    }
+
+    // Danger Zone (formerly a top-level tab) lives in a modal triggered
+    // from the kebab menu so accidental clicks during normal work are
+    // impossible. Content/behaviour is unchanged from the old tab.
+    function renderDangerModal(c) {
+      return `<div class="tx-modal-bg" data-action="close-danger-modal">
+        <div class="tx-modal p-6" data-testid="modal-danger" onclick="event.stopPropagation()">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-lg font-semibold flex items-center gap-2" style="color:var(--status-error)">${ICONS.warning} ${T("danger.title")}</h3>
+            <button data-action="close-danger-modal" class="tx-help-trigger" aria-label="${T("app.close")}">${ICONS.close}</button>
+          </div>
+          ${renderDangerTab(c)}
+        </div>
       </div>`;
     }
 
     function renderCollectionTab(c) {
       switch (state.tab) {
-        case "variables":
-          return renderVariablesTab(c);
-        case "templates":
-          return renderTemplatesTab(c);
+        case "setup":
+          return renderSetupTab(c);
         case "datasets":
           return renderDatasetsTab(c);
         case "export":
           return renderExportTab(c);
-        case "danger":
-          return renderDangerTab(c);
         case "overview":
         default:
           return renderOverviewTab(c);
       }
+    }
+
+    // "Set up" stacks the two configuration-time editors (Variables and
+    // Target Templates) into one focused setup surface. Both editors are
+    // reused as-is, with their own headers; we just wrap them with a
+    // short orientation banner so it's clear this is where the user
+    // *defines* what a Collection looks like before working with it.
+    function renderSetupTab(c) {
+      return `<div class="space-y-6" data-testid="setup-tab">
+        <div class="tx-callout flex items-start gap-2">
+          ${ICONS.info}
+          <div>
+            <div class="text-sm font-medium">${T("collection.tab_setup")}</div>
+            <p class="text-xs tx-secondary mt-0.5">${T("collection.tab_setup_subtitle")}</p>
+          </div>
+        </div>
+        <section data-testid="setup-section-variables">${renderVariablesTab(c)}</section>
+        <div style="height:1px;background:var(--divider)"></div>
+        <section data-testid="setup-section-templates">${renderTemplatesTab(c)}</section>
+      </div>`;
     }
 
     // --- Overview tab ---
@@ -1338,8 +1427,8 @@ export default {
       );
 
       const stats = `<div class="grid grid-cols-3 gap-3">
-        ${statCard(T("collection.overview_stats_variables"), vars, ICONS.variable, "variables")}
-        ${statCard(T("collection.overview_stats_templates"), templates.length, ICONS.file, "templates")}
+        ${statCard(T("collection.overview_stats_variables"), vars, ICONS.variable, "setup")}
+        ${statCard(T("collection.overview_stats_templates"), templates.length, ICONS.file, "setup")}
         ${statCard(T("collection.overview_stats_datasets"), datasets.length, ICONS.database, "datasets")}
       </div>`;
 
@@ -1355,7 +1444,7 @@ export default {
           title: T("collection.overview_step1_title"),
           text: T("collection.overview_step1"),
           cta: T("collection.goto_variables"),
-          tab: "variables",
+          tab: "setup",
         },
         {
           key: "templates",
@@ -1365,7 +1454,7 @@ export default {
           title: T("collection.overview_step2_title"),
           text: T("collection.overview_step2"),
           cta: T("collection.goto_templates"),
-          tab: "templates",
+          tab: "setup",
         },
         {
           key: "datasets",
@@ -1419,9 +1508,9 @@ export default {
 
       let callout = "";
       if (!hasVars) {
-        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_vars")}</span> <button data-tab="variables" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_variables")} →</button></div>`;
+        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_vars")}</span> <button data-tab="setup" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_variables")} →</button></div>`;
       } else if (!hasTpls) {
-        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_templates")}</span> <button data-tab="templates" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_templates")} →</button></div>`;
+        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_templates")}</span> <button data-tab="setup" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_templates")} →</button></div>`;
       } else {
         callout = `<div class="tx-callout flex items-center gap-2" style="background:color-mix(in srgb, var(--status-success) 10%, var(--bg-card));color:var(--txt-primary)">${ICONS.check} <span>${T("collection.summary_ready")}</span> <button data-tab="datasets" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_datasets")} →</button></div>`;
       }
@@ -2422,7 +2511,7 @@ export default {
         return `<div class="tx-card p-6 text-center">
           <div class="inline-flex items-center justify-center w-12 h-12 rounded-full mb-3" style="background:var(--bg-chip);color:var(--txt-secondary)">${ICONS.variable}</div>
           <h4 class="font-semibold text-lg mb-1">${T("collection.summary_no_vars")}</h4>
-          <button data-tab="variables" class="tx-btn tx-btn-sm mt-3">${T("collection.goto_variables")}</button>
+          <button data-tab="setup" class="tx-btn tx-btn-sm mt-3">${T("collection.goto_variables")}</button>
         </div>`;
       }
 
@@ -3349,7 +3438,7 @@ export default {
                   ${state.datasetGenerating ? `<div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div> ${T("datasets.generate_running")}` : `${ICONS.doc} ${T("datasets.generate_btn")}`}
                 </button>
               </div>`
-            : `<div class="tx-callout mb-4">${T("templates.empty_hint")} <button data-tab="templates" class="tx-link ml-2">${T("collection.goto_templates")} →</button></div>`
+            : `<div class="tx-callout mb-4">${T("templates.empty_hint")} <button data-tab="setup" class="tx-link ml-2">${T("collection.goto_templates")} →</button></div>`
         }
         <div>
           <h5 class="text-xs font-medium tx-secondary uppercase tracking-wider mb-2">${T("datasets.generated_docs")}</h5>
@@ -3627,6 +3716,7 @@ export default {
         () => {
           const c = collectionById(state.collectionId);
           if (!c) return;
+          state.collectionMenuOpen = false;
           state.editingCollection = JSON.parse(JSON.stringify(c));
           render();
         },
@@ -3638,6 +3728,38 @@ export default {
             state.editingCollection = null;
             render();
           }),
+      );
+
+      // Kebab menu next to the Collection title (Edit + Danger Zone)
+      el.querySelector(
+        '[data-action="toggle-collection-menu"]',
+      )?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        state.collectionMenuOpen = !state.collectionMenuOpen;
+        render();
+      });
+      el.querySelectorAll('[data-action="close-collection-menu"]').forEach(
+        (btn) =>
+          btn.addEventListener("click", () => {
+            state.collectionMenuOpen = false;
+            render();
+          }),
+      );
+      el.querySelector('[data-action="open-danger"]')?.addEventListener(
+        "click",
+        () => {
+          state.collectionMenuOpen = false;
+          state.dangerOpen = true;
+          state.dangerConfirmText = "";
+          render();
+        },
+      );
+      el.querySelectorAll('[data-action="close-danger-modal"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          state.dangerOpen = false;
+          state.dangerConfirmText = "";
+          render();
+        }),
       );
       const cForm = el.querySelector("#tx-collection-form");
       if (cForm) {

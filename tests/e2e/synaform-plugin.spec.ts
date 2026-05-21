@@ -360,6 +360,19 @@ test.describe('Synaform API Tests', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('Synaform UI Tests', () => {
+  // Self-seed: make sure the admin user has at least one Collection before
+  // we drive the UI. Without this, /setup-check returns ready but
+  // /forms is empty and every "open a collection" step times out waiting
+  // for [data-open-collection].
+  test.beforeAll(async ({ request }) => {
+    const cookie = await loginViaApi(request)
+    const list = await api(request, cookie, 'GET', '/forms')
+    const body = await list.json()
+    if (!body.forms?.length) {
+      await api(request, cookie, 'POST', '/setup')
+    }
+  })
+
   test.beforeEach(async ({ page }) => {
     await loginUI(page)
   })
@@ -368,9 +381,10 @@ test.describe('Synaform UI Tests', () => {
     await page.goto(`${BASE_URL}/plugins/synaform`)
     await page.waitForSelector('text=Synaform', { timeout: 15_000 })
 
-    const navBar = page.locator('nav').first()
-    await expect(navBar.locator('button[data-nav="collections"]')).toBeVisible()
-    await expect(navBar.locator('button[data-nav="settings"]')).toBeVisible()
+    // The Synaplan host renders its own outer <nav>, so we target the
+    // plugin's nav by the data attribute rather than nav:first().
+    await expect(page.locator('button[data-nav="collections"]')).toBeVisible()
+    await expect(page.locator('button[data-nav="settings"]')).toBeVisible()
   })
 
   test('collections list shows the default collection card', async ({ page }) => {
@@ -381,7 +395,7 @@ test.describe('Synaform UI Tests', () => {
     await expect(page.locator('[data-open-collection]').first()).toBeVisible()
   })
 
-  test('opening a collection reveals all tabs', async ({ page }) => {
+  test('opening a collection reveals the new 4-tab structure', async ({ page }) => {
     await page.goto(`${BASE_URL}/plugins/synaform`)
     await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
@@ -389,9 +403,70 @@ test.describe('Synaform UI Tests', () => {
     await page.locator('[data-open-collection]').first().click()
     await page.waitForTimeout(1000)
 
-    for (const tab of ['overview', 'variables', 'templates', 'datasets', 'export', 'danger']) {
+    // After the restructure, the Collection page exposes exactly these
+    // four tabs. Variables + Target Templates moved behind "setup";
+    // Danger Zone moved into the kebab menu next to the title.
+    for (const tab of ['overview', 'datasets', 'setup', 'export']) {
       await expect(page.locator(`[data-tab="${tab}"]`).first()).toBeVisible()
     }
+    await expect(page.locator('[data-tab="variables"]')).toHaveCount(0)
+    await expect(page.locator('[data-tab="templates"]')).toHaveCount(0)
+    await expect(page.locator('[data-tab="danger"]')).toHaveCount(0)
+  })
+
+  test('legacy hash #/c/<id>/variables redirects to the setup tab', async ({ page }) => {
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(2000)
+
+    // Pick a collection id from the open buttons rather than hard-coding
+    // "default" so this still passes if seed data changes.
+    const openBtn = page.locator('[data-open-collection]').first()
+    const collectionId = await openBtn.getAttribute('data-open-collection')
+    expect(collectionId).toBeTruthy()
+
+    await page.goto(`${BASE_URL}/plugins/synaform#tx-c/${collectionId}/variables`)
+    await page.waitForSelector('[data-testid="setup-tab"]', { timeout: 10_000 })
+    await expect(page.locator('[data-tab="setup"].active')).toBeVisible()
+  })
+
+  test('setup tab stacks Variables and Target Templates sections', async ({ page }) => {
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(2000)
+
+    await page.locator('[data-open-collection]').first().click()
+    await page.waitForTimeout(500)
+    await page.locator('[data-tab="setup"]').first().click()
+    await page.waitForSelector('[data-testid="setup-tab"]', { timeout: 5000 })
+
+    await expect(page.locator('[data-testid="setup-section-variables"]')).toBeVisible()
+    await expect(page.locator('[data-testid="setup-section-templates"]')).toBeVisible()
+  })
+
+  test('kebab menu exposes Edit and Danger Zone', async ({ page }) => {
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(2000)
+
+    await page.locator('[data-open-collection]').first().click()
+    await page.waitForTimeout(500)
+
+    const kebab = page.locator('[data-testid="btn-collection-menu"]')
+    await expect(kebab).toBeVisible()
+    await kebab.click()
+
+    await expect(page.locator('[data-testid="menu-edit-collection"]')).toBeVisible()
+    await expect(page.locator('[data-testid="menu-open-danger"]')).toBeVisible()
+
+    // Open the Danger Zone modal and verify the typed-name confirm UI is gated.
+    await page.locator('[data-testid="menu-open-danger"]').click()
+    const dangerModal = page.locator('[data-testid="modal-danger"]')
+    await expect(dangerModal).toBeVisible()
+    const confirmInput = dangerModal.locator('#tx-danger-input')
+    await expect(confirmInput).toBeVisible()
+    const deleteBtn = dangerModal.locator('[data-action="delete-collection"]')
+    await expect(deleteBtn).toBeDisabled()
   })
 
   test('datasets tab inside a collection is reachable', async ({ page }) => {
@@ -414,15 +489,15 @@ test.describe('Synaform UI Tests', () => {
     }
   })
 
-  test('variables tab shows the default collection fields', async ({ page }) => {
+  test('variables editor is reachable inside the Set up tab', async ({ page }) => {
     await page.goto(`${BASE_URL}/plugins/synaform`)
     await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
     await page.locator('[data-open-collection]').first().click()
     await page.waitForTimeout(500)
-    await page.locator('[data-tab="variables"]').first().click()
-    await page.waitForTimeout(1000)
+    await page.locator('[data-tab="setup"]').first().click()
+    await page.waitForSelector('[data-testid="setup-section-variables"]', { timeout: 5000 })
 
     await expect(page.locator('text=target-position').first()).toBeVisible({ timeout: 5000 }).catch(() => {})
     await expect(page.locator('text=nationality').first()).toBeVisible({ timeout: 5000 }).catch(() => {})
