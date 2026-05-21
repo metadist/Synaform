@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.2.3";
+const TX_VERSION = "v3.3.1";
 
 export default {
   mount(el, context) {
@@ -37,6 +37,62 @@ export default {
       showVariablesHelp: false,
       showTemplatesHelp: false,
       showExportHelp: false,
+
+      // Collection title kebab menu (Edit + Danger Zone). The Danger
+      // Zone used to be its own top-level tab, which made it too easy
+      // to land on accidentally — it now lives inside this menu and
+      // opens as a modal when picked.
+      collectionMenuOpen: false,
+      dangerOpen: false,
+
+      // Split "Set up Collection" button (Collections list + Overview).
+      // Holds the id of the currently-open dropdown so multiple
+      // instances on the same page don't fight over a single open flag.
+      // The primary click runs the guided-wizard flow; the dropdown
+      // exposes the per-entry-point shortcuts and the manual escape
+      // hatch.
+      setupMenuOpen: null,
+      // Which split-button mode the user picked when falling back to
+      // the manual editor — drives where we land after save
+      // ("manual" -> Overview tab; the wizard paths handle their own
+      // landing inside the wizard).
+      pendingSetupMode: null,
+
+      // Setup Wizard (5 steps). The wizard is a fully self-contained
+      // modal driven entirely by the `wizard` substate; every step is
+      // persisted to the backend as the user advances so cancelling
+      // mid-flow always leaves a resumable draft Collection behind.
+      // mode: "template" | "noTemplate" — chosen on step 0. Determines
+      // whether step 2 (template upload) is part of the path.
+      wizard: {
+        open: false,
+        step: 0,
+        mode: null,
+        // Draft Collection being assembled. collectionId is null until
+        // the user finishes step 1 (basics); after that every step
+        // persists changes against this id.
+        collectionId: null,
+        name: "",
+        description: "",
+        language: "",
+        templateId: null,
+        templateName: "",
+        templatePlaceholderCount: 0,
+        templateFile: null,
+        templateUploading: false,
+        templateError: null,
+        suggestions: null,
+        suggestionsLoading: false,
+        suggestionsError: null,
+        suggestionsSelected: {},
+        pastedText: "",
+        pastedParsing: false,
+        pastedError: null,
+        pastedFields: null,
+        fields: [],
+        saving: false,
+        error: null,
+      },
 
       // Dataset editing state
       datasetsSearch: "",
@@ -704,12 +760,16 @@ export default {
     // Router
     // =========================================================================
 
+    // Includes legacy tab names ("variables", "templates", "danger") so old
+    // bookmarks still parse cleanly — normalizeCollectionTab() then folds
+    // them into the new "setup" tab (or the Danger Zone modal).
     const VALID_TABS = [
       "overview",
+      "datasets",
+      "setup",
+      "export",
       "variables",
       "templates",
-      "datasets",
-      "export",
       "danger",
     ];
 
@@ -732,8 +792,27 @@ export default {
       const r = parseHash();
       state.view = r.view;
       state.collectionId = r.collectionId || null;
-      state.tab = r.tab || "overview";
+      state.tab = normalizeCollectionTab(r.tab || "overview");
       state.datasetId = r.datasetId || null;
+    }
+
+    // The Collection page used to expose six tabs (overview / variables /
+    // templates / datasets / export / danger). Variables and Templates are
+    // now folded behind a single "Set up" tab, and Danger Zone is a kebab
+    // menu modal. Legacy hashes are remapped so bookmarks still land on
+    // the right page; old #/danger requests pop the modal automatically.
+    function normalizeCollectionTab(tab) {
+      if (tab === "variables" || tab === "templates" || tab === "setup") {
+        return "setup";
+      }
+      if (tab === "danger") {
+        state.dangerOpen = true;
+        return "overview";
+      }
+      if (["overview", "datasets", "export"].includes(tab)) {
+        return tab;
+      }
+      return "overview";
     }
 
     function writeHash() {
@@ -748,6 +827,9 @@ export default {
     }
 
     async function navigate(updates) {
+      if (typeof updates.tab === "string") {
+        updates.tab = normalizeCollectionTab(updates.tab);
+      }
       Object.assign(state, updates);
       // Reset transient state per view
       if (updates.view && updates.view !== "collection") {
@@ -756,8 +838,12 @@ export default {
         state.selectedDataset = null;
         state.newDatasetOpen = false;
         state.newCollectionOpen = false;
+        state.collectionMenuOpen = false;
+        state.dangerOpen = false;
+        state.setupMenuOpen = null;
       }
       if (updates.view === "collection" || updates.tab) {
+        state.collectionMenuOpen = false;
         state.selectedDataset = null;
         state.datasetId = updates.datasetId || null;
         state.datasetVariables = null;
@@ -904,7 +990,7 @@ export default {
       .tx-badge-image { background: color-mix(in srgb, var(--status-info, #3b82f6) 12%, transparent); color: var(--status-info, #3b82f6); border-color: color-mix(in srgb, var(--status-info, #3b82f6) 30%, transparent); }
       .tx-badge-plain { background: var(--bg-chip); color: var(--txt-secondary); border-color: var(--divider); }
       .tx-divider { border-color: var(--divider); }
-      .tx-drop { border: 2px dashed var(--divider); border-radius: .5rem; background: var(--bg-card); text-align: center; padding: 1.25rem; cursor: pointer; transition: border-color .15s, background .15s; }
+      .tx-drop { display: block; border: 2px dashed var(--divider); border-radius: .5rem; background: var(--bg-card); text-align: center; padding: 1.25rem; cursor: pointer; transition: border-color .15s, background .15s; }
       .tx-drop:hover { border-color: var(--brand); background: var(--brand-alpha-light); }
       .tx-help-trigger { display: inline-flex; align-items: center; justify-content: center; width: 1.1rem; height: 1.1rem; border-radius: 9999px; color: var(--txt-secondary); cursor: pointer; border: none; background: transparent; padding: 0; }
       .tx-help-trigger:hover { color: var(--brand); background: var(--brand-alpha-light); }
@@ -1138,17 +1224,201 @@ export default {
     // Collections list view
     // =========================================================================
 
+    /**
+     * A Collection is treated as a "draft" when the user has created the
+     * shell but not yet defined any variables or attached any templates
+     * and hasn't gathered any datasets either. This heuristic intentionally
+     * also covers Collections created through the new split-button "guided
+     * wizard" entry point so users can pick up where they left off without
+     * any backend schema changes. Once the user adds a single variable,
+     * uploads a template, or saves a dataset, the Collection graduates
+     * out of the Drafts section automatically.
+     */
+    function isDraftCollection(c) {
+      const vars = c.fields?.length || 0;
+      const tpls = collectionTemplates(c).length;
+      const dsets = datasetsForCollection(c.id).length;
+      return vars === 0 && tpls === 0 && dsets === 0;
+    }
+
+    /**
+     * Returns true when the Collection is ready to do daily work
+     * (defined variables AND at least one Word template attached).
+     * Used to decide the default landing tab when a card is opened.
+     */
+    function isCollectionReady(c) {
+      const vars = c?.fields?.length || 0;
+      const tpls = collectionTemplates(c).length;
+      return vars > 0 && tpls > 0;
+    }
+
+    /**
+     * Default landing tab when the user opens a Collection (from a card
+     * click or from any cross-link without an explicit tab). Ready
+     * Collections jump straight to Datasets — the user's daily work
+     * surface — while incomplete or draft ones stay on Overview where
+     * the next-step nudges live.
+     */
+    function defaultLandingTab(c) {
+      return isCollectionReady(c) ? "datasets" : "overview";
+    }
+
+    /**
+     * Most recent dataset that is NOT yet finished — i.e. something the
+     * user is likely mid-flow on. Generated documents are excluded
+     * because re-opening them rarely has value; users typically want to
+     * pick up an incomplete one. Returns null when there is nothing
+     * to continue.
+     */
+    function findContinuableDataset(collectionId) {
+      const open = datasetsForCollection(collectionId).filter((d) => {
+        const s = d.status || "draft";
+        return s !== "generated";
+      });
+      if (open.length === 0) return null;
+      return open
+        .slice()
+        .sort(
+          (a, b) =>
+            new Date(b.updated_at || b.created_at || 0) -
+            new Date(a.updated_at || a.created_at || 0),
+        )[0];
+    }
+
+    /**
+     * Split-button for setup-time entry points. The primary click runs the
+     * "guided wizard" path; the dropdown exposes the per-entry-point
+     * shortcuts and a manual escape hatch. PR2 wires every option to the
+     * existing manual New-Collection modal (the wizard ships in PR3); the
+     * entry-point mode is forwarded via `data-mode` so the wizard can
+     * later choose which step to land on.
+     *
+     * `id` distinguishes multiple instances on the same page (Collections
+     * list, Drafts banner, etc.) so the dropdown state doesn't bleed.
+     */
+    function renderSetupSplitButton(id, opts = {}) {
+      const label = opts.label || T("collections.new");
+      const size = opts.size === "sm" ? "tx-btn-sm" : "";
+      const open = state.setupMenuOpen === id;
+      const dropdownItems = [
+        {
+          mode: "wizard",
+          icon: ICONS.sparkle,
+          label: T("setup.menu_wizard"),
+          hint: T("setup.menu_wizard_hint"),
+          primary: true,
+        },
+        {
+          mode: "template",
+          icon: ICONS.file,
+          label: T("setup.menu_from_template"),
+          hint: T("setup.menu_from_template_hint"),
+        },
+        {
+          mode: "text",
+          icon: ICONS.upload,
+          label: T("setup.menu_from_text"),
+          hint: T("setup.menu_from_text_hint"),
+        },
+        { divider: true },
+        {
+          mode: "manual",
+          icon: ICONS.edit,
+          label: T("setup.menu_manual"),
+          hint: T("setup.menu_manual_hint"),
+        },
+      ];
+
+      const menu = open
+        ? `<div data-action="setup-menu-close" style="position:fixed;inset:0;z-index:30"></div>
+           <div role="menu" data-testid="setup-menu-${escHtml(id)}" class="tx-card" style="position:absolute;top:calc(100% + .25rem);right:0;min-width:18rem;z-index:31;padding:.375rem 0;box-shadow:0 8px 24px rgba(0,0,0,.16)">
+             ${dropdownItems
+               .map((item) => {
+                 if (item.divider) {
+                   return `<div style="height:1px;background:var(--divider);margin:.25rem 0"></div>`;
+                 }
+                 return `<button data-action="setup-action" data-mode="${item.mode}" data-id="${escHtml(id)}" data-testid="setup-menu-item-${item.mode}" role="menuitem" class="w-full text-left flex items-start gap-2 px-3 py-2 text-sm tx-row" style="border-radius:0;background:transparent;box-shadow:none">
+                   <span style="color:var(--brand);flex-shrink:0;margin-top:.125rem">${item.icon}</span>
+                   <span class="flex-1">
+                     <span class="block font-medium${item.primary ? "" : ""}">${escHtml(item.label)}</span>
+                     ${item.hint ? `<span class="block text-xs tx-secondary mt-0.5">${escHtml(item.hint)}</span>` : ""}
+                   </span>
+                 </button>`;
+               })
+               .join("")}
+           </div>`
+        : "";
+
+      return `<div style="position:relative;display:inline-flex" data-testid="setup-splitbutton-${escHtml(id)}">
+        <button data-action="setup-action" data-mode="wizard" data-id="${escHtml(id)}" data-testid="setup-splitbutton-primary-${escHtml(id)}" class="tx-btn ${size}" style="border-top-right-radius:0;border-bottom-right-radius:0">
+          ${ICONS.sparkle} <span>${escHtml(label)}</span>
+        </button>
+        <button data-action="setup-menu-toggle" data-id="${escHtml(id)}" data-testid="setup-splitbutton-chevron-${escHtml(id)}" aria-haspopup="menu" aria-expanded="${open ? "true" : "false"}" aria-label="${T("setup.menu_more_options")}" class="tx-btn ${size}" style="border-top-left-radius:0;border-bottom-left-radius:0;border-left:1px solid color-mix(in srgb, #000 18%, transparent);padding-left:.5rem;padding-right:.5rem">
+          ${ICONS.chevDown}
+        </button>
+        ${menu}
+      </div>`;
+    }
+
+    function renderDraftsSection(drafts) {
+      if (drafts.length === 0) return "";
+      const cards = drafts
+        .map(
+          (
+            d,
+          ) => `<div class="tx-row p-4 flex items-center justify-between gap-3" data-testid="draft-card" data-draft-id="${escHtml(d.id)}">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <span style="color:var(--status-warning,#d97706)">${ICONS.clock}</span>
+                <span class="font-semibold truncate">${escHtml(d.name)}</span>
+                <span class="tx-badge" style="background:color-mix(in srgb, var(--status-warning,#d97706) 14%, transparent);color:var(--status-warning,#d97706)">${T("collections.draft_badge")}</span>
+              </div>
+              ${d.description ? `<p class="text-xs tx-secondary mt-1 line-clamp-2">${escHtml(d.description)}</p>` : ""}
+              <div class="text-xs tx-secondary mt-1">${T("app.created")}: ${formatDate(d.created_at)}</div>
+            </div>
+            <div class="flex items-center gap-2 flex-shrink-0">
+              <button data-action="draft-resume" data-id="${escHtml(d.id)}" data-testid="draft-resume" class="tx-btn tx-btn-sm">
+                ${ICONS.sparkle} ${T("collections.draft_resume")}
+              </button>
+              <button data-action="draft-discard" data-id="${escHtml(d.id)}" data-name="${escHtml(d.name)}" data-testid="draft-discard" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)" title="${T("collections.draft_discard_hint")}">
+                ${ICONS.trash}
+              </button>
+            </div>
+          </div>`,
+        )
+        .join("");
+      return `<section data-testid="drafts-section" class="space-y-2">
+        <div class="flex items-center gap-2">
+          <h3 class="text-sm font-semibold uppercase tracking-wider tx-secondary">${T("collections.drafts_title")} (${drafts.length})</h3>
+          <span class="text-xs tx-secondary">— ${T("collections.drafts_hint")}</span>
+        </div>
+        <div class="space-y-1.5">${cards}</div>
+      </section>`;
+    }
+
     function renderCollectionsList() {
       const q = state.collectionsSearch.trim().toLowerCase();
-      const list = (state.forms || []).filter((f) => {
-        if (!q) return true;
-        return (
-          f.name?.toLowerCase().includes(q) ||
-          f.description?.toLowerCase().includes(q)
-        );
-      });
+      const allForms = state.forms || [];
+      const drafts = allForms
+        .filter((f) => isDraftCollection(f))
+        .filter((f) => {
+          if (!q) return true;
+          return (
+            f.name?.toLowerCase().includes(q) ||
+            f.description?.toLowerCase().includes(q)
+          );
+        });
+      const ready = allForms
+        .filter((f) => !isDraftCollection(f))
+        .filter((f) => {
+          if (!q) return true;
+          return (
+            f.name?.toLowerCase().includes(q) ||
+            f.description?.toLowerCase().includes(q)
+          );
+        });
 
-      const cards = list
+      const cards = ready
         .map((c) => {
           const datasets = datasetsForCollection(c.id);
           const templates = collectionTemplates(c);
@@ -1195,23 +1465,667 @@ export default {
           </div>
           <div class="flex items-center gap-2">
             ${
-              state.forms.length > 0
+              allForms.length > 0
                 ? `<div class="relative">
                     <span class="absolute top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" style="left:12px">${ICONS.search}</span>
                     <input id="tx-collections-search" type="text" value="${escHtml(state.collectionsSearch)}" placeholder="${T("app.search")}" class="tx-input" style="padding-left:36px;min-width:220px" />
                   </div>`
                 : ""
             }
-            <button data-action="new-collection" class="tx-btn">${ICONS.plus} ${T("collections.new")}</button>
+            ${renderSetupSplitButton("new")}
           </div>
         </div>
+        ${renderDraftsSection(drafts)}
         ${
-          state.forms.length === 0
+          allForms.length === 0
             ? emptyHelp
-            : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards}</div>`
+            : ready.length === 0
+              ? ""
+              : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards}</div>`
         }
         ${state.newCollectionOpen ? renderCollectionEditor() : ""}
+        ${state.wizard.open ? renderWizardModal() : ""}
         ${renderHelpModal()}
+      </div>`;
+    }
+
+    // =========================================================================
+    // Setup Wizard (5 steps)
+    //
+    //   Step 0 — Chooser ("I have a template" vs "I don't have one yet")
+    //   Step 1 — Basics (name + description + language) — creates the draft
+    //   Step 2 — Template upload (skipped on the "noTemplate" path)
+    //   Step 3 — Fields (auto-derived from template, or AI-parsed text,
+    //                    or jumps to the manual editor)
+    //   Step 4 — Review + finish
+    //
+    // Every step persists progress against a real Collection in the
+    // backend, so cancelling at any point leaves a resumable draft.
+    // =========================================================================
+
+    const WIZARD_STEPS = ["chooser", "basics", "template", "fields", "review"];
+
+    function visibleWizardSteps() {
+      // "noTemplate" path hides the Template step but keeps a placeholder
+      // pill so the progress bar doesn't visually shrink mid-flow.
+      return state.wizard.mode === "noTemplate"
+        ? WIZARD_STEPS.filter((s) => s !== "template")
+        : WIZARD_STEPS;
+    }
+
+    function wizardOpen(opts = {}) {
+      const w = state.wizard;
+      const mode = opts.mode === "template" ? "template" : null;
+      // Reset everything to baseline so a previous run never leaks into
+      // a fresh wizard session. Resume mode (opts.resumeCollectionId)
+      // hydrates the basics from the existing form so step 1 is
+      // pre-filled.
+      const baseline = {
+        open: true,
+        step: 0,
+        mode,
+        collectionId: opts.resumeCollectionId || null,
+        name: "",
+        description: "",
+        language: state.config?.default_language || "en",
+        templateId: null,
+        templateName: "",
+        templatePlaceholderCount: 0,
+        templateFile: null,
+        templateUploading: false,
+        templateError: null,
+        suggestions: null,
+        suggestionsLoading: false,
+        suggestionsError: null,
+        suggestionsSelected: {},
+        pastedText: "",
+        pastedParsing: false,
+        pastedError: null,
+        pastedFields: null,
+        fields: [],
+        saving: false,
+        error: null,
+      };
+      if (opts.resumeCollectionId) {
+        const c = collectionById(opts.resumeCollectionId);
+        if (c) {
+          baseline.name = c.name || "";
+          baseline.description = c.description || "";
+          baseline.language = c.language || baseline.language;
+          baseline.fields = c.fields || [];
+          // Skip the chooser when resuming — they already made the
+          // structural decision when they first started.
+          baseline.step = 1;
+          baseline.mode =
+            collectionTemplates(c).length > 0 ? "template" : "noTemplate";
+        }
+      }
+      // When opt.mode is "text" we jump straight into the text-paste
+      // flow inside step 3, which we model as the noTemplate path.
+      if (opts.mode === "text") {
+        baseline.mode = "noTemplate";
+        baseline.step = 1;
+      } else if (mode === "template") {
+        baseline.step = 1;
+      }
+      Object.assign(state.wizard, baseline);
+      state.setupMenuOpen = null;
+      render();
+    }
+
+    function wizardClose() {
+      // We deliberately do NOT delete the draft Collection here — the
+      // whole point of persistent drafts is that closing mid-flow
+      // leaves the user a Continue-setup card on the Collections list.
+      state.wizard.open = false;
+      render();
+    }
+
+    function wizardCanAdvance() {
+      const w = state.wizard;
+      switch (w.step) {
+        case 0:
+          return w.mode === "template" || w.mode === "noTemplate";
+        case 1:
+          return (w.name || "").trim().length > 0;
+        case 2:
+          // Template step: either upload one (templateId set) or skip
+          // (the Skip button itself calls wizardNext, so the Next button
+          // only enables when a template is uploaded).
+          return !!w.templateId;
+        case 3:
+          // Fields step is OK as long as the user has SOMETHING to
+          // generate against. They can also continue with zero fields
+          // and edit later in the manual editor.
+          return true;
+        case 4:
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    async function wizardSaveBasics() {
+      const w = state.wizard;
+      const payload = {
+        name: w.name.trim(),
+        description: (w.description || "").trim(),
+        language: w.language || state.config.default_language || "en",
+      };
+      w.saving = true;
+      w.error = null;
+      render();
+      try {
+        if (w.collectionId) {
+          await api(`/forms/${w.collectionId}`, {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          });
+        } else {
+          const res = await api("/forms", {
+            method: "POST",
+            body: JSON.stringify({ ...payload, fields: [] }),
+          });
+          w.collectionId = res.form.id;
+        }
+        await fetchForms();
+      } catch (err) {
+        w.error = err.message;
+        throw err;
+      } finally {
+        w.saving = false;
+      }
+    }
+
+    async function wizardUploadTemplate() {
+      const w = state.wizard;
+      const file = w.templateFile;
+      if (!file || !w.collectionId) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("name", file.name.replace(/\.docx$/i, ""));
+      w.templateUploading = true;
+      w.templateError = null;
+      render();
+      try {
+        const res = await fetch(`${BASE}/templates`, {
+          method: "POST",
+          credentials: "include",
+          body: fd,
+        });
+        if (!res.ok) {
+          let msg = `Upload failed (${res.status})`;
+          try {
+            const j = await res.json();
+            if (j.message) msg = j.message;
+          } catch (_) {
+            /* ignore */
+          }
+          throw new Error(msg);
+        }
+        const body = await res.json();
+        w.templateId = body.template.id;
+        w.templateName = body.template.name;
+        w.templatePlaceholderCount =
+          body.template.placeholder_count ??
+          body.template.placeholders?.length ??
+          0;
+        // Link the template to this collection so it appears on the
+        // Templates tab + survives wizard cancellation.
+        const c = collectionById(w.collectionId);
+        const existing = Array.isArray(c?.template_ids) ? c.template_ids : [];
+        if (!existing.includes(body.template.id)) {
+          await api(`/forms/${w.collectionId}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              template_ids: [...existing, body.template.id],
+            }),
+          });
+        }
+        await Promise.all([fetchTemplates(), fetchForms()]);
+        await wizardLoadSuggestions();
+      } catch (err) {
+        w.templateError = err.message;
+      } finally {
+        w.templateUploading = false;
+        render();
+      }
+    }
+
+    async function wizardLoadSuggestions() {
+      const w = state.wizard;
+      if (!w.templateId) return;
+      w.suggestionsLoading = true;
+      w.suggestionsError = null;
+      render();
+      try {
+        const res = await api(
+          `/templates/${w.templateId}/variable-suggestions`,
+        );
+        w.suggestions = res;
+        // Pre-tick every non-duplicate suggestion. Users uncheck what
+        // they don't want — much faster than ticking from a blank state.
+        const sel = {};
+        (res.suggestions || []).forEach((s, i) => {
+          sel[i] = s._status !== "duplicate";
+        });
+        w.suggestionsSelected = sel;
+      } catch (err) {
+        w.suggestionsError = err.message;
+      } finally {
+        w.suggestionsLoading = false;
+        render();
+      }
+    }
+
+    async function wizardParsePastedText() {
+      const w = state.wizard;
+      if (!w.pastedText.trim()) return;
+      w.pastedParsing = true;
+      w.pastedError = null;
+      render();
+      try {
+        const res = await api("/forms/import-parse", {
+          method: "POST",
+          body: JSON.stringify({ text: w.pastedText }),
+        });
+        w.pastedFields = res.fields || [];
+      } catch (err) {
+        w.pastedError = err.message;
+      } finally {
+        w.pastedParsing = false;
+        render();
+      }
+    }
+
+    async function wizardSaveFields() {
+      const w = state.wizard;
+      let chosen = [];
+      if (w.mode === "template" && w.suggestions) {
+        chosen = (w.suggestions.suggestions || [])
+          .map((s, i) => ({ s, i }))
+          .filter(
+            ({ s, i }) => w.suggestionsSelected[i] && s._status !== "duplicate",
+          )
+          .map(({ s }) => {
+            const copy = { ...s };
+            delete copy._status;
+            return copy;
+          });
+      } else if (w.pastedFields) {
+        chosen = w.pastedFields.map((f) => ({ ...f }));
+      }
+      // Merge with any fields the existing Collection already had
+      // (resume case: don't blow away existing variables silently).
+      const c = collectionById(w.collectionId);
+      const existing = c?.fields || [];
+      const existingKeys = new Set(existing.map((f) => f.key));
+      const merged = [
+        ...existing,
+        ...chosen.filter((f) => !existingKeys.has(f.key)),
+      ];
+      w.fields = merged;
+      w.saving = true;
+      w.error = null;
+      render();
+      try {
+        await api(`/forms/${w.collectionId}`, {
+          method: "PUT",
+          body: JSON.stringify({ fields: merged }),
+        });
+        await fetchForms();
+      } catch (err) {
+        w.error = err.message;
+        throw err;
+      } finally {
+        w.saving = false;
+      }
+    }
+
+    async function wizardNext() {
+      const w = state.wizard;
+      try {
+        if (w.step === 1) await wizardSaveBasics();
+        if (w.step === 3) await wizardSaveFields();
+        const steps = visibleWizardSteps();
+        const currentName = WIZARD_STEPS[w.step];
+        let idx = steps.indexOf(currentName);
+        if (idx < 0) idx = 0;
+        const nextName = steps[Math.min(steps.length - 1, idx + 1)];
+        w.step = WIZARD_STEPS.indexOf(nextName);
+        render();
+      } catch (_) {
+        /* error already surfaced via state.wizard.error */
+      }
+    }
+
+    function wizardBack() {
+      const w = state.wizard;
+      const steps = visibleWizardSteps();
+      const currentName = WIZARD_STEPS[w.step];
+      let idx = steps.indexOf(currentName);
+      if (idx <= 0) {
+        // From step 1 back to step 0; clear chosen mode so the chooser
+        // is a fresh decision.
+        w.step = 0;
+        if (currentName === "basics") w.mode = null;
+      } else {
+        const prevName = steps[idx - 1];
+        w.step = WIZARD_STEPS.indexOf(prevName);
+      }
+      render();
+    }
+
+    async function wizardFinish(landOn) {
+      const w = state.wizard;
+      const cid = w.collectionId;
+      w.open = false;
+      await fetchForms();
+      if (!cid) {
+        render();
+        return;
+      }
+      // "dataset" primary CTA always goes to Datasets so users start
+      // collecting immediately. "collection" secondary CTA uses the
+      // ready-check so an incomplete Collection still surfaces the
+      // Overview nudges instead of dropping the user on an empty
+      // Datasets tab.
+      const c = collectionById(cid);
+      const tab = landOn === "dataset" ? "datasets" : defaultLandingTab(c);
+      navigate({ view: "collection", collectionId: cid, tab });
+    }
+
+    function renderWizardModal() {
+      const w = state.wizard;
+      const steps = visibleWizardSteps();
+      const currentName = WIZARD_STEPS[w.step];
+      const currentVisibleIdx = Math.max(0, steps.indexOf(currentName));
+
+      const pills = steps
+        .map((name, idx) => {
+          const isPast = idx < currentVisibleIdx;
+          const isActive = idx === currentVisibleIdx;
+          const numCol = isPast
+            ? "background:var(--status-success);color:#fff"
+            : isActive
+              ? "background:var(--brand);color:#fff"
+              : "background:var(--bg-chip);color:var(--txt-secondary)";
+          const labelCol = isActive
+            ? "color:var(--txt-primary);font-weight:600"
+            : "color:var(--txt-secondary)";
+          return `<div class="flex items-center gap-2 flex-1 min-w-0">
+            <span class="inline-flex items-center justify-center rounded-full text-xs font-bold flex-shrink-0" style="width:1.5rem;height:1.5rem;${numCol}">${isPast ? "✓" : idx + 1}</span>
+            <span class="text-xs truncate" style="${labelCol}">${T(`wizard.step_${name}_label`)}</span>
+            ${idx < steps.length - 1 ? `<span class="flex-1" style="height:2px;background:${isPast ? "var(--status-success)" : "var(--divider)"}"></span>` : ""}
+          </div>`;
+        })
+        .join("");
+
+      let body = "";
+      switch (currentName) {
+        case "chooser":
+          body = renderWizardStepChooser();
+          break;
+        case "basics":
+          body = renderWizardStepBasics();
+          break;
+        case "template":
+          body = renderWizardStepTemplate();
+          break;
+        case "fields":
+          body = renderWizardStepFields();
+          break;
+        case "review":
+          body = renderWizardStepReview();
+          break;
+      }
+
+      const errorBanner = w.error
+        ? `<div class="tx-callout" style="background:color-mix(in srgb, var(--status-error) 12%, var(--bg-card));color:var(--status-error)">${escHtml(w.error)}</div>`
+        : "";
+
+      const isFinal = currentName === "review";
+      const canAdvance = wizardCanAdvance();
+      const isFirst = currentName === "chooser";
+
+      return `<div class="tx-modal-bg" data-action="wizard-close-backdrop" data-testid="wizard-modal">
+        <div class="tx-modal tx-modal--wide p-0" style="max-width:min(900px, 95vw);display:flex;flex-direction:column;max-height:92vh" onclick="event.stopPropagation()">
+          <div class="flex items-center justify-between p-5" style="border-bottom:1px solid var(--divider);flex:0 0 auto">
+            <h3 class="text-lg font-semibold flex items-center gap-2">
+              <span style="color:var(--brand)">${ICONS.sparkle}</span>
+              <span>${T("wizard.title")}</span>
+            </h3>
+            <button data-action="wizard-close" data-testid="wizard-close" class="tx-help-trigger" aria-label="${T("app.close")}">${ICONS.close}</button>
+          </div>
+          <div class="px-5 py-3" style="border-bottom:1px solid var(--divider);flex:0 0 auto">
+            <div class="flex items-center gap-2">${pills}</div>
+          </div>
+          <div class="p-5 space-y-4 overflow-y-auto" data-testid="wizard-step-${currentName}" style="flex:1 1 auto;min-height:0">
+            ${errorBanner}
+            ${body}
+          </div>
+          <div class="flex items-center justify-between gap-3 p-4" style="border-top:1px solid var(--divider);flex:0 0 auto;background:var(--bg-app)">
+            <div>
+              ${
+                !isFirst
+                  ? `<button data-action="wizard-back" data-testid="wizard-back" class="tx-btn tx-btn-sm tx-btn-ghost">${ICONS.back} ${T("app.back")}</button>`
+                  : ""
+              }
+            </div>
+            <div class="flex items-center gap-2">
+              <button data-action="wizard-close" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.cancel")}</button>
+              ${
+                isFinal
+                  ? `<button data-action="wizard-finish-collection" data-testid="wizard-finish" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.finish_open_collection")}</button>
+                     <button data-action="wizard-finish-dataset" data-testid="wizard-finish-primary" class="tx-btn tx-btn-sm"${w.saving ? " disabled" : ""}>${ICONS.sparkle} ${T("wizard.finish_add_dataset")}</button>`
+                  : `<button data-action="wizard-next" data-testid="wizard-next" class="tx-btn tx-btn-sm"${!canAdvance || w.saving ? " disabled" : ""}>${w.saving ? T("app.loading") : T("app.continue")} ${ICONS.chevRight}</button>`
+              }
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function renderWizardStepChooser() {
+      const mode = state.wizard.mode;
+      const card = (
+        m,
+        icon,
+        title,
+        hint,
+      ) => `<button type="button" data-action="wizard-pick-mode" data-mode="${m}" data-testid="wizard-mode-${m}" class="tx-row p-5 text-left flex items-start gap-3" style="${mode === m ? "box-shadow:inset 0 0 0 2px var(--brand)" : ""}">
+        <span class="inline-flex items-center justify-center w-10 h-10 rounded-full flex-shrink-0" style="background:var(--brand-alpha-light);color:var(--brand)">${icon}</span>
+        <div>
+          <div class="font-semibold">${escHtml(title)}</div>
+          <div class="text-xs tx-secondary mt-1">${escHtml(hint)}</div>
+        </div>
+      </button>`;
+      return `<div class="space-y-3">
+        <h4 class="text-base font-semibold">${T("wizard.chooser_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.chooser_subtitle")}</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          ${card("template", ICONS.file, T("wizard.mode_template_title"), T("wizard.mode_template_hint"))}
+          ${card("noTemplate", ICONS.variable, T("wizard.mode_no_template_title"), T("wizard.mode_no_template_hint"))}
+        </div>
+      </div>`;
+    }
+
+    function renderWizardStepBasics() {
+      const w = state.wizard;
+      const lang = w.language || state.config.default_language || "en";
+      return `<form id="tx-wizard-basics" class="space-y-3" data-testid="wizard-basics-form">
+        <h4 class="text-base font-semibold">${T("wizard.basics_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.basics_subtitle")}</p>
+        <div>
+          <label class="tx-label">${T("collections.name_label")}</label>
+          <input name="name" data-action="wizard-input-name" data-testid="wizard-input-name" value="${escHtml(w.name || "")}" class="tx-input" placeholder="${T("collections.name_placeholder")}" autofocus required />
+        </div>
+        <div>
+          <label class="tx-label">${T("collections.description_label")}</label>
+          <textarea name="description" data-action="wizard-input-description" rows="2" class="tx-textarea" placeholder="${T("collections.description_placeholder")}">${escHtml(w.description || "")}</textarea>
+        </div>
+        <div>
+          <label class="tx-label">${T("collections.language_label")}</label>
+          <select name="language" data-action="wizard-input-language" class="tx-select">
+            <option value="de"${lang === "de" ? " selected" : ""}>${T("settings.lang_de")}</option>
+            <option value="en"${lang === "en" ? " selected" : ""}>${T("settings.lang_en")}</option>
+            <option value="es"${lang === "es" ? " selected" : ""}>${T("settings.lang_es")}</option>
+            <option value="tr"${lang === "tr" ? " selected" : ""}>${T("settings.lang_tr")}</option>
+          </select>
+        </div>
+      </form>`;
+    }
+
+    function renderWizardStepTemplate() {
+      const w = state.wizard;
+      const hasTemplate = !!w.templateId;
+      const uploading = w.templateUploading;
+      const err = w.templateError;
+      return `<div class="space-y-3" data-testid="wizard-template-step">
+        <h4 class="text-base font-semibold">${T("wizard.template_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.template_subtitle")}</p>
+        ${
+          hasTemplate
+            ? `<div class="tx-row p-4 flex items-center gap-3">
+                <span style="color:var(--status-success)">${ICONS.check}</span>
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium truncate">${escHtml(w.templateName || "")}</div>
+                  <div class="text-xs tx-secondary">${w.templatePlaceholderCount} ${T("templates.placeholder_count")}</div>
+                </div>
+                <button data-action="wizard-template-replace" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_replace")}</button>
+              </div>`
+            : `<label class="tx-drop" data-testid="wizard-template-dropzone">
+                <div class="inline-flex items-center justify-center w-10 h-10 rounded-full mb-2" style="background:var(--brand-alpha-light);color:var(--brand)">${ICONS.upload}</div>
+                <p class="text-sm font-medium">${T("templates.drop_hint")}</p>
+                <input type="file" data-action="wizard-template-pick" data-testid="wizard-template-file" accept=".docx" class="hidden" />
+              </label>`
+        }
+        ${uploading ? `<div class="text-sm tx-secondary"><span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full align-middle"></span> ${T("templates.uploading")}</div>` : ""}
+        ${err ? `<div class="text-sm" style="color:var(--status-error)">${escHtml(err)}</div>` : ""}
+        ${!hasTemplate ? `<button data-action="wizard-skip-template" data-testid="wizard-skip-template" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_skip")}</button>` : ""}
+      </div>`;
+    }
+
+    function renderWizardStepFields() {
+      const w = state.wizard;
+      if (w.mode === "template") return renderWizardStepFieldsFromTemplate();
+      return renderWizardStepFieldsFromText();
+    }
+
+    function renderWizardStepFieldsFromTemplate() {
+      const w = state.wizard;
+      if (w.suggestionsLoading) {
+        return `<div class="text-sm tx-secondary py-6 text-center">
+          <span class="animate-spin inline-block w-5 h-5 border-2 border-current border-t-transparent rounded-full"></span>
+          <p class="mt-2">${T("wizard.fields_detecting")}</p>
+        </div>`;
+      }
+      if (w.suggestionsError) {
+        return `<div class="text-sm" style="color:var(--status-error)">${escHtml(w.suggestionsError)}</div>`;
+      }
+      if (!w.suggestions) {
+        return `<div class="text-sm tx-secondary">${T("wizard.fields_template_missing")}</div>`;
+      }
+      const sugg = w.suggestions.suggestions || [];
+      const rows = sugg
+        .map((s, i) => {
+          const dup = s._status === "duplicate";
+          const checked = !!w.suggestionsSelected[i] && !dup;
+          return `<tr class="tx-divider border-t${dup ? " opacity-60" : ""}">
+            <td class="py-2 px-3"><input type="checkbox" data-action="wizard-suggestion-toggle" data-idx="${i}" data-testid="wizard-suggestion-${i}" ${checked ? "checked" : ""} ${dup ? "disabled" : ""} class="h-4 w-4" style="accent-color:var(--brand)" /></td>
+            <td class="py-2 px-3 font-mono text-xs">${escHtml(s.key)}${dup ? ` <span class="tx-secondary text-xs">(${T("variables.import_duplicate_key")})</span>` : ""}</td>
+            <td class="py-2 px-3 text-sm">${escHtml(s.label || "")}</td>
+            <td class="py-2 px-3 text-xs">${escHtml(T(`variables.type_${s.type}`, s.type))}</td>
+          </tr>`;
+        })
+        .join("");
+      const summary = Tf("wizard.fields_template_summary", {
+        total: sugg.length,
+        selected: Object.values(w.suggestionsSelected).filter(Boolean).length,
+      });
+      return `<div class="space-y-3" data-testid="wizard-fields-template">
+        <h4 class="text-base font-semibold">${T("wizard.fields_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.fields_template_subtitle")}</p>
+        <p class="text-xs tx-secondary">${escHtml(summary)}</p>
+        <div class="tx-card p-0 overflow-x-auto">
+          <table class="w-full text-left">
+            <thead>
+              <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
+                <th class="py-2 px-3">${T("variables.import_col_use")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_key")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_label")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_type")}</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+    }
+
+    function renderWizardStepFieldsFromText() {
+      const w = state.wizard;
+      const parsed = w.pastedFields;
+      return `<div class="space-y-3" data-testid="wizard-fields-text">
+        <h4 class="text-base font-semibold">${T("wizard.fields_text_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.fields_text_subtitle")}</p>
+        <textarea data-action="wizard-paste-text" data-testid="wizard-paste-text" rows="6" class="tx-textarea" placeholder="${T("variables.import_hint")}" style="font-family:monospace;font-size:.8rem">${escHtml(w.pastedText || "")}</textarea>
+        <div class="flex items-center gap-2">
+          <button data-action="wizard-parse-text" data-testid="wizard-parse-text" class="tx-btn tx-btn-sm"${w.pastedParsing ? " disabled" : ""}>
+            ${w.pastedParsing ? `<span class="animate-spin inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full"></span>` : ICONS.sparkle}
+            ${w.pastedParsing ? T("app.loading") : T("wizard.fields_text_parse")}
+          </button>
+          ${w.pastedError ? `<span class="text-xs" style="color:var(--status-error)">${escHtml(w.pastedError)}</span>` : ""}
+        </div>
+        ${
+          parsed && parsed.length > 0
+            ? `<div class="tx-card p-3">
+                <div class="text-xs tx-secondary mb-2">${parsed.length} ${T("wizard.fields_text_parsed")}</div>
+                <ul class="text-sm space-y-0.5">
+                  ${parsed
+                    .map(
+                      (f) =>
+                        `<li>· <span class="font-mono text-xs">${escHtml(f.key)}</span> — ${escHtml(f.label || "")} <span class="tx-secondary text-xs">(${escHtml(T(`variables.type_${f.type || "text"}`, f.type || "text"))})</span></li>`,
+                    )
+                    .join("")}
+                </ul>
+              </div>`
+            : `<p class="text-xs tx-secondary">${T("wizard.fields_text_empty")}</p>`
+        }
+      </div>`;
+    }
+
+    function renderWizardStepReview() {
+      const w = state.wizard;
+      const c = collectionById(w.collectionId);
+      const vars = c?.fields?.length || 0;
+      const tpls = c ? collectionTemplates(c).length : 0;
+      return `<div class="space-y-3" data-testid="wizard-review">
+        <h4 class="text-base font-semibold">${T("wizard.review_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.review_subtitle")}</p>
+        <div class="tx-card p-4 space-y-2">
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-xs tx-secondary uppercase tracking-wider">${T("collections.name_label")}</div>
+            <div class="font-medium text-sm truncate">${escHtml(c?.name || w.name)}</div>
+          </div>
+          ${
+            c?.description || w.description
+              ? `<div class="flex items-start justify-between gap-3">
+                  <div class="text-xs tx-secondary uppercase tracking-wider">${T("collections.description_label")}</div>
+                  <div class="text-sm" style="max-width:60%">${escHtml(c?.description || w.description)}</div>
+                </div>`
+              : ""
+          }
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-xs tx-secondary uppercase tracking-wider">${T("collection.overview_stats_variables")}</div>
+            <div class="font-medium text-sm">${vars}</div>
+          </div>
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-xs tx-secondary uppercase tracking-wider">${T("collection.overview_stats_templates")}</div>
+            <div class="font-medium text-sm">${tpls}</div>
+          </div>
+        </div>
+        <p class="text-xs tx-secondary">${T("wizard.review_hint")}</p>
       </div>`;
     }
 
@@ -1265,14 +2179,30 @@ export default {
         </div>`;
       }
 
+      // The Collection cockpit was restructured so daily work (Datasets)
+      // is front and centre; setup (Variables + Target Templates) is
+      // folded behind a single "Set up" tab; the destructive Danger Zone
+      // moved into the kebab menu next to the title so users can't land
+      // on it by mistake.
       const tabs = [
         { id: "overview", label: T("collection.tab_overview") },
-        { id: "variables", label: T("collection.tab_variables") },
-        { id: "templates", label: T("collection.tab_templates") },
         { id: "datasets", label: T("collection.tab_datasets") },
+        { id: "setup", label: T("collection.tab_setup") },
         { id: "export", label: T("collection.tab_export") },
-        { id: "danger", label: T("collection.tab_danger"), danger: true },
       ];
+
+      const menu = state.collectionMenuOpen
+        ? `<div data-action="close-collection-menu" style="position:fixed;inset:0;z-index:30"></div>
+           <div role="menu" class="tx-card" style="position:absolute;top:calc(100% + .25rem);right:0;min-width:14rem;z-index:31;padding:.25rem 0;box-shadow:0 8px 24px rgba(0,0,0,.12)">
+             <button data-action="edit-collection" data-testid="menu-edit-collection" role="menuitem" class="w-full text-left flex items-center gap-2 px-3 py-2 text-sm tx-row" style="border-radius:0;background:transparent;box-shadow:none">
+               ${ICONS.edit} ${T("collection.menu_edit")}
+             </button>
+             <div style="height:1px;background:var(--divider);margin:.25rem 0"></div>
+             <button data-action="open-danger" data-testid="menu-open-danger" role="menuitem" class="w-full text-left flex items-center gap-2 px-3 py-2 text-sm tx-row" style="border-radius:0;background:transparent;box-shadow:none;color:var(--status-error)">
+               ${ICONS.trash} ${T("collection.menu_danger")}
+             </button>
+           </div>`
+        : "";
 
       return `<div class="mt-4 space-y-5">
         <div>
@@ -1285,41 +2215,79 @@ export default {
               </h2>
               ${c.description ? `<p class="text-sm tx-secondary mt-1">${escHtml(c.description)}</p>` : ""}
             </div>
-            <button data-action="edit-collection" class="tx-btn tx-btn-sm tx-btn-ghost">${ICONS.edit} ${T("app.edit")}</button>
+            <div style="position:relative">
+              <button data-action="toggle-collection-menu" data-testid="btn-collection-menu" aria-haspopup="menu" aria-expanded="${state.collectionMenuOpen ? "true" : "false"}" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("collection.menu_more")}" aria-label="${T("collection.menu_more")}">
+                <span aria-hidden="true" style="font-size:1.1rem;line-height:1;letter-spacing:.1em">\u22EF</span>
+              </button>
+              ${menu}
+            </div>
           </div>
         </div>
 
-        <nav class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
+        <nav data-testid="collection-tabs" class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
           ${tabs
             .map(
               (t) =>
-                `<button data-tab="${t.id}" class="tx-tab${state.tab === t.id ? " active" : ""}${t.danger ? " danger" : ""}">${t.label}</button>`,
+                `<button data-tab="${t.id}" class="tx-tab${state.tab === t.id ? " active" : ""}">${t.label}</button>`,
             )
             .join("")}
         </nav>
 
         <div>${renderCollectionTab(c)}</div>
         ${state.editingCollection && !state.newCollectionOpen ? renderCollectionEditor() : ""}
+        ${state.dangerOpen ? renderDangerModal(c) : ""}
+        ${state.wizard.open ? renderWizardModal() : ""}
         ${renderHelpModal()}
+      </div>`;
+    }
+
+    // Danger Zone (formerly a top-level tab) lives in a modal triggered
+    // from the kebab menu so accidental clicks during normal work are
+    // impossible. Content/behaviour is unchanged from the old tab.
+    function renderDangerModal(c) {
+      return `<div class="tx-modal-bg" data-action="close-danger-modal">
+        <div class="tx-modal p-6" data-testid="modal-danger" onclick="event.stopPropagation()">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-lg font-semibold flex items-center gap-2" style="color:var(--status-error)">${ICONS.warning} ${T("danger.title")}</h3>
+            <button data-action="close-danger-modal" class="tx-help-trigger" aria-label="${T("app.close")}">${ICONS.close}</button>
+          </div>
+          ${renderDangerTab(c)}
+        </div>
       </div>`;
     }
 
     function renderCollectionTab(c) {
       switch (state.tab) {
-        case "variables":
-          return renderVariablesTab(c);
-        case "templates":
-          return renderTemplatesTab(c);
+        case "setup":
+          return renderSetupTab(c);
         case "datasets":
           return renderDatasetsTab(c);
         case "export":
           return renderExportTab(c);
-        case "danger":
-          return renderDangerTab(c);
         case "overview":
         default:
           return renderOverviewTab(c);
       }
+    }
+
+    // "Set up" stacks the two configuration-time editors (Variables and
+    // Target Templates) into one focused setup surface. Both editors are
+    // reused as-is, with their own headers; we just wrap them with a
+    // short orientation banner so it's clear this is where the user
+    // *defines* what a Collection looks like before working with it.
+    function renderSetupTab(c) {
+      return `<div class="space-y-6" data-testid="setup-tab">
+        <div class="tx-callout flex items-start gap-2">
+          ${ICONS.info}
+          <div>
+            <div class="text-sm font-medium">${T("collection.tab_setup")}</div>
+            <p class="text-xs tx-secondary mt-0.5">${T("collection.tab_setup_subtitle")}</p>
+          </div>
+        </div>
+        <section data-testid="setup-section-variables">${renderVariablesTab(c)}</section>
+        <div style="height:1px;background:var(--divider)"></div>
+        <section data-testid="setup-section-templates">${renderTemplatesTab(c)}</section>
+      </div>`;
     }
 
     // --- Overview tab ---
@@ -1338,8 +2306,8 @@ export default {
       );
 
       const stats = `<div class="grid grid-cols-3 gap-3">
-        ${statCard(T("collection.overview_stats_variables"), vars, ICONS.variable, "variables")}
-        ${statCard(T("collection.overview_stats_templates"), templates.length, ICONS.file, "templates")}
+        ${statCard(T("collection.overview_stats_variables"), vars, ICONS.variable, "setup")}
+        ${statCard(T("collection.overview_stats_templates"), templates.length, ICONS.file, "setup")}
         ${statCard(T("collection.overview_stats_datasets"), datasets.length, ICONS.database, "datasets")}
       </div>`;
 
@@ -1355,7 +2323,7 @@ export default {
           title: T("collection.overview_step1_title"),
           text: T("collection.overview_step1"),
           cta: T("collection.goto_variables"),
-          tab: "variables",
+          tab: "setup",
         },
         {
           key: "templates",
@@ -1365,7 +2333,7 @@ export default {
           title: T("collection.overview_step2_title"),
           text: T("collection.overview_step2"),
           cta: T("collection.goto_templates"),
-          tab: "templates",
+          tab: "setup",
         },
         {
           key: "datasets",
@@ -1419,9 +2387,9 @@ export default {
 
       let callout = "";
       if (!hasVars) {
-        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_vars")}</span> <button data-tab="variables" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_variables")} →</button></div>`;
+        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_vars")}</span> <button data-tab="setup" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_variables")} →</button></div>`;
       } else if (!hasTpls) {
-        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_templates")}</span> <button data-tab="templates" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_templates")} →</button></div>`;
+        callout = `<div class="tx-callout flex items-center gap-2">${ICONS.info} <span>${T("collection.summary_no_templates")}</span> <button data-tab="setup" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_templates")} →</button></div>`;
       } else {
         callout = `<div class="tx-callout flex items-center gap-2" style="background:color-mix(in srgb, var(--status-success) 10%, var(--bg-card));color:var(--txt-primary)">${ICONS.check} <span>${T("collection.summary_ready")}</span> <button data-tab="datasets" class="tx-link ml-auto text-sm font-medium">${T("collection.goto_datasets")} →</button></div>`;
       }
@@ -2422,7 +3390,7 @@ export default {
         return `<div class="tx-card p-6 text-center">
           <div class="inline-flex items-center justify-center w-12 h-12 rounded-full mb-3" style="background:var(--bg-chip);color:var(--txt-secondary)">${ICONS.variable}</div>
           <h4 class="font-semibold text-lg mb-1">${T("collection.summary_no_vars")}</h4>
-          <button data-tab="variables" class="tx-btn tx-btn-sm mt-3">${T("collection.goto_variables")}</button>
+          <button data-tab="setup" class="tx-btn tx-btn-sm mt-3">${T("collection.goto_variables")}</button>
         </div>`;
       }
 
@@ -2456,12 +3424,26 @@ export default {
       const start = state.datasetsPage * DATASETS_PER_PAGE;
       const pageItems = filtered.slice(start, start + DATASETS_PER_PAGE);
 
+      // "Continue last" jumps straight back into the most recent
+      // dataset that's still draft/extracted/reviewed — by far the
+      // most common daily action. Skipped for "generated" since
+      // re-opening a finished dataset rarely has value.
+      const continuable = findContinuableDataset(c.id);
+      const continueBtn = continuable
+        ? `<button data-action="continue-last-dataset" data-id="${escHtml(continuable.id)}" data-testid="btn-continue-last-dataset" class="tx-btn tx-btn-sm tx-btn-ghost" title="${escHtml(datasetDisplayName(continuable))}">
+            ${ICONS.refresh} ${T("datasets.continue_last")}
+          </button>`
+        : "";
+
       const header = `<div class="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h3 class="text-lg font-semibold mb-1">${T("datasets.title")}</h3>
           <p class="text-sm tx-secondary" style="max-width:640px">${T("datasets.subtitle")}</p>
         </div>
-        <button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("datasets.new")}</button>
+        <div class="flex items-center gap-2">
+          ${continueBtn}
+          <button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("datasets.new")}</button>
+        </div>
       </div>`;
 
       // Surface a GDPR-style overdue banner so the user can bulk-delete
@@ -2691,11 +3673,14 @@ export default {
       // collection-level tab handler, which would otherwise hijack the
       // navigation away from the dataset detail page.
       const currentTab = state.datasetTab || "sources";
+      // Numbered labels mirror the wizard pattern so the dataset
+      // flow has the same visual rhythm: each phase has an explicit
+      // step number the user can orient against.
       const tabs = [
-        { id: "sources", label: T("datasets.tab_sources") },
-        { id: "details", label: T("datasets.tab_details") },
-        { id: "variables", label: T("datasets.tab_variables") },
-        { id: "generate", label: T("datasets.tab_generate") },
+        { id: "sources", label: `1. ${T("datasets.tab_sources")}` },
+        { id: "details", label: `2. ${T("datasets.tab_details")}` },
+        { id: "variables", label: `3. ${T("datasets.tab_variables")}` },
+        { id: "generate", label: `4. ${T("datasets.tab_generate")}` },
       ];
       const tabNav = `<nav class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
         ${tabs
@@ -3349,7 +4334,7 @@ export default {
                   ${state.datasetGenerating ? `<div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div> ${T("datasets.generate_running")}` : `${ICONS.doc} ${T("datasets.generate_btn")}`}
                 </button>
               </div>`
-            : `<div class="tx-callout mb-4">${T("templates.empty_hint")} <button data-tab="templates" class="tx-link ml-2">${T("collection.goto_templates")} →</button></div>`
+            : `<div class="tx-callout mb-4">${T("templates.empty_hint")} <button data-tab="setup" class="tx-link ml-2">${T("collection.goto_templates")} →</button></div>`
         }
         <div>
           <h5 class="text-xs font-medium tx-secondary uppercase tracking-wider mb-2">${T("datasets.generated_docs")}</h5>
@@ -3568,13 +4553,18 @@ export default {
         }),
       );
 
-      // Collections list → open card
+      // Collections list → open card. Ready Collections (vars + templates)
+      // land on the Datasets tab so users see their daily work first; only
+      // incomplete or draft Collections land on Overview, where the
+      // next-step nudges live.
       el.querySelectorAll("[data-open-collection]").forEach((card) =>
         card.addEventListener("click", () => {
+          const id = card.dataset.openCollection;
+          const c = collectionById(id);
           navigate({
             view: "collection",
-            collectionId: card.dataset.openCollection,
-            tab: "overview",
+            collectionId: id,
+            tab: defaultLandingTab(c),
           });
         }),
       );
@@ -3613,20 +4603,91 @@ export default {
         }),
       );
 
-      // New collection
+      // New collection (legacy direct trigger — kept for backwards
+      // compatibility with any external code that still fires it; the
+      // split button now drives the main entry points)
       el.querySelector('[data-action="new-collection"]')?.addEventListener(
         "click",
         () => {
           state.newCollectionOpen = true;
           state.editingCollection = null;
+          state.setupMenuOpen = null;
           render();
         },
+      );
+
+      // Setup split-button: primary click + per-mode dropdown items.
+      // wizard/template/text modes open the 5-step Setup Wizard with
+      // the appropriate entry point; manual mode falls back to the
+      // legacy New Collection modal so power users keep their muscle
+      // memory.
+      el.querySelectorAll('[data-action="setup-action"]').forEach((btn) =>
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const mode = btn.dataset.mode || "wizard";
+          state.setupMenuOpen = null;
+          if (mode === "manual") {
+            state.pendingSetupMode = "manual";
+            state.newCollectionOpen = true;
+            state.editingCollection = null;
+            render();
+            return;
+          }
+          // wizard => start with the chooser (let the user decide)
+          // template => skip the chooser and head to basics with the
+          //   template mode pre-selected (so step 2 is mandatory)
+          // text => skip the chooser and head to basics with the
+          //   noTemplate mode pre-selected (so step 3 is the paste UI)
+          wizardOpen({ mode });
+        }),
+      );
+      el.querySelectorAll('[data-action="setup-menu-toggle"]').forEach((btn) =>
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.id || "default";
+          state.setupMenuOpen = state.setupMenuOpen === id ? null : id;
+          render();
+        }),
+      );
+      el.querySelectorAll('[data-action="setup-menu-close"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          state.setupMenuOpen = null;
+          render();
+        }),
+      );
+
+      // Draft "Resume" / "Discard" buttons in the Drafts section.
+      // Resume opens the wizard pre-loaded with the existing draft so
+      // the user picks up exactly where they left off; the wizard's
+      // own Cancel button drops them back here without losing anything.
+      el.querySelectorAll('[data-action="draft-resume"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          wizardOpen({ resumeCollectionId: btn.dataset.id });
+        }),
+      );
+      el.querySelectorAll('[data-action="draft-discard"]').forEach((btn) =>
+        btn.addEventListener("click", async () => {
+          const name = btn.dataset.name || T("collections.draft_unnamed");
+          const ok = window.confirm(
+            Tf("collections.draft_discard_confirm", { name }),
+          );
+          if (!ok) return;
+          try {
+            await api(`/forms/${btn.dataset.id}`, { method: "DELETE" });
+            await fetchForms();
+            showToast(T("collections.draft_discarded"));
+            render();
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+        }),
       );
       el.querySelector('[data-action="edit-collection"]')?.addEventListener(
         "click",
         () => {
           const c = collectionById(state.collectionId);
           if (!c) return;
+          state.collectionMenuOpen = false;
           state.editingCollection = JSON.parse(JSON.stringify(c));
           render();
         },
@@ -3636,8 +4697,41 @@ export default {
           btn.addEventListener("click", () => {
             state.newCollectionOpen = false;
             state.editingCollection = null;
+            state.pendingSetupMode = null;
             render();
           }),
+      );
+
+      // Kebab menu next to the Collection title (Edit + Danger Zone)
+      el.querySelector(
+        '[data-action="toggle-collection-menu"]',
+      )?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        state.collectionMenuOpen = !state.collectionMenuOpen;
+        render();
+      });
+      el.querySelectorAll('[data-action="close-collection-menu"]').forEach(
+        (btn) =>
+          btn.addEventListener("click", () => {
+            state.collectionMenuOpen = false;
+            render();
+          }),
+      );
+      el.querySelector('[data-action="open-danger"]')?.addEventListener(
+        "click",
+        () => {
+          state.collectionMenuOpen = false;
+          state.dangerOpen = true;
+          state.dangerConfirmText = "";
+          render();
+        },
+      );
+      el.querySelectorAll('[data-action="close-danger-modal"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          state.dangerOpen = false;
+          state.dangerConfirmText = "";
+          render();
+        }),
       );
       const cForm = el.querySelector("#tx-collection-form");
       if (cForm) {
@@ -3670,11 +4764,18 @@ export default {
               });
               state.newCollectionOpen = false;
               state.editingCollection = null;
+              // Honor the split-button entry point: every mode except
+              // explicit "manual" jumps straight into the Set up tab so
+              // the user keeps momentum on the configuration work. PR3
+              // will swap this for the real wizard modal.
+              const mode = state.pendingSetupMode || "manual";
+              state.pendingSetupMode = null;
+              const landTab = mode === "manual" ? "overview" : "setup";
               await fetchForms();
               navigate({
                 view: "collection",
                 collectionId: res.form.id,
-                tab: "overview",
+                tab: landTab,
               });
             }
           } catch (err) {
@@ -3700,6 +4801,9 @@ export default {
 
       // Danger zone
       bindDangerEvents();
+
+      // Setup Wizard
+      bindWizardEvents();
 
       // Settings
       const sForm = el.querySelector("#tx-settings-form");
@@ -4435,6 +5539,18 @@ export default {
           }
         },
       );
+      // "Continue last" — jump straight back into the most recent
+      // unfinished dataset (driven by findContinuableDataset). Mirrors
+      // selectDataset behaviour so URL and state stay in sync.
+      el.querySelector(
+        '[data-action="continue-last-dataset"]',
+      )?.addEventListener("click", async (e) => {
+        const id = e.currentTarget.dataset.id;
+        state.datasetId = id;
+        writeHash();
+        await selectDataset(id);
+        render();
+      });
       el.querySelector('[data-action="datasets-back"]')?.addEventListener(
         "click",
         () => {
@@ -5455,6 +6571,127 @@ export default {
           }
         },
       );
+    }
+
+    // --- Setup Wizard events ---
+
+    function bindWizardEvents() {
+      if (!state.wizard.open) return;
+
+      el.querySelectorAll('[data-action="wizard-close"]').forEach((btn) =>
+        btn.addEventListener("click", () => wizardClose()),
+      );
+      el.querySelector(
+        '[data-action="wizard-close-backdrop"]',
+      )?.addEventListener("click", (e) => {
+        if (e.target === e.currentTarget) wizardClose();
+      });
+      el.querySelector('[data-action="wizard-back"]')?.addEventListener(
+        "click",
+        () => wizardBack(),
+      );
+      el.querySelector('[data-action="wizard-next"]')?.addEventListener(
+        "click",
+        () => wizardNext(),
+      );
+      el.querySelectorAll('[data-action="wizard-pick-mode"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          state.wizard.mode = btn.dataset.mode;
+          render();
+        }),
+      );
+
+      // Basics step inputs — keep state in sync without forcing a full
+      // re-render on every keystroke (preserves focus + caret).
+      const nameEl = el.querySelector('[data-action="wizard-input-name"]');
+      if (nameEl) {
+        nameEl.addEventListener("input", () => {
+          state.wizard.name = nameEl.value;
+          const nextBtn = el.querySelector('[data-action="wizard-next"]');
+          if (nextBtn) nextBtn.disabled = !wizardCanAdvance();
+        });
+      }
+      const descEl = el.querySelector(
+        '[data-action="wizard-input-description"]',
+      );
+      if (descEl) {
+        descEl.addEventListener("input", () => {
+          state.wizard.description = descEl.value;
+        });
+      }
+      const langEl = el.querySelector('[data-action="wizard-input-language"]');
+      if (langEl) {
+        langEl.addEventListener("change", () => {
+          state.wizard.language = langEl.value;
+        });
+      }
+
+      // Template step
+      const tplPicker = el.querySelector(
+        '[data-action="wizard-template-pick"]',
+      );
+      if (tplPicker) {
+        tplPicker.addEventListener("change", () => {
+          const file = tplPicker.files?.[0];
+          if (!file) return;
+          state.wizard.templateFile = file;
+          wizardUploadTemplate();
+        });
+      }
+      el.querySelector(
+        '[data-action="wizard-template-replace"]',
+      )?.addEventListener("click", () => {
+        state.wizard.templateId = null;
+        state.wizard.templateName = "";
+        state.wizard.templatePlaceholderCount = 0;
+        state.wizard.suggestions = null;
+        state.wizard.suggestionsSelected = {};
+        render();
+      });
+      el.querySelector(
+        '[data-action="wizard-skip-template"]',
+      )?.addEventListener("click", () => {
+        // "Skip" inside the template step nudges the user into the
+        // noTemplate path mid-flow without forcing them all the way
+        // back to the chooser.
+        state.wizard.mode = "noTemplate";
+        wizardNext();
+      });
+
+      // Fields step (template path) — checkbox toggles
+      el.querySelectorAll('[data-action="wizard-suggestion-toggle"]').forEach(
+        (cb) =>
+          cb.addEventListener("change", () => {
+            const idx = parseInt(cb.dataset.idx, 10);
+            state.wizard.suggestionsSelected = {
+              ...state.wizard.suggestionsSelected,
+              [idx]: cb.checked,
+            };
+            // Re-render so the summary count updates; the checkbox
+            // itself stays mounted because it has a stable position.
+            render();
+          }),
+      );
+
+      // Fields step (text path) — paste + parse
+      const pasteEl = el.querySelector('[data-action="wizard-paste-text"]');
+      if (pasteEl) {
+        pasteEl.addEventListener("input", () => {
+          state.wizard.pastedText = pasteEl.value;
+        });
+      }
+      el.querySelector('[data-action="wizard-parse-text"]')?.addEventListener(
+        "click",
+        () => wizardParsePastedText(),
+      );
+
+      // Review step finish actions
+      el.querySelector(
+        '[data-action="wizard-finish-dataset"]',
+      )?.addEventListener("click", () => wizardFinish("dataset"));
+      el.querySelector(
+        '[data-action="wizard-finish-collection"]',
+      )?.addEventListener("click", () => wizardFinish("collection"));
     }
 
     // =========================================================================
