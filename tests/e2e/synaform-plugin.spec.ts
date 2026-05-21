@@ -469,8 +469,8 @@ test.describe('Synaform UI Tests', () => {
     await expect(menu).toHaveCount(0)
   })
 
-  test('split-button "wizard" mode creates a draft and lands on Set up', async ({ page, request }) => {
-    // Clean up any leftover drafts from a previous run so the assertion below
+  test('split-button "manual" mode opens the legacy New Collection modal', async ({ page, request }) => {
+    // Clean up any leftover drafts from previous runs so the assertion below
     // is deterministic.
     const cookie = await loginViaApi(request)
     const formsBefore = await (await api(request, cookie, 'GET', '/forms')).json()
@@ -484,29 +484,29 @@ test.describe('Synaform UI Tests', () => {
     await page.waitForSelector('text=Synaform', { timeout: 15_000 })
     await page.waitForTimeout(2000)
 
-    await page.locator('[data-testid="setup-splitbutton-primary-new"]').click()
+    // Manual is the escape hatch for power users; it skips the wizard and
+    // opens the legacy New Collection modal (lands on Overview after save).
+    await page.locator('[data-testid="setup-splitbutton-chevron-new"]').click()
+    await page.locator('[data-testid="setup-menu-item-manual"]').click()
 
     const modal = page.locator('#tx-collection-form')
     await expect(modal).toBeVisible()
-    await modal.locator('input[name="name"]').fill('[Draft E2E] wizard draft')
+    await modal.locator('input[name="name"]').fill('[Draft E2E] manual draft')
     await modal.locator('button[type="submit"]').click()
 
-    // Wizard / template / text modes land on Set up; manual lands on Overview.
-    await page.waitForSelector('[data-testid="setup-tab"]', { timeout: 10_000 })
-    await expect(page.locator('[data-tab="setup"].active')).toBeVisible()
+    // Manual lands on Overview (not Set up).
+    await expect(page.locator('[data-tab="overview"].active')).toBeVisible({ timeout: 10_000 })
 
-    // Go back to the Collections list and assert the new draft appears in
-    // the Drafts section (heuristic: 0 vars, 0 templates, 0 datasets).
-    // Two buttons carry data-nav="collections" on this page (the nav bar
-    // and the breadcrumb); .first() targets the nav-bar one deterministically.
+    // Cleanup — manual mode with no fields/templates IS still a draft per
+    // the heuristic, so it shows up on the Collections list.
     await page.locator('button[data-nav="collections"]').first().click()
     await page.waitForTimeout(800)
     const draftsSection = page.locator('[data-testid="drafts-section"]')
     await expect(draftsSection).toBeVisible()
-    await expect(draftsSection.locator('[data-testid="draft-card"]', { hasText: '[Draft E2E] wizard draft' })).toBeVisible()
+    await expect(draftsSection.locator('[data-testid="draft-card"]', { hasText: '[Draft E2E] manual draft' })).toBeVisible()
   })
 
-  test('Drafts section: Continue setup jumps to Set up tab', async ({ page, request }) => {
+  test('Drafts section: Continue setup reopens the wizard pre-loaded with the draft', async ({ page, request }) => {
     // Pre-seed a clean draft via the API so the test isn't coupled to a
     // previous test's leftovers.
     const cookie = await loginViaApi(request)
@@ -526,8 +526,13 @@ test.describe('Synaform UI Tests', () => {
       const card = page.locator(`[data-testid="draft-card"][data-draft-id="${draftId}"]`)
       await expect(card).toBeVisible()
       await card.locator('[data-testid="draft-resume"]').click()
-      await page.waitForSelector('[data-testid="setup-tab"]', { timeout: 5000 })
-      await expect(page.locator('[data-tab="setup"].active')).toBeVisible()
+
+      // Resume opens the wizard on the Basics step (chooser is skipped
+      // because the structural decision was already made when the user
+      // first started the draft) with the existing name pre-filled.
+      await expect(page.locator('[data-testid="wizard-modal"]')).toBeVisible({ timeout: 5000 })
+      await expect(page.locator('[data-testid="wizard-step-basics"]')).toBeVisible()
+      await expect(page.locator('[data-testid="wizard-input-name"]')).toHaveValue('[Draft E2E] resume me')
     } finally {
       await api(request, cookie, 'DELETE', `/forms/${draftId}`)
     }
@@ -560,6 +565,126 @@ test.describe('Synaform UI Tests', () => {
     const after = await (await api(request, cookie, 'GET', '/forms')).json()
     const stillThere = after.forms?.find((f: { id: string }) => f.id === draftId)
     expect(stillThere).toBeFalsy()
+  })
+
+  // ---------------------------------------------------------------------
+  // Setup Wizard (PR3)
+  // ---------------------------------------------------------------------
+
+  test('Setup Wizard: split-button primary opens modal with the chooser step', async ({ page }) => {
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(1500)
+
+    await page.locator('[data-testid="setup-splitbutton-primary-new"]').click()
+
+    const modal = page.locator('[data-testid="wizard-modal"]')
+    await expect(modal).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-step-chooser"]')).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-mode-template"]')).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-mode-noTemplate"]')).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-next"]')).toBeDisabled()
+  })
+
+  test('Setup Wizard: split-button "template" mode opens at the Basics step (chooser skipped)', async ({ page }) => {
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(1500)
+
+    await page.locator('[data-testid="setup-splitbutton-chevron-new"]').click()
+    await page.locator('[data-testid="setup-menu-item-template"]').click()
+
+    await expect(page.locator('[data-testid="wizard-step-basics"]')).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-input-name"]')).toBeVisible()
+  })
+
+  test('Setup Wizard: full "noTemplate" flow creates a Collection and lands on Datasets', async ({ page, request }) => {
+    // Clean any leftover test forms from a previous run.
+    const cookie = await loginViaApi(request)
+    const before = await (await api(request, cookie, 'GET', '/forms')).json()
+    for (const f of before.forms || []) {
+      if (f.name?.startsWith('[Wizard E2E]')) {
+        await api(request, cookie, 'DELETE', `/forms/${f.id}`)
+      }
+    }
+
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(1500)
+
+    await page.locator('[data-testid="setup-splitbutton-primary-new"]').click()
+
+    // Step 0: chooser — pick "no template".
+    await page.locator('[data-testid="wizard-mode-noTemplate"]').click()
+    await page.locator('[data-testid="wizard-next"]').click()
+
+    // Step 1: basics — type a name, click Continue (this persists the draft).
+    await page.locator('[data-testid="wizard-input-name"]').fill('[Wizard E2E] full flow')
+    await page.locator('[data-testid="wizard-next"]').click()
+
+    // Step 3: text-paste UI for fields (noTemplate skips step 2)
+    await expect(page.locator('[data-testid="wizard-fields-text"]')).toBeVisible({ timeout: 10_000 })
+    await page.locator('[data-testid="wizard-next"]').click()
+
+    // Step 4: review — primary CTA opens dataset list of the new Collection
+    await expect(page.locator('[data-testid="wizard-review"]')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('[data-testid="wizard-finish-primary"]')).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-finish"]')).toBeVisible()
+    await page.locator('[data-testid="wizard-finish"]').click()
+
+    // Lands on the Datasets tab of the new Collection
+    await expect(page.locator('[data-tab="datasets"].active')).toBeVisible({ timeout: 10_000 })
+
+    // Confirm the Collection exists on the backend with the right name.
+    const after = await (await api(request, cookie, 'GET', '/forms')).json()
+    const created = after.forms.find((f: { name: string }) => f.name === '[Wizard E2E] full flow')
+    expect(created).toBeTruthy()
+
+    // Cleanup
+    await api(request, cookie, 'DELETE', `/forms/${created.id}`)
+  })
+
+  test('Setup Wizard: closing mid-flow leaves a resumable draft', async ({ page, request }) => {
+    const cookie = await loginViaApi(request)
+    const before = await (await api(request, cookie, 'GET', '/forms')).json()
+    for (const f of before.forms || []) {
+      if (f.name?.startsWith('[Wizard E2E]')) {
+        await api(request, cookie, 'DELETE', `/forms/${f.id}`)
+      }
+    }
+
+    await page.goto(`${BASE_URL}/plugins/synaform`)
+    await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+    await page.waitForTimeout(1500)
+
+    await page.locator('[data-testid="setup-splitbutton-primary-new"]').click()
+    await page.locator('[data-testid="wizard-mode-noTemplate"]').click()
+    await page.locator('[data-testid="wizard-next"]').click()
+    await page.locator('[data-testid="wizard-input-name"]').fill('[Wizard E2E] abandoned')
+    await page.locator('[data-testid="wizard-next"]').click()
+
+    // We are now on step 3. Close the wizard.
+    await page.locator('[data-testid="wizard-step-fields"]').waitFor({ timeout: 10_000 })
+    await page.locator('[data-testid="wizard-close"]').click()
+
+    // Modal is gone, Drafts section now contains the abandoned wizard.
+    await expect(page.locator('[data-testid="wizard-modal"]')).toHaveCount(0)
+    const draftsSection = page.locator('[data-testid="drafts-section"]')
+    await expect(draftsSection).toBeVisible()
+    await expect(draftsSection.locator('[data-testid="draft-card"]', { hasText: '[Wizard E2E] abandoned' })).toBeVisible()
+
+    // Resume the draft -> wizard reopens, skipping the chooser, on Basics.
+    await draftsSection.locator('[data-testid="draft-card"]', { hasText: '[Wizard E2E] abandoned' })
+      .locator('[data-testid="draft-resume"]').click()
+    await expect(page.locator('[data-testid="wizard-modal"]')).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-step-basics"]')).toBeVisible()
+    await expect(page.locator('[data-testid="wizard-input-name"]')).toHaveValue('[Wizard E2E] abandoned')
+
+    // Cleanup
+    await page.locator('[data-testid="wizard-close"]').click()
+    const after = await (await api(request, cookie, 'GET', '/forms')).json()
+    const draft = after.forms.find((f: { name: string }) => f.name === '[Wizard E2E] abandoned')
+    if (draft) await api(request, cookie, 'DELETE', `/forms/${draft.id}`)
   })
 
   test('kebab menu exposes Edit and Danger Zone', async ({ page }) => {

@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.2.3";
+const TX_VERSION = "v3.3.0";
 
 export default {
   mount(el, context) {
@@ -50,12 +50,49 @@ export default {
       // instances on the same page don't fight over a single open flag.
       // The primary click runs the guided-wizard flow; the dropdown
       // exposes the per-entry-point shortcuts and the manual escape
-      // hatch. PR3 will replace the wizard stub with the real modal.
+      // hatch.
       setupMenuOpen: null,
-      // Which split-button mode the user picked when opening the
-      // create-collection editor — drives where we land after save
-      // ("manual" -> Overview tab, anything else -> Set up tab).
+      // Which split-button mode the user picked when falling back to
+      // the manual editor — drives where we land after save
+      // ("manual" -> Overview tab; the wizard paths handle their own
+      // landing inside the wizard).
       pendingSetupMode: null,
+
+      // Setup Wizard (5 steps). The wizard is a fully self-contained
+      // modal driven entirely by the `wizard` substate; every step is
+      // persisted to the backend as the user advances so cancelling
+      // mid-flow always leaves a resumable draft Collection behind.
+      // mode: "template" | "noTemplate" — chosen on step 0. Determines
+      // whether step 2 (template upload) is part of the path.
+      wizard: {
+        open: false,
+        step: 0,
+        mode: null,
+        // Draft Collection being assembled. collectionId is null until
+        // the user finishes step 1 (basics); after that every step
+        // persists changes against this id.
+        collectionId: null,
+        name: "",
+        description: "",
+        language: "",
+        templateId: null,
+        templateName: "",
+        templatePlaceholderCount: 0,
+        templateFile: null,
+        templateUploading: false,
+        templateError: null,
+        suggestions: null,
+        suggestionsLoading: false,
+        suggestionsError: null,
+        suggestionsSelected: {},
+        pastedText: "",
+        pastedParsing: false,
+        pastedError: null,
+        pastedFields: null,
+        fields: [],
+        saving: false,
+        error: null,
+      },
 
       // Dataset editing state
       datasetsSearch: "",
@@ -1403,7 +1440,643 @@ export default {
               : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">${cards}</div>`
         }
         ${state.newCollectionOpen ? renderCollectionEditor() : ""}
+        ${state.wizard.open ? renderWizardModal() : ""}
         ${renderHelpModal()}
+      </div>`;
+    }
+
+    // =========================================================================
+    // Setup Wizard (5 steps)
+    //
+    //   Step 0 — Chooser ("I have a template" vs "I don't have one yet")
+    //   Step 1 — Basics (name + description + language) — creates the draft
+    //   Step 2 — Template upload (skipped on the "noTemplate" path)
+    //   Step 3 — Fields (auto-derived from template, or AI-parsed text,
+    //                    or jumps to the manual editor)
+    //   Step 4 — Review + finish
+    //
+    // Every step persists progress against a real Collection in the
+    // backend, so cancelling at any point leaves a resumable draft.
+    // =========================================================================
+
+    const WIZARD_STEPS = ["chooser", "basics", "template", "fields", "review"];
+
+    function visibleWizardSteps() {
+      // "noTemplate" path hides the Template step but keeps a placeholder
+      // pill so the progress bar doesn't visually shrink mid-flow.
+      return state.wizard.mode === "noTemplate"
+        ? WIZARD_STEPS.filter((s) => s !== "template")
+        : WIZARD_STEPS;
+    }
+
+    function wizardOpen(opts = {}) {
+      const w = state.wizard;
+      const mode = opts.mode === "template" ? "template" : null;
+      // Reset everything to baseline so a previous run never leaks into
+      // a fresh wizard session. Resume mode (opts.resumeCollectionId)
+      // hydrates the basics from the existing form so step 1 is
+      // pre-filled.
+      const baseline = {
+        open: true,
+        step: 0,
+        mode,
+        collectionId: opts.resumeCollectionId || null,
+        name: "",
+        description: "",
+        language: state.config?.default_language || "en",
+        templateId: null,
+        templateName: "",
+        templatePlaceholderCount: 0,
+        templateFile: null,
+        templateUploading: false,
+        templateError: null,
+        suggestions: null,
+        suggestionsLoading: false,
+        suggestionsError: null,
+        suggestionsSelected: {},
+        pastedText: "",
+        pastedParsing: false,
+        pastedError: null,
+        pastedFields: null,
+        fields: [],
+        saving: false,
+        error: null,
+      };
+      if (opts.resumeCollectionId) {
+        const c = collectionById(opts.resumeCollectionId);
+        if (c) {
+          baseline.name = c.name || "";
+          baseline.description = c.description || "";
+          baseline.language = c.language || baseline.language;
+          baseline.fields = c.fields || [];
+          // Skip the chooser when resuming — they already made the
+          // structural decision when they first started.
+          baseline.step = 1;
+          baseline.mode =
+            collectionTemplates(c).length > 0 ? "template" : "noTemplate";
+        }
+      }
+      // When opt.mode is "text" we jump straight into the text-paste
+      // flow inside step 3, which we model as the noTemplate path.
+      if (opts.mode === "text") {
+        baseline.mode = "noTemplate";
+        baseline.step = 1;
+      } else if (mode === "template") {
+        baseline.step = 1;
+      }
+      Object.assign(state.wizard, baseline);
+      state.setupMenuOpen = null;
+      render();
+    }
+
+    function wizardClose() {
+      // We deliberately do NOT delete the draft Collection here — the
+      // whole point of persistent drafts is that closing mid-flow
+      // leaves the user a Continue-setup card on the Collections list.
+      state.wizard.open = false;
+      render();
+    }
+
+    function wizardCanAdvance() {
+      const w = state.wizard;
+      switch (w.step) {
+        case 0:
+          return w.mode === "template" || w.mode === "noTemplate";
+        case 1:
+          return (w.name || "").trim().length > 0;
+        case 2:
+          // Template step: either upload one (templateId set) or skip
+          // (the Skip button itself calls wizardNext, so the Next button
+          // only enables when a template is uploaded).
+          return !!w.templateId;
+        case 3:
+          // Fields step is OK as long as the user has SOMETHING to
+          // generate against. They can also continue with zero fields
+          // and edit later in the manual editor.
+          return true;
+        case 4:
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    async function wizardSaveBasics() {
+      const w = state.wizard;
+      const payload = {
+        name: w.name.trim(),
+        description: (w.description || "").trim(),
+        language: w.language || state.config.default_language || "en",
+      };
+      w.saving = true;
+      w.error = null;
+      render();
+      try {
+        if (w.collectionId) {
+          await api(`/forms/${w.collectionId}`, {
+            method: "PUT",
+            body: JSON.stringify(payload),
+          });
+        } else {
+          const res = await api("/forms", {
+            method: "POST",
+            body: JSON.stringify({ ...payload, fields: [] }),
+          });
+          w.collectionId = res.form.id;
+        }
+        await fetchForms();
+      } catch (err) {
+        w.error = err.message;
+        throw err;
+      } finally {
+        w.saving = false;
+      }
+    }
+
+    async function wizardUploadTemplate() {
+      const w = state.wizard;
+      const file = w.templateFile;
+      if (!file || !w.collectionId) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("name", file.name.replace(/\.docx$/i, ""));
+      w.templateUploading = true;
+      w.templateError = null;
+      render();
+      try {
+        const res = await fetch(`${BASE}/templates`, {
+          method: "POST",
+          credentials: "include",
+          body: fd,
+        });
+        if (!res.ok) {
+          let msg = `Upload failed (${res.status})`;
+          try {
+            const j = await res.json();
+            if (j.message) msg = j.message;
+          } catch (_) {
+            /* ignore */
+          }
+          throw new Error(msg);
+        }
+        const body = await res.json();
+        w.templateId = body.template.id;
+        w.templateName = body.template.name;
+        w.templatePlaceholderCount =
+          body.template.placeholder_count ??
+          body.template.placeholders?.length ??
+          0;
+        // Link the template to this collection so it appears on the
+        // Templates tab + survives wizard cancellation.
+        const c = collectionById(w.collectionId);
+        const existing = Array.isArray(c?.template_ids) ? c.template_ids : [];
+        if (!existing.includes(body.template.id)) {
+          await api(`/forms/${w.collectionId}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              template_ids: [...existing, body.template.id],
+            }),
+          });
+        }
+        await Promise.all([fetchTemplates(), fetchForms()]);
+        await wizardLoadSuggestions();
+      } catch (err) {
+        w.templateError = err.message;
+      } finally {
+        w.templateUploading = false;
+        render();
+      }
+    }
+
+    async function wizardLoadSuggestions() {
+      const w = state.wizard;
+      if (!w.templateId) return;
+      w.suggestionsLoading = true;
+      w.suggestionsError = null;
+      render();
+      try {
+        const res = await api(
+          `/templates/${w.templateId}/variable-suggestions`,
+        );
+        w.suggestions = res;
+        // Pre-tick every non-duplicate suggestion. Users uncheck what
+        // they don't want — much faster than ticking from a blank state.
+        const sel = {};
+        (res.suggestions || []).forEach((s, i) => {
+          sel[i] = s._status !== "duplicate";
+        });
+        w.suggestionsSelected = sel;
+      } catch (err) {
+        w.suggestionsError = err.message;
+      } finally {
+        w.suggestionsLoading = false;
+        render();
+      }
+    }
+
+    async function wizardParsePastedText() {
+      const w = state.wizard;
+      if (!w.pastedText.trim()) return;
+      w.pastedParsing = true;
+      w.pastedError = null;
+      render();
+      try {
+        const res = await api("/forms/import-parse", {
+          method: "POST",
+          body: JSON.stringify({ text: w.pastedText }),
+        });
+        w.pastedFields = res.fields || [];
+      } catch (err) {
+        w.pastedError = err.message;
+      } finally {
+        w.pastedParsing = false;
+        render();
+      }
+    }
+
+    async function wizardSaveFields() {
+      const w = state.wizard;
+      let chosen = [];
+      if (w.mode === "template" && w.suggestions) {
+        chosen = (w.suggestions.suggestions || [])
+          .map((s, i) => ({ s, i }))
+          .filter(
+            ({ s, i }) => w.suggestionsSelected[i] && s._status !== "duplicate",
+          )
+          .map(({ s }) => {
+            const copy = { ...s };
+            delete copy._status;
+            return copy;
+          });
+      } else if (w.pastedFields) {
+        chosen = w.pastedFields.map((f) => ({ ...f }));
+      }
+      // Merge with any fields the existing Collection already had
+      // (resume case: don't blow away existing variables silently).
+      const c = collectionById(w.collectionId);
+      const existing = c?.fields || [];
+      const existingKeys = new Set(existing.map((f) => f.key));
+      const merged = [
+        ...existing,
+        ...chosen.filter((f) => !existingKeys.has(f.key)),
+      ];
+      w.fields = merged;
+      w.saving = true;
+      w.error = null;
+      render();
+      try {
+        await api(`/forms/${w.collectionId}`, {
+          method: "PUT",
+          body: JSON.stringify({ fields: merged }),
+        });
+        await fetchForms();
+      } catch (err) {
+        w.error = err.message;
+        throw err;
+      } finally {
+        w.saving = false;
+      }
+    }
+
+    async function wizardNext() {
+      const w = state.wizard;
+      try {
+        if (w.step === 1) await wizardSaveBasics();
+        if (w.step === 3) await wizardSaveFields();
+        const steps = visibleWizardSteps();
+        const currentName = WIZARD_STEPS[w.step];
+        let idx = steps.indexOf(currentName);
+        if (idx < 0) idx = 0;
+        const nextName = steps[Math.min(steps.length - 1, idx + 1)];
+        w.step = WIZARD_STEPS.indexOf(nextName);
+        render();
+      } catch (_) {
+        /* error already surfaced via state.wizard.error */
+      }
+    }
+
+    function wizardBack() {
+      const w = state.wizard;
+      const steps = visibleWizardSteps();
+      const currentName = WIZARD_STEPS[w.step];
+      let idx = steps.indexOf(currentName);
+      if (idx <= 0) {
+        // From step 1 back to step 0; clear chosen mode so the chooser
+        // is a fresh decision.
+        w.step = 0;
+        if (currentName === "basics") w.mode = null;
+      } else {
+        const prevName = steps[idx - 1];
+        w.step = WIZARD_STEPS.indexOf(prevName);
+      }
+      render();
+    }
+
+    async function wizardFinish(landOn) {
+      const w = state.wizard;
+      const cid = w.collectionId;
+      w.open = false;
+      await fetchForms();
+      if (landOn === "dataset" && cid) {
+        navigate({ view: "collection", collectionId: cid, tab: "datasets" });
+      } else if (cid) {
+        navigate({ view: "collection", collectionId: cid, tab: "datasets" });
+      } else {
+        render();
+      }
+    }
+
+    function renderWizardModal() {
+      const w = state.wizard;
+      const steps = visibleWizardSteps();
+      const currentName = WIZARD_STEPS[w.step];
+      const currentVisibleIdx = Math.max(0, steps.indexOf(currentName));
+
+      const pills = steps
+        .map((name, idx) => {
+          const isPast = idx < currentVisibleIdx;
+          const isActive = idx === currentVisibleIdx;
+          const numCol = isPast
+            ? "background:var(--status-success);color:#fff"
+            : isActive
+              ? "background:var(--brand);color:#fff"
+              : "background:var(--bg-chip);color:var(--txt-secondary)";
+          const labelCol = isActive
+            ? "color:var(--txt-primary);font-weight:600"
+            : "color:var(--txt-secondary)";
+          return `<div class="flex items-center gap-2 flex-1 min-w-0">
+            <span class="inline-flex items-center justify-center rounded-full text-xs font-bold flex-shrink-0" style="width:1.5rem;height:1.5rem;${numCol}">${isPast ? "✓" : idx + 1}</span>
+            <span class="text-xs truncate" style="${labelCol}">${T(`wizard.step_${name}_label`)}</span>
+            ${idx < steps.length - 1 ? `<span class="flex-1" style="height:2px;background:${isPast ? "var(--status-success)" : "var(--divider)"}"></span>` : ""}
+          </div>`;
+        })
+        .join("");
+
+      let body = "";
+      switch (currentName) {
+        case "chooser":
+          body = renderWizardStepChooser();
+          break;
+        case "basics":
+          body = renderWizardStepBasics();
+          break;
+        case "template":
+          body = renderWizardStepTemplate();
+          break;
+        case "fields":
+          body = renderWizardStepFields();
+          break;
+        case "review":
+          body = renderWizardStepReview();
+          break;
+      }
+
+      const errorBanner = w.error
+        ? `<div class="tx-callout" style="background:color-mix(in srgb, var(--status-error) 12%, var(--bg-card));color:var(--status-error)">${escHtml(w.error)}</div>`
+        : "";
+
+      const isFinal = currentName === "review";
+      const canAdvance = wizardCanAdvance();
+      const isFirst = currentName === "chooser";
+
+      return `<div class="tx-modal-bg" data-action="wizard-close-backdrop" data-testid="wizard-modal">
+        <div class="tx-modal tx-modal--wide p-0" style="max-width:min(900px, 95vw);display:flex;flex-direction:column;max-height:92vh" onclick="event.stopPropagation()">
+          <div class="flex items-center justify-between p-5" style="border-bottom:1px solid var(--divider);flex:0 0 auto">
+            <h3 class="text-lg font-semibold flex items-center gap-2">
+              <span style="color:var(--brand)">${ICONS.sparkle}</span>
+              <span>${T("wizard.title")}</span>
+            </h3>
+            <button data-action="wizard-close" data-testid="wizard-close" class="tx-help-trigger" aria-label="${T("app.close")}">${ICONS.close}</button>
+          </div>
+          <div class="px-5 py-3" style="border-bottom:1px solid var(--divider);flex:0 0 auto">
+            <div class="flex items-center gap-2">${pills}</div>
+          </div>
+          <div class="p-5 space-y-4 overflow-y-auto" data-testid="wizard-step-${currentName}" style="flex:1 1 auto;min-height:0">
+            ${errorBanner}
+            ${body}
+          </div>
+          <div class="flex items-center justify-between gap-3 p-4" style="border-top:1px solid var(--divider);flex:0 0 auto;background:var(--bg-app)">
+            <div>
+              ${
+                !isFirst
+                  ? `<button data-action="wizard-back" data-testid="wizard-back" class="tx-btn tx-btn-sm tx-btn-ghost">${ICONS.back} ${T("app.back")}</button>`
+                  : ""
+              }
+            </div>
+            <div class="flex items-center gap-2">
+              <button data-action="wizard-close" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.cancel")}</button>
+              ${
+                isFinal
+                  ? `<button data-action="wizard-finish-collection" data-testid="wizard-finish" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.finish_open_collection")}</button>
+                     <button data-action="wizard-finish-dataset" data-testid="wizard-finish-primary" class="tx-btn tx-btn-sm"${w.saving ? " disabled" : ""}>${ICONS.sparkle} ${T("wizard.finish_add_dataset")}</button>`
+                  : `<button data-action="wizard-next" data-testid="wizard-next" class="tx-btn tx-btn-sm"${!canAdvance || w.saving ? " disabled" : ""}>${w.saving ? T("app.loading") : T("app.continue")} ${ICONS.chevRight}</button>`
+              }
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function renderWizardStepChooser() {
+      const mode = state.wizard.mode;
+      const card = (
+        m,
+        icon,
+        title,
+        hint,
+      ) => `<button type="button" data-action="wizard-pick-mode" data-mode="${m}" data-testid="wizard-mode-${m}" class="tx-row p-5 text-left flex items-start gap-3" style="${mode === m ? "box-shadow:inset 0 0 0 2px var(--brand)" : ""}">
+        <span class="inline-flex items-center justify-center w-10 h-10 rounded-full flex-shrink-0" style="background:var(--brand-alpha-light);color:var(--brand)">${icon}</span>
+        <div>
+          <div class="font-semibold">${escHtml(title)}</div>
+          <div class="text-xs tx-secondary mt-1">${escHtml(hint)}</div>
+        </div>
+      </button>`;
+      return `<div class="space-y-3">
+        <h4 class="text-base font-semibold">${T("wizard.chooser_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.chooser_subtitle")}</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          ${card("template", ICONS.file, T("wizard.mode_template_title"), T("wizard.mode_template_hint"))}
+          ${card("noTemplate", ICONS.variable, T("wizard.mode_no_template_title"), T("wizard.mode_no_template_hint"))}
+        </div>
+      </div>`;
+    }
+
+    function renderWizardStepBasics() {
+      const w = state.wizard;
+      const lang = w.language || state.config.default_language || "en";
+      return `<form id="tx-wizard-basics" class="space-y-3" data-testid="wizard-basics-form">
+        <h4 class="text-base font-semibold">${T("wizard.basics_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.basics_subtitle")}</p>
+        <div>
+          <label class="tx-label">${T("collections.name_label")}</label>
+          <input name="name" data-action="wizard-input-name" data-testid="wizard-input-name" value="${escHtml(w.name || "")}" class="tx-input" placeholder="${T("collections.name_placeholder")}" autofocus required />
+        </div>
+        <div>
+          <label class="tx-label">${T("collections.description_label")}</label>
+          <textarea name="description" data-action="wizard-input-description" rows="2" class="tx-textarea" placeholder="${T("collections.description_placeholder")}">${escHtml(w.description || "")}</textarea>
+        </div>
+        <div>
+          <label class="tx-label">${T("collections.language_label")}</label>
+          <select name="language" data-action="wizard-input-language" class="tx-select">
+            <option value="de"${lang === "de" ? " selected" : ""}>${T("settings.lang_de")}</option>
+            <option value="en"${lang === "en" ? " selected" : ""}>${T("settings.lang_en")}</option>
+            <option value="es"${lang === "es" ? " selected" : ""}>${T("settings.lang_es")}</option>
+            <option value="tr"${lang === "tr" ? " selected" : ""}>${T("settings.lang_tr")}</option>
+          </select>
+        </div>
+      </form>`;
+    }
+
+    function renderWizardStepTemplate() {
+      const w = state.wizard;
+      const hasTemplate = !!w.templateId;
+      const uploading = w.templateUploading;
+      const err = w.templateError;
+      return `<div class="space-y-3" data-testid="wizard-template-step">
+        <h4 class="text-base font-semibold">${T("wizard.template_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.template_subtitle")}</p>
+        ${
+          hasTemplate
+            ? `<div class="tx-row p-4 flex items-center gap-3">
+                <span style="color:var(--status-success)">${ICONS.check}</span>
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium truncate">${escHtml(w.templateName || "")}</div>
+                  <div class="text-xs tx-secondary">${w.templatePlaceholderCount} ${T("templates.placeholder_count")}</div>
+                </div>
+                <button data-action="wizard-template-replace" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_replace")}</button>
+              </div>`
+            : `<label class="tx-drop" data-testid="wizard-template-dropzone">
+                <div class="inline-flex items-center justify-center w-10 h-10 rounded-full mb-2" style="background:var(--brand-alpha-light);color:var(--brand)">${ICONS.upload}</div>
+                <p class="text-sm font-medium">${T("templates.drop_hint")}</p>
+                <input type="file" data-action="wizard-template-pick" data-testid="wizard-template-file" accept=".docx" class="hidden" />
+              </label>`
+        }
+        ${uploading ? `<div class="text-sm tx-secondary"><span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full align-middle"></span> ${T("templates.uploading")}</div>` : ""}
+        ${err ? `<div class="text-sm" style="color:var(--status-error)">${escHtml(err)}</div>` : ""}
+        ${!hasTemplate ? `<button data-action="wizard-skip-template" data-testid="wizard-skip-template" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_skip")}</button>` : ""}
+      </div>`;
+    }
+
+    function renderWizardStepFields() {
+      const w = state.wizard;
+      if (w.mode === "template") return renderWizardStepFieldsFromTemplate();
+      return renderWizardStepFieldsFromText();
+    }
+
+    function renderWizardStepFieldsFromTemplate() {
+      const w = state.wizard;
+      if (w.suggestionsLoading) {
+        return `<div class="text-sm tx-secondary py-6 text-center">
+          <span class="animate-spin inline-block w-5 h-5 border-2 border-current border-t-transparent rounded-full"></span>
+          <p class="mt-2">${T("wizard.fields_detecting")}</p>
+        </div>`;
+      }
+      if (w.suggestionsError) {
+        return `<div class="text-sm" style="color:var(--status-error)">${escHtml(w.suggestionsError)}</div>`;
+      }
+      if (!w.suggestions) {
+        return `<div class="text-sm tx-secondary">${T("wizard.fields_template_missing")}</div>`;
+      }
+      const sugg = w.suggestions.suggestions || [];
+      const rows = sugg
+        .map((s, i) => {
+          const dup = s._status === "duplicate";
+          const checked = !!w.suggestionsSelected[i] && !dup;
+          return `<tr class="tx-divider border-t${dup ? " opacity-60" : ""}">
+            <td class="py-2 px-3"><input type="checkbox" data-action="wizard-suggestion-toggle" data-idx="${i}" data-testid="wizard-suggestion-${i}" ${checked ? "checked" : ""} ${dup ? "disabled" : ""} class="h-4 w-4" style="accent-color:var(--brand)" /></td>
+            <td class="py-2 px-3 font-mono text-xs">${escHtml(s.key)}${dup ? ` <span class="tx-secondary text-xs">(${T("variables.import_duplicate_key")})</span>` : ""}</td>
+            <td class="py-2 px-3 text-sm">${escHtml(s.label || "")}</td>
+            <td class="py-2 px-3 text-xs">${escHtml(T(`variables.type_${s.type}`, s.type))}</td>
+          </tr>`;
+        })
+        .join("");
+      const summary = Tf("wizard.fields_template_summary", {
+        total: sugg.length,
+        selected: Object.values(w.suggestionsSelected).filter(Boolean).length,
+      });
+      return `<div class="space-y-3" data-testid="wizard-fields-template">
+        <h4 class="text-base font-semibold">${T("wizard.fields_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.fields_template_subtitle")}</p>
+        <p class="text-xs tx-secondary">${escHtml(summary)}</p>
+        <div class="tx-card p-0 overflow-x-auto">
+          <table class="w-full text-left">
+            <thead>
+              <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
+                <th class="py-2 px-3">${T("variables.import_col_use")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_key")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_label")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_type")}</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+    }
+
+    function renderWizardStepFieldsFromText() {
+      const w = state.wizard;
+      const parsed = w.pastedFields;
+      return `<div class="space-y-3" data-testid="wizard-fields-text">
+        <h4 class="text-base font-semibold">${T("wizard.fields_text_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.fields_text_subtitle")}</p>
+        <textarea data-action="wizard-paste-text" data-testid="wizard-paste-text" rows="6" class="tx-textarea" placeholder="${T("variables.import_hint")}" style="font-family:monospace;font-size:.8rem">${escHtml(w.pastedText || "")}</textarea>
+        <div class="flex items-center gap-2">
+          <button data-action="wizard-parse-text" data-testid="wizard-parse-text" class="tx-btn tx-btn-sm"${w.pastedParsing ? " disabled" : ""}>
+            ${w.pastedParsing ? `<span class="animate-spin inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full"></span>` : ICONS.sparkle}
+            ${w.pastedParsing ? T("app.loading") : T("wizard.fields_text_parse")}
+          </button>
+          ${w.pastedError ? `<span class="text-xs" style="color:var(--status-error)">${escHtml(w.pastedError)}</span>` : ""}
+        </div>
+        ${
+          parsed && parsed.length > 0
+            ? `<div class="tx-card p-3">
+                <div class="text-xs tx-secondary mb-2">${parsed.length} ${T("wizard.fields_text_parsed")}</div>
+                <ul class="text-sm space-y-0.5">
+                  ${parsed
+                    .map(
+                      (f) =>
+                        `<li>· <span class="font-mono text-xs">${escHtml(f.key)}</span> — ${escHtml(f.label || "")} <span class="tx-secondary text-xs">(${escHtml(T(`variables.type_${f.type || "text"}`, f.type || "text"))})</span></li>`,
+                    )
+                    .join("")}
+                </ul>
+              </div>`
+            : `<p class="text-xs tx-secondary">${T("wizard.fields_text_empty")}</p>`
+        }
+      </div>`;
+    }
+
+    function renderWizardStepReview() {
+      const w = state.wizard;
+      const c = collectionById(w.collectionId);
+      const vars = c?.fields?.length || 0;
+      const tpls = c ? collectionTemplates(c).length : 0;
+      return `<div class="space-y-3" data-testid="wizard-review">
+        <h4 class="text-base font-semibold">${T("wizard.review_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.review_subtitle")}</p>
+        <div class="tx-card p-4 space-y-2">
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-xs tx-secondary uppercase tracking-wider">${T("collections.name_label")}</div>
+            <div class="font-medium text-sm truncate">${escHtml(c?.name || w.name)}</div>
+          </div>
+          ${
+            c?.description || w.description
+              ? `<div class="flex items-start justify-between gap-3">
+                  <div class="text-xs tx-secondary uppercase tracking-wider">${T("collections.description_label")}</div>
+                  <div class="text-sm" style="max-width:60%">${escHtml(c?.description || w.description)}</div>
+                </div>`
+              : ""
+          }
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-xs tx-secondary uppercase tracking-wider">${T("collection.overview_stats_variables")}</div>
+            <div class="font-medium text-sm">${vars}</div>
+          </div>
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-xs tx-secondary uppercase tracking-wider">${T("collection.overview_stats_templates")}</div>
+            <div class="font-medium text-sm">${tpls}</div>
+          </div>
+        </div>
+        <p class="text-xs tx-secondary">${T("wizard.review_hint")}</p>
       </div>`;
     }
 
@@ -1514,6 +2187,7 @@ export default {
         <div>${renderCollectionTab(c)}</div>
         ${state.editingCollection && !state.newCollectionOpen ? renderCollectionEditor() : ""}
         ${state.dangerOpen ? renderDangerModal(c) : ""}
+        ${state.wizard.open ? renderWizardModal() : ""}
         ${renderHelpModal()}
       </div>`;
     }
@@ -3872,20 +4546,28 @@ export default {
       );
 
       // Setup split-button: primary click + per-mode dropdown items.
-      // PR2 wires every mode to the existing manual New-Collection
-      // modal; PR3 will replace the wizard/template/text branches
-      // with the real wizard modal. The mode is stashed on state so
-      // post-create code (e.g. land on Set up tab vs Overview) can
-      // honour the chosen entry point.
+      // wizard/template/text modes open the 5-step Setup Wizard with
+      // the appropriate entry point; manual mode falls back to the
+      // legacy New Collection modal so power users keep their muscle
+      // memory.
       el.querySelectorAll('[data-action="setup-action"]').forEach((btn) =>
         btn.addEventListener("click", (e) => {
           e.stopPropagation();
           const mode = btn.dataset.mode || "wizard";
           state.setupMenuOpen = null;
-          state.pendingSetupMode = mode;
-          state.newCollectionOpen = true;
-          state.editingCollection = null;
-          render();
+          if (mode === "manual") {
+            state.pendingSetupMode = "manual";
+            state.newCollectionOpen = true;
+            state.editingCollection = null;
+            render();
+            return;
+          }
+          // wizard => start with the chooser (let the user decide)
+          // template => skip the chooser and head to basics with the
+          //   template mode pre-selected (so step 2 is mandatory)
+          // text => skip the chooser and head to basics with the
+          //   noTemplate mode pre-selected (so step 3 is the paste UI)
+          wizardOpen({ mode });
         }),
       );
       el.querySelectorAll('[data-action="setup-menu-toggle"]').forEach((btn) =>
@@ -3903,14 +4585,13 @@ export default {
         }),
       );
 
-      // Draft "Resume" / "Discard" buttons in the Drafts section
+      // Draft "Resume" / "Discard" buttons in the Drafts section.
+      // Resume opens the wizard pre-loaded with the existing draft so
+      // the user picks up exactly where they left off; the wizard's
+      // own Cancel button drops them back here without losing anything.
       el.querySelectorAll('[data-action="draft-resume"]').forEach((btn) =>
         btn.addEventListener("click", () => {
-          navigate({
-            view: "collection",
-            collectionId: btn.dataset.id,
-            tab: "setup",
-          });
+          wizardOpen({ resumeCollectionId: btn.dataset.id });
         }),
       );
       el.querySelectorAll('[data-action="draft-discard"]').forEach((btn) =>
@@ -4049,6 +4730,9 @@ export default {
 
       // Danger zone
       bindDangerEvents();
+
+      // Setup Wizard
+      bindWizardEvents();
 
       // Settings
       const sForm = el.querySelector("#tx-settings-form");
@@ -5804,6 +6488,127 @@ export default {
           }
         },
       );
+    }
+
+    // --- Setup Wizard events ---
+
+    function bindWizardEvents() {
+      if (!state.wizard.open) return;
+
+      el.querySelectorAll('[data-action="wizard-close"]').forEach((btn) =>
+        btn.addEventListener("click", () => wizardClose()),
+      );
+      el.querySelector(
+        '[data-action="wizard-close-backdrop"]',
+      )?.addEventListener("click", (e) => {
+        if (e.target === e.currentTarget) wizardClose();
+      });
+      el.querySelector('[data-action="wizard-back"]')?.addEventListener(
+        "click",
+        () => wizardBack(),
+      );
+      el.querySelector('[data-action="wizard-next"]')?.addEventListener(
+        "click",
+        () => wizardNext(),
+      );
+      el.querySelectorAll('[data-action="wizard-pick-mode"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          state.wizard.mode = btn.dataset.mode;
+          render();
+        }),
+      );
+
+      // Basics step inputs — keep state in sync without forcing a full
+      // re-render on every keystroke (preserves focus + caret).
+      const nameEl = el.querySelector('[data-action="wizard-input-name"]');
+      if (nameEl) {
+        nameEl.addEventListener("input", () => {
+          state.wizard.name = nameEl.value;
+          const nextBtn = el.querySelector('[data-action="wizard-next"]');
+          if (nextBtn) nextBtn.disabled = !wizardCanAdvance();
+        });
+      }
+      const descEl = el.querySelector(
+        '[data-action="wizard-input-description"]',
+      );
+      if (descEl) {
+        descEl.addEventListener("input", () => {
+          state.wizard.description = descEl.value;
+        });
+      }
+      const langEl = el.querySelector('[data-action="wizard-input-language"]');
+      if (langEl) {
+        langEl.addEventListener("change", () => {
+          state.wizard.language = langEl.value;
+        });
+      }
+
+      // Template step
+      const tplPicker = el.querySelector(
+        '[data-action="wizard-template-pick"]',
+      );
+      if (tplPicker) {
+        tplPicker.addEventListener("change", () => {
+          const file = tplPicker.files?.[0];
+          if (!file) return;
+          state.wizard.templateFile = file;
+          wizardUploadTemplate();
+        });
+      }
+      el.querySelector(
+        '[data-action="wizard-template-replace"]',
+      )?.addEventListener("click", () => {
+        state.wizard.templateId = null;
+        state.wizard.templateName = "";
+        state.wizard.templatePlaceholderCount = 0;
+        state.wizard.suggestions = null;
+        state.wizard.suggestionsSelected = {};
+        render();
+      });
+      el.querySelector(
+        '[data-action="wizard-skip-template"]',
+      )?.addEventListener("click", () => {
+        // "Skip" inside the template step nudges the user into the
+        // noTemplate path mid-flow without forcing them all the way
+        // back to the chooser.
+        state.wizard.mode = "noTemplate";
+        wizardNext();
+      });
+
+      // Fields step (template path) — checkbox toggles
+      el.querySelectorAll('[data-action="wizard-suggestion-toggle"]').forEach(
+        (cb) =>
+          cb.addEventListener("change", () => {
+            const idx = parseInt(cb.dataset.idx, 10);
+            state.wizard.suggestionsSelected = {
+              ...state.wizard.suggestionsSelected,
+              [idx]: cb.checked,
+            };
+            // Re-render so the summary count updates; the checkbox
+            // itself stays mounted because it has a stable position.
+            render();
+          }),
+      );
+
+      // Fields step (text path) — paste + parse
+      const pasteEl = el.querySelector('[data-action="wizard-paste-text"]');
+      if (pasteEl) {
+        pasteEl.addEventListener("input", () => {
+          state.wizard.pastedText = pasteEl.value;
+        });
+      }
+      el.querySelector('[data-action="wizard-parse-text"]')?.addEventListener(
+        "click",
+        () => wizardParsePastedText(),
+      );
+
+      // Review step finish actions
+      el.querySelector(
+        '[data-action="wizard-finish-dataset"]',
+      )?.addEventListener("click", () => wizardFinish("dataset"));
+      el.querySelector(
+        '[data-action="wizard-finish-collection"]',
+      )?.addEventListener("click", () => wizardFinish("collection"));
     }
 
     // =========================================================================
