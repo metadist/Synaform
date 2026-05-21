@@ -626,11 +626,15 @@ test.describe('Synaform UI Tests', () => {
     await expect(page.locator('[data-testid="wizard-fields-text"]')).toBeVisible({ timeout: 10_000 })
     await page.locator('[data-testid="wizard-next"]').click()
 
-    // Step 4: review — primary CTA opens dataset list of the new Collection
+    // Step 4: review — both CTAs visible. The primary "Add your first
+    // dataset" always jumps to Datasets; the secondary "Open Collection"
+    // respects defaultLandingTab() (Overview for an incomplete Collection,
+    // Datasets once vars + templates are wired). We pick the primary so
+    // the assertion is independent of the readiness heuristic.
     await expect(page.locator('[data-testid="wizard-review"]')).toBeVisible({ timeout: 10_000 })
     await expect(page.locator('[data-testid="wizard-finish-primary"]')).toBeVisible()
     await expect(page.locator('[data-testid="wizard-finish"]')).toBeVisible()
-    await page.locator('[data-testid="wizard-finish"]').click()
+    await page.locator('[data-testid="wizard-finish-primary"]').click()
 
     // Lands on the Datasets tab of the new Collection
     await expect(page.locator('[data-tab="datasets"].active')).toBeVisible({ timeout: 10_000 })
@@ -685,6 +689,148 @@ test.describe('Synaform UI Tests', () => {
     const after = await (await api(request, cookie, 'GET', '/forms')).json()
     const draft = after.forms.find((f: { name: string }) => f.name === '[Wizard E2E] abandoned')
     if (draft) await api(request, cookie, 'DELETE', `/forms/${draft.id}`)
+  })
+
+  // ---------------------------------------------------------------------
+  // Dataset-first defaults (PR4)
+  // ---------------------------------------------------------------------
+
+  test('opening a ready Collection lands on Datasets by default', async ({ page, request }) => {
+    // The default seeded Collection has 17 variables but 0 templates,
+    // which fails isCollectionReady(). Attach a template through the API
+    // so the heuristic flips, then verify the card click lands on Datasets.
+    const cookie = await loginViaApi(request)
+    const templatePath = path.join(FIXTURES_DIR, 'test_template.docx')
+    const upload = await request.post(`${API_URL}/api/v1/user/1/plugins/synaform/templates`, {
+      headers: { Cookie: cookie },
+      multipart: {
+        file: { name: 'test_template.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: require('fs').readFileSync(templatePath) },
+        name: '[PR4 E2E] landing template',
+      },
+    })
+    const uploaded = (await upload.json()).template
+    const templateId = uploaded.id
+
+    // Attach it to the default form.
+    const formsRes = await api(request, cookie, 'GET', '/forms')
+    const formsBody = await formsRes.json()
+    const defaultForm = formsBody.forms.find((f: { id: string }) => f.id === 'default')
+    const existingTemplateIds = Array.isArray(defaultForm.template_ids) ? defaultForm.template_ids : []
+    if (!existingTemplateIds.includes(templateId)) {
+      await api(request, cookie, 'PUT', '/forms/default', {
+        template_ids: [...existingTemplateIds, templateId],
+      })
+    }
+
+    try {
+      await page.goto(`${BASE_URL}/plugins/synaform`)
+      await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+      await page.waitForTimeout(1500)
+
+      await page.locator('[data-open-collection="default"]').click()
+
+      // Ready Collection (vars + templates) -> Datasets is the active tab.
+      await expect(page.locator('[data-tab="datasets"].active')).toBeVisible({ timeout: 5000 })
+      await expect(page.locator('[data-tab="overview"].active')).toHaveCount(0)
+    } finally {
+      // Detach the template to restore the prior state for other tests.
+      const after = await (await api(request, cookie, 'GET', '/forms')).json()
+      const post = after.forms.find((f: { id: string }) => f.id === 'default')
+      if (post?.template_ids?.length) {
+        await api(request, cookie, 'PUT', '/forms/default', {
+          template_ids: post.template_ids.filter((id: string) => id !== templateId),
+        })
+      }
+      await api(request, cookie, 'DELETE', `/templates/${templateId}`)
+    }
+  })
+
+  test('opening an incomplete Collection still lands on Overview', async ({ page, request }) => {
+    // Create an empty Collection that fails the ready check (no template).
+    const cookie = await loginViaApi(request)
+    const before = await (await api(request, cookie, 'GET', '/forms')).json()
+    for (const f of before.forms || []) {
+      if (f.name?.startsWith('[PR4 E2E]')) {
+        await api(request, cookie, 'DELETE', `/forms/${f.id}`)
+      }
+    }
+    const create = await api(request, cookie, 'POST', '/forms', {
+      name: '[PR4 E2E] incomplete',
+      description: 'just a variable, no template',
+      language: 'en',
+      fields: [{ key: 'name', label: 'Name', type: 'text', required: false }],
+    })
+    const created = (await create.json()).form
+
+    try {
+      await page.goto(`${BASE_URL}/plugins/synaform`)
+      await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+      await page.waitForTimeout(1500)
+
+      await page.locator(`[data-open-collection="${created.id}"]`).click()
+      await expect(page.locator('[data-tab="overview"].active')).toBeVisible({ timeout: 5000 })
+    } finally {
+      await api(request, cookie, 'DELETE', `/forms/${created.id}`)
+    }
+  })
+
+  test('"Continue last" button appears for unfinished datasets and opens them', async ({ page, request }) => {
+    // Seed a draft dataset on the default form so Continue last has
+    // something to point at.
+    const cookie = await loginViaApi(request)
+    const create = await api(request, cookie, 'POST', '/candidates', {
+      name: '[PR4 E2E] continue-me',
+      form_id: 'default',
+      field_values: {},
+    })
+    const candidateId = (await create.json()).candidate.id
+
+    try {
+      await page.goto(`${BASE_URL}/plugins/synaform`)
+      await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+      await page.waitForTimeout(1500)
+      await page.locator('[data-open-collection="default"]').click()
+      // Force-navigate to datasets — the new default-landing rule may
+      // send us here automatically, but it's also fine if it doesn't.
+      await page.locator('[data-tab="datasets"]').first().click()
+      await page.waitForTimeout(800)
+
+      const btn = page.locator('[data-testid="btn-continue-last-dataset"]')
+      await expect(btn).toBeVisible({ timeout: 5000 })
+      await btn.click()
+
+      // The dataset detail view is recognisable via its numbered tab
+      // strip ("1. Sources", "2. Edit Details", ...).
+      await expect(page.locator('button[data-dataset-tab="sources"]')).toContainText('1.', { timeout: 5000 })
+    } finally {
+      await api(request, cookie, 'DELETE', `/candidates/${candidateId}`)
+    }
+  })
+
+  test('dataset detail tabs are numbered for visual rhythm', async ({ page, request }) => {
+    const cookie = await loginViaApi(request)
+    const create = await api(request, cookie, 'POST', '/candidates', {
+      name: '[PR4 E2E] numbered-tabs',
+      form_id: 'default',
+      field_values: {},
+    })
+    const candidateId = (await create.json()).candidate.id
+
+    try {
+      await page.goto(`${BASE_URL}/plugins/synaform#tx-c/default/datasets`)
+      await page.waitForSelector('text=Synaform', { timeout: 15_000 })
+      await page.waitForTimeout(1500)
+      await page.locator(`[data-open-dataset="${candidateId}"]`).first().click()
+      await page.waitForTimeout(1000)
+
+      const tabs = page.locator('[data-dataset-tab]')
+      await expect(tabs.nth(0)).toContainText('1.')
+      await expect(tabs.nth(1)).toContainText('2.')
+      await expect(tabs.nth(2)).toContainText('3.')
+      await expect(tabs.nth(3)).toContainText('4.')
+    } finally {
+      await api(request, cookie, 'DELETE', `/candidates/${candidateId}`)
+    }
   })
 
   test('kebab menu exposes Edit and Danger Zone', async ({ page }) => {

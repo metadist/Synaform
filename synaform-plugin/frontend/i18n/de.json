@@ -259,6 +259,7 @@
     "title": "Datens\u00e4tze",
     "subtitle": "Jeder Datensatz ist ein konkreter Fall: ein Kandidat, ein Kunde, ein Ticket. Das Gold Ihrer Collection.",
     "new": "Neuer Datensatz",
+    "continue_last": "Letzten fortsetzen",
     "empty": "Noch keine Datens\u00e4tze.",
     "empty_hint": "Legen Sie einen Datensatz an, tragen Sie ein, was Sie wissen, laden Sie Quelldokumente hoch und lassen Sie die KI den Rest erledigen.",
     "name_placeholder": "z. B. Kandidatenname oder Projekttitel",

@@ -259,6 +259,7 @@
     "title": "Datasets",
     "subtitle": "Cada dataset es un caso real: un candidato, un cliente, un ticket. El oro de tu Collection.",
     "new": "Nuevo dataset",
+    "continue_last": "Continuar el \u00faltimo",
     "empty": "A\u00fan no hay datasets.",
     "empty_hint": "Crea un dataset, rellena lo que sepas, sube documentos fuente y deja que la IA haga el resto.",
     "name_placeholder": "p. ej. nombre del candidato o t\u00edtulo del proyecto",

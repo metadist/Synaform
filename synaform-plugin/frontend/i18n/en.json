@@ -259,6 +259,7 @@
     "title": "Datasets",
     "subtitle": "Every dataset is one case: one candidate, one customer, one ticket. The gold of your Collection.",
     "new": "New Dataset",
+    "continue_last": "Continue last",
     "empty": "No datasets yet.",
     "empty_hint": "Create a dataset, fill in what you know, upload source documents, and let the AI do the rest.",
     "name_placeholder": "e.g. candidate name or project title",

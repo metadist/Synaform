@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.3.0";
+const TX_VERSION = "v3.3.1";
 
 export default {
   mount(el, context) {
@@ -1242,6 +1242,50 @@ export default {
     }
 
     /**
+     * Returns true when the Collection is ready to do daily work
+     * (defined variables AND at least one Word template attached).
+     * Used to decide the default landing tab when a card is opened.
+     */
+    function isCollectionReady(c) {
+      const vars = c?.fields?.length || 0;
+      const tpls = collectionTemplates(c).length;
+      return vars > 0 && tpls > 0;
+    }
+
+    /**
+     * Default landing tab when the user opens a Collection (from a card
+     * click or from any cross-link without an explicit tab). Ready
+     * Collections jump straight to Datasets — the user's daily work
+     * surface — while incomplete or draft ones stay on Overview where
+     * the next-step nudges live.
+     */
+    function defaultLandingTab(c) {
+      return isCollectionReady(c) ? "datasets" : "overview";
+    }
+
+    /**
+     * Most recent dataset that is NOT yet finished — i.e. something the
+     * user is likely mid-flow on. Generated documents are excluded
+     * because re-opening them rarely has value; users typically want to
+     * pick up an incomplete one. Returns null when there is nothing
+     * to continue.
+     */
+    function findContinuableDataset(collectionId) {
+      const open = datasetsForCollection(collectionId).filter((d) => {
+        const s = d.status || "draft";
+        return s !== "generated";
+      });
+      if (open.length === 0) return null;
+      return open
+        .slice()
+        .sort(
+          (a, b) =>
+            new Date(b.updated_at || b.created_at || 0) -
+            new Date(a.updated_at || a.created_at || 0),
+        )[0];
+    }
+
+    /**
      * Split-button for setup-time entry points. The primary click runs the
      * "guided wizard" path; the dropdown exposes the per-entry-point
      * shortcuts and a manual escape hatch. PR2 wires every option to the
@@ -1777,13 +1821,18 @@ export default {
       const cid = w.collectionId;
       w.open = false;
       await fetchForms();
-      if (landOn === "dataset" && cid) {
-        navigate({ view: "collection", collectionId: cid, tab: "datasets" });
-      } else if (cid) {
-        navigate({ view: "collection", collectionId: cid, tab: "datasets" });
-      } else {
+      if (!cid) {
         render();
+        return;
       }
+      // "dataset" primary CTA always goes to Datasets so users start
+      // collecting immediately. "collection" secondary CTA uses the
+      // ready-check so an incomplete Collection still surfaces the
+      // Overview nudges instead of dropping the user on an empty
+      // Datasets tab.
+      const c = collectionById(cid);
+      const tab = landOn === "dataset" ? "datasets" : defaultLandingTab(c);
+      navigate({ view: "collection", collectionId: cid, tab });
     }
 
     function renderWizardModal() {
@@ -3375,12 +3424,26 @@ export default {
       const start = state.datasetsPage * DATASETS_PER_PAGE;
       const pageItems = filtered.slice(start, start + DATASETS_PER_PAGE);
 
+      // "Continue last" jumps straight back into the most recent
+      // dataset that's still draft/extracted/reviewed — by far the
+      // most common daily action. Skipped for "generated" since
+      // re-opening a finished dataset rarely has value.
+      const continuable = findContinuableDataset(c.id);
+      const continueBtn = continuable
+        ? `<button data-action="continue-last-dataset" data-id="${escHtml(continuable.id)}" data-testid="btn-continue-last-dataset" class="tx-btn tx-btn-sm tx-btn-ghost" title="${escHtml(datasetDisplayName(continuable))}">
+            ${ICONS.refresh} ${T("datasets.continue_last")}
+          </button>`
+        : "";
+
       const header = `<div class="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h3 class="text-lg font-semibold mb-1">${T("datasets.title")}</h3>
           <p class="text-sm tx-secondary" style="max-width:640px">${T("datasets.subtitle")}</p>
         </div>
-        <button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("datasets.new")}</button>
+        <div class="flex items-center gap-2">
+          ${continueBtn}
+          <button data-action="new-dataset" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("datasets.new")}</button>
+        </div>
       </div>`;
 
       // Surface a GDPR-style overdue banner so the user can bulk-delete
@@ -3610,11 +3673,14 @@ export default {
       // collection-level tab handler, which would otherwise hijack the
       // navigation away from the dataset detail page.
       const currentTab = state.datasetTab || "sources";
+      // Numbered labels mirror the wizard pattern so the dataset
+      // flow has the same visual rhythm: each phase has an explicit
+      // step number the user can orient against.
       const tabs = [
-        { id: "sources", label: T("datasets.tab_sources") },
-        { id: "details", label: T("datasets.tab_details") },
-        { id: "variables", label: T("datasets.tab_variables") },
-        { id: "generate", label: T("datasets.tab_generate") },
+        { id: "sources", label: `1. ${T("datasets.tab_sources")}` },
+        { id: "details", label: `2. ${T("datasets.tab_details")}` },
+        { id: "variables", label: `3. ${T("datasets.tab_variables")}` },
+        { id: "generate", label: `4. ${T("datasets.tab_generate")}` },
       ];
       const tabNav = `<nav class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
         ${tabs
@@ -4487,13 +4553,18 @@ export default {
         }),
       );
 
-      // Collections list → open card
+      // Collections list → open card. Ready Collections (vars + templates)
+      // land on the Datasets tab so users see their daily work first; only
+      // incomplete or draft Collections land on Overview, where the
+      // next-step nudges live.
       el.querySelectorAll("[data-open-collection]").forEach((card) =>
         card.addEventListener("click", () => {
+          const id = card.dataset.openCollection;
+          const c = collectionById(id);
           navigate({
             view: "collection",
-            collectionId: card.dataset.openCollection,
-            tab: "overview",
+            collectionId: id,
+            tab: defaultLandingTab(c),
           });
         }),
       );
@@ -5468,6 +5539,18 @@ export default {
           }
         },
       );
+      // "Continue last" — jump straight back into the most recent
+      // unfinished dataset (driven by findContinuableDataset). Mirrors
+      // selectDataset behaviour so URL and state stay in sync.
+      el.querySelector(
+        '[data-action="continue-last-dataset"]',
+      )?.addEventListener("click", async (e) => {
+        const id = e.currentTarget.dataset.id;
+        state.datasetId = id;
+        writeHash();
+        await selectDataset(id);
+        render();
+      });
       el.querySelector('[data-action="datasets-back"]')?.addEventListener(
         "click",
         () => {
