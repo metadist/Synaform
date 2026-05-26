@@ -515,6 +515,131 @@ class SynaformController extends AbstractController
         ], Response::HTTP_CREATED);
     }
 
+    #[Route('/templates/ai-suggest-from-docx', name: 'templates_ai_suggest_from_docx', methods: ['POST'], priority: 10)]
+    #[OA\Post(
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/ai-suggest-from-docx',
+        summary: 'Upload a draft .docx with NO placeholders and let the AI propose variables. The endpoint inserts {{placeholders}} into a copy of the document and saves the result as a brand-new template.',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 201, description: 'Template created plus per-suggestion application status')]
+    public function templatesAiSuggestFromDocx(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $file = $request->files->get('file');
+        if (!$file) {
+            return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $originalName = $file->getClientOriginalName();
+        $ext = strtolower($file->getClientOriginalExtension());
+        if ($ext !== 'docx') {
+            return $this->json(['success' => false, 'error' => 'Only .docx files are allowed'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $name = trim((string) $request->request->get('name', pathinfo($originalName, PATHINFO_FILENAME)));
+        if ($name === '') {
+            $name = pathinfo($originalName, PATHINFO_FILENAME);
+        }
+        $language = $this->normalizeLanguage($request->request->get('language'));
+
+        $sourceText = $this->extractTextFromDocx($file->getPathname());
+        if ($sourceText === null || trim($sourceText) === '') {
+            return $this->json([
+                'success' => false,
+                'error'   => 'Could not read any text from the uploaded .docx.',
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+
+        $prompt = $this->buildAiSuggestFromDocxPrompt($sourceText, $language);
+
+        try {
+            $messages = [
+                ['role' => 'system', 'content' => 'You convert draft Word documents into reusable templates by proposing placeholder variables. Return only valid JSON.'],
+                ['role' => 'user',   'content' => $prompt],
+            ];
+            $aiOptions = $this->resolveAiModelOptions($userId);
+            $result    = $this->aiFacade->chat($messages, $userId, $aiOptions);
+            $aiContent = (string) ($result['content'] ?? '');
+            $modelUsed = (string) ($result['model'] ?? 'unknown');
+
+            $parsed = $this->parseJsonFromAiResponse($aiContent);
+            if ($parsed === null) {
+                return $this->json([
+                    'success' => false,
+                    'error'   => 'AI returned an unparseable response.',
+                ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+            $rawSuggestions = isset($parsed[0]) ? $parsed : ($parsed['suggestions'] ?? ($parsed['fields'] ?? []));
+            $suggestions    = $this->normalizeAiSuggestionsFromDocx($rawSuggestions, $sourceText);
+
+            if (empty($suggestions)) {
+                return $this->json([
+                    'success' => false,
+                    'error'   => 'The AI did not propose any variables for this document.',
+                ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+        } catch (\Throwable $e) {
+            $this->logger->error('AI suggest-from-docx failed: ' . $e->getMessage());
+
+            return $this->json([
+                'success' => false,
+                'error'   => 'AI suggestion failed: ' . $e->getMessage(),
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
+
+        $templateId = 'tpl_' . bin2hex(random_bytes(6));
+        $dir        = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId;
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $file->move($dir, 'template.docx');
+        $docxPath = $dir . '/template.docx';
+
+        $suggestions = $this->applyPlaceholdersToDocx($docxPath, $suggestions);
+
+        $placeholders = $this->extractPlaceholders($docxPath);
+        $lint         = $this->lintTemplate($docxPath);
+
+        try {
+            $preview = $this->htmlPreviewService->build($docxPath);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Preview skeleton failed', ['template' => $templateId, 'err' => $e->getMessage()]);
+            $preview = null;
+        }
+
+        $templateData = [
+            'id'                 => $templateId,
+            'name'               => $name,
+            'original_filename'  => $originalName,
+            'placeholders'       => $placeholders,
+            'placeholder_count'  => count($placeholders),
+            'preview'            => $preview,
+            'lint'               => $lint,
+            'language'           => $language,
+            'created_at'         => date('c'),
+            'updated_at'         => date('c'),
+            'origin'             => 'ai_suggested_from_docx',
+        ];
+
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId, $templateData);
+
+        $appliedCount = count(array_filter($suggestions, static fn (array $s): bool => !empty($s['applied'])));
+
+        return $this->json([
+            'success'           => true,
+            'template'          => $templateData,
+            'suggestions'       => array_values($suggestions),
+            'suggestion_count'  => count($suggestions),
+            'applied_count'     => $appliedCount,
+            'model'             => $modelUsed,
+        ], Response::HTTP_CREATED);
+    }
+
     #[Route('/templates/{templateId}', name: 'templates_get', methods: ['GET'])]
     #[OA\Get(
         path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}',
@@ -1624,6 +1749,16 @@ class SynaformController extends AbstractController
             $extracted = $this->parseJsonFromAiResponse($content);
             if ($extracted === null) {
                 return $this->json(['success' => false, 'error' => 'Failed to parse AI extraction result'], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+
+            // Post-process the AI output so common artefacts (duplicate
+            // outer time/position parroted back as the first line of
+            // `details`, missing blank lines before sub-period date
+            // headers) don't leak into the generated Word document.
+            // Currently only `stations` needs cleanup; the helper is a
+            // no-op if the key is missing or malformed.
+            if (isset($extracted['stations']) && is_array($extracted['stations'])) {
+                $extracted['stations'] = $this->normalizeStationsRows($extracted['stations']);
             }
 
             $entry['ai_extracted'] = $extracted;
@@ -3117,6 +3252,26 @@ class SynaformController extends AbstractController
             into {$languageName}. Proper nouns (people, company names, cities), email
             addresses, phone numbers, URLs and dates stay verbatim.
 
+            Rules for the `stations` array (career history) — these prevent
+            duplicated text in the generated Word document:
+              - One station entry per EMPLOYER, in reverse-chronological order.
+              - `time` is the OUTER time-range of that employment.
+              - `position` is the OUTER job title; if the employer had several
+                consecutive titles, join them with " / ".
+              - `details` is the body block. It MUST NOT start with the same
+                value as `time` or `position` — never repeat the outer header.
+                Begin `details` directly with the first bullet / sentence.
+              - When the employment had multiple sub-periods with different
+                titles, render each sub-period inside `details` as:
+                    <blank line>
+                    MM/YYYY – MM/YYYY
+                    Sub-period title
+                    - bullet 1
+                    - bullet 2
+                Always separate consecutive sub-periods with a blank line.
+              - For the FIRST sub-period inside a station, no leading blank
+                line is needed (since `details` itself starts there).
+
             Fields to extract:
             {$fieldsBlock}
 
@@ -3466,6 +3621,338 @@ class SynaformController extends AbstractController
 
             return null;
         }
+    }
+
+    /**
+     * Build the prompt used by the "AI suggests variables from a draft document"
+     * flow. The AI sees the raw extracted text of the .docx and is asked to
+     * propose a small set of variables we can templatise; for each variable it
+     * MUST echo back the exact verbatim substring (`source_text`) so we can
+     * locate it in the document XML and replace it with `{{key}}`.
+     */
+    private function buildAiSuggestFromDocxPrompt(string $documentText, string $languageCode): string
+    {
+        $languageName = $this->languageName($languageCode !== '' ? $languageCode : 'de');
+        // Hard cap the document we send to the model so we don't blow the
+        // context window on long contracts/reports. ~16 KB ≈ 4-5k tokens.
+        $cap = 16000;
+        if (function_exists('mb_strlen') && mb_strlen($documentText) > $cap) {
+            $documentText = mb_substr($documentText, 0, $cap) . "\n…[truncated]…";
+        } elseif (strlen($documentText) > $cap) {
+            $documentText = substr($documentText, 0, $cap) . "\n…[truncated]…";
+        }
+
+        return <<<PROMPT
+        You are turning a draft Word document into a reusable template by proposing the variables that should become placeholders.
+
+        Goal:
+        Read the document below and identify 5–20 distinct pieces of text that are likely to change every time someone fills out this template (names, dates, addresses, role titles, amounts, IDs, deadlines, bullet lists, etc.). Propose them as variables we can later replace with {{placeholders}}.
+
+        Return ONLY a JSON array. Each item MUST have:
+        - "key"          (string, lowercase, ASCII, words separated by hyphens, max 32 chars, unique)
+        - "label"        (string, human-readable label in {$languageName})
+        - "type"         (one of: "text", "textarea", "number", "date", "select", "list")
+        - "source"       (one of: "form", "ai")  — "form" for things a user types in a questionnaire, "ai" for things best extracted from another document (CV, contract, brief)
+        - "source_text"  (string, the EXACT verbatim substring as it appears in the document below — same casing, same punctuation, NO surrounding whitespace, NO ellipses, NO paraphrasing)
+        - "hint"         (string|null, optional short note explaining the variable)
+
+        Rules:
+        - source_text MUST be a contiguous run of characters from the document below. If the value spans multiple separate sentences or paragraphs, pick the most identifying short substring instead.
+        - Prefer source_text snippets that are 1–60 characters; never longer than 200.
+        - Never propose source_text that is a single common word ("the", "and", a single date format placeholder) or boilerplate that appears more than 3 times in the document — those break replacement.
+        - Skip headings, legal boilerplate, signatures, and anything that is not a meaningful variable.
+        - Keys MUST be unique. Use English snake/hyphen-case keys even when the label is in another language.
+        - For dates use "date". For monetary amounts use "number". For multi-line free text use "textarea". For comma/bullet lists use "list".
+        - Return ONLY the JSON array, no prose, no markdown fences.
+
+        Document:
+        ---
+        {$documentText}
+        ---
+        PROMPT;
+    }
+
+    /**
+     * Normalise the raw AI output for the suggest-from-docx flow. Drops items
+     * with missing/duplicate keys or source_text that isn't actually present
+     * in the document, coerces fields to canonical values, and de-duplicates
+     * by key.
+     *
+     * @param mixed  $raw        AI-returned array of items
+     * @param string $sourceText the original document text (used to validate
+     *                           that source_text really occurs there)
+     * @return list<array{
+     *   key: string, label: string, type: string, source: string,
+     *   source_text: string, hint: ?string,
+     * }>
+     */
+    private function normalizeAiSuggestionsFromDocx(mixed $raw, string $sourceText): array
+    {
+        if (!is_array($raw)) {
+            return [];
+        }
+        $out  = [];
+        $seen = [];
+        foreach ($raw as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $key = is_string($item['key'] ?? null) ? trim((string) $item['key']) : '';
+            $key = strtolower($key);
+            $key = preg_replace('/[^a-z0-9\-]+/', '-', $key) ?? '';
+            $key = trim($key, '-');
+            if ($key === '' || isset($seen[$key])) {
+                continue;
+            }
+            $sourceTextItem = is_string($item['source_text'] ?? null) ? trim((string) $item['source_text']) : '';
+            if ($sourceTextItem === '' || strlen($sourceTextItem) > 200) {
+                continue;
+            }
+            // Validate that the AI didn't hallucinate the substring. If the
+            // exact match isn't present we skip — there's no point promising
+            // an applied placeholder we can't actually insert.
+            if (!str_contains($sourceText, $sourceTextItem)) {
+                continue;
+            }
+            $type = $this->normalizeFieldType((string) ($item['type'] ?? 'text'));
+            $source = $this->normalizeSource($item['source'] ?? 'form') ?? 'form';
+            $label = is_string($item['label'] ?? null) && trim($item['label']) !== ''
+                ? trim((string) $item['label'])
+                : ucwords(str_replace('-', ' ', $key));
+            $hint = isset($item['hint']) && is_string($item['hint']) && trim($item['hint']) !== ''
+                ? trim((string) $item['hint'])
+                : null;
+
+            $out[] = [
+                'key'         => $key,
+                'label'       => $label,
+                'type'        => $type,
+                'source'      => $source,
+                'source_text' => $sourceTextItem,
+                'hint'        => $hint,
+                'placeholder' => '{{' . $key . '}}',
+                'applied'     => false,
+                'applied_reason' => null,
+            ];
+            $seen[$key] = true;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Best-effort placeholder injection: for every suggestion that carries a
+     * `source_text`, locate the paragraph (across body + headers + footers)
+     * whose concatenated text contains that snippet and replace it with the
+     * `{{key}}` placeholder.
+     *
+     * Strategy per paragraph match:
+     *   1. If the snippet sits entirely inside a single `<w:t>` text node,
+     *      do an in-place text replace there (keeps surrounding formatting
+     *      perfectly intact).
+     *   2. Otherwise collapse all of the paragraph's runs into a single run
+     *      (using the first run's formatting), then do the text replace.
+     *      This trades inline formatting for being able to bridge text that
+     *      Word split across runs (formatting changes, spell-check, …).
+     *
+     * Each suggestion is mutated in-place to record whether the replacement
+     * succeeded (`applied`) and, if not, why (`applied_reason`).
+     *
+     * @param array<int, array<string, mixed>> $suggestions
+     * @return array<int, array<string, mixed>>
+     */
+    private function applyPlaceholdersToDocx(string $docxPath, array $suggestions): array
+    {
+        if (empty($suggestions)) {
+            return $suggestions;
+        }
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            foreach ($suggestions as &$s) {
+                $s['applied'] = false;
+                $s['applied_reason'] = 'could_not_open_docx';
+            }
+            unset($s);
+            return $suggestions;
+        }
+
+        try {
+            $parts = $this->collectDocumentPartNames($zip);
+            foreach ($parts as $partName) {
+                $xml = $zip->getFromName($partName);
+                if ($xml === false) {
+                    continue;
+                }
+
+                $changed = false;
+                foreach ($suggestions as $idx => $s) {
+                    if (!empty($s['applied'])) {
+                        continue;
+                    }
+                    $result = $this->replaceSnippetInWordXml($xml, (string) $s['source_text'], (string) $s['placeholder']);
+                    if ($result['applied']) {
+                        $xml = $result['xml'];
+                        $suggestions[$idx]['applied'] = true;
+                        $suggestions[$idx]['applied_reason'] = $result['reason'];
+                        $changed = true;
+                    }
+                }
+
+                if ($changed) {
+                    $zip->deleteName($partName);
+                    $zip->addFromString($partName, $xml);
+                }
+            }
+        } finally {
+            $zip->close();
+        }
+
+        // Anything still unapplied: record a stable reason so the UI can hint
+        // the user that they'll need to add this placeholder manually.
+        foreach ($suggestions as $idx => $s) {
+            if (empty($s['applied']) && empty($s['applied_reason'])) {
+                $suggestions[$idx]['applied_reason'] = 'snippet_not_locatable_in_xml';
+            }
+        }
+
+        return $suggestions;
+    }
+
+    /**
+     * Replace `$snippet` with `$placeholder` inside a single Word XML part
+     * (document.xml / headerN.xml / footerN.xml).
+     *
+     * @return array{applied: bool, reason: ?string, xml: string}
+     */
+    private function replaceSnippetInWordXml(string $xml, string $snippet, string $placeholder): array
+    {
+        if ($snippet === '') {
+            return ['applied' => false, 'reason' => 'empty_snippet', 'xml' => $xml];
+        }
+
+        // Try the easy case first: snippet sits inside a single <w:t> node.
+        // We walk text nodes manually to avoid an expensive DOM round-trip.
+        if (preg_match_all('#<w:t(?:\s[^>]*)?>([^<]*)</w:t>#u', $xml, $matches, PREG_OFFSET_CAPTURE) === 0) {
+            return ['applied' => false, 'reason' => 'no_text_nodes', 'xml' => $xml];
+        }
+
+        $needleEscaped = htmlspecialchars($snippet, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+        $replacementEscaped = htmlspecialchars($placeholder, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+
+        foreach ($matches[1] as $m) {
+            $text = (string) $m[0];
+            if ($text !== '' && str_contains($text, $needleEscaped)) {
+                $offset = (int) $m[1];
+                $len    = strlen($text);
+                $newText = substr_replace($text, str_replace($needleEscaped, $replacementEscaped, $text), 0, $len);
+                $xmlOut  = substr_replace($xml, $newText, $offset, $len);
+
+                return ['applied' => true, 'reason' => 'in_single_run', 'xml' => $xmlOut];
+            }
+        }
+
+        // Fall back to paragraph collapse for snippets that span multiple
+        // runs (formatting boundaries, spell-check rewrites, …). We scan
+        // each <w:p>, concatenate its run text, look for the snippet, and
+        // if found rebuild the paragraph with one collapsed run.
+        $offset = 0;
+        $changedXml = '';
+        $lastEnd = 0;
+        $applied = false;
+        while (preg_match('#<w:p\b[^>]*>.*?</w:p>#us', $xml, $pm, PREG_OFFSET_CAPTURE, $offset)) {
+            $paraXml = $pm[0][0];
+            $paraStart = (int) $pm[0][1];
+            $paraEnd = $paraStart + strlen($paraXml);
+
+            $paraText = $this->concatParagraphText($paraXml);
+            if ($paraText !== '' && str_contains($paraText, $snippet)) {
+                $newParaXml = $this->collapseParagraphAndReplace($paraXml, $snippet, $placeholder);
+                if ($newParaXml !== null && $newParaXml !== $paraXml) {
+                    $changedXml .= substr($xml, $lastEnd, $paraStart - $lastEnd) . $newParaXml;
+                    $lastEnd = $paraEnd;
+                    $applied = true;
+                    $offset = $paraEnd;
+                    continue;
+                }
+            }
+            $offset = $paraEnd;
+        }
+
+        if ($applied) {
+            $changedXml .= substr($xml, $lastEnd);
+
+            return ['applied' => true, 'reason' => 'paragraph_collapsed', 'xml' => $changedXml];
+        }
+
+        return ['applied' => false, 'reason' => 'snippet_not_found', 'xml' => $xml];
+    }
+
+    /**
+     * Pull the readable text out of a `<w:p>` paragraph fragment by joining
+     * every `<w:t>` text node it contains. Entity-decodes so the result is
+     * directly comparable to a plain-text snippet.
+     */
+    private function concatParagraphText(string $paragraphXml): string
+    {
+        if (preg_match_all('#<w:t(?:\s[^>]*)?>([^<]*)</w:t>#u', $paragraphXml, $matches) === 0) {
+            return '';
+        }
+        $text = '';
+        foreach ($matches[1] as $chunk) {
+            $text .= html_entity_decode((string) $chunk, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+        }
+        return $text;
+    }
+
+    /**
+     * Rebuild a paragraph so its text content equals `originalText` with
+     * `$snippet` replaced by `$placeholder`. All <w:r> runs are collapsed
+     * into a single run using the FIRST run's `<w:rPr>` (so the paragraph
+     * keeps its dominant formatting). Non-run paragraph properties
+     * (`<w:pPr>`) are preserved.
+     *
+     * Returns null when the paragraph has no runs (nothing we can safely
+     * rewrite) or when the snippet isn't actually in the concatenated text.
+     */
+    private function collapseParagraphAndReplace(string $paragraphXml, string $snippet, string $placeholder): ?string
+    {
+        $text = $this->concatParagraphText($paragraphXml);
+        if ($text === '' || !str_contains($text, $snippet)) {
+            return null;
+        }
+        $newText = str_replace($snippet, $placeholder, $text);
+        $newTextEscaped = htmlspecialchars($newText, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+
+        // Preserve <w:pPr> if present (paragraph properties: alignment, style…).
+        $pPr = '';
+        if (preg_match('#<w:pPr\b[^>]*>.*?</w:pPr>#us', $paragraphXml, $pm)) {
+            $pPr = $pm[0];
+        } elseif (preg_match('#<w:pPr\b[^/>]*/>#u', $paragraphXml, $pm)) {
+            $pPr = $pm[0];
+        }
+
+        // Take the first run's <w:rPr> as the collapsed run's formatting.
+        $rPr = '';
+        if (preg_match('#<w:r\b[^>]*>(.*?)</w:r>#us', $paragraphXml, $rm)) {
+            $runInner = $rm[1];
+            if (preg_match('#<w:rPr\b[^>]*>.*?</w:rPr>#us', $runInner, $rpm)) {
+                $rPr = $rpm[0];
+            } elseif (preg_match('#<w:rPr\b[^/>]*/>#u', $runInner, $rpm)) {
+                $rPr = $rpm[0];
+            }
+        }
+
+        // Extract <w:p ...> opening tag verbatim so we keep namespaces / ids.
+        if (!preg_match('#<w:p\b[^>]*>#u', $paragraphXml, $openMatch)) {
+            return null;
+        }
+        $openTag = $openMatch[0];
+
+        // `xml:space="preserve"` on <w:t> keeps leading/trailing whitespace
+        // (e.g. snippets that include the surrounding space).
+        $newRun = '<w:r>' . $rPr . '<w:t xml:space="preserve">' . $newTextEscaped . '</w:t></w:r>';
+
+        return $openTag . $pPr . $newRun . '</w:p>';
     }
 
     private function extractElementText(mixed $element): string
@@ -3856,6 +4343,146 @@ class SynaformController extends AbstractController
     }
 
     /**
+     * Clean up the rows of the `stations` row-group AFTER they come back from
+     * AI extraction (or arrive via override / form data). Two cleanups, both
+     * idempotent and defensive:
+     *
+     *   1. Strip a "duplicate-prefix" from `details`. The extraction model
+     *      sometimes parrots the outer `time` and/or `position` back as the
+     *      first line(s) of `details`, which then renders twice in the
+     *      output Word document (once as the row header, once as the lead
+     *      of details). We drop any leading non-empty lines of `details`
+     *      that exactly match — case-insensitively, whitespace-collapsed —
+     *      the row's own `time`, `position`, OR any slash/comma-separated
+     *      chunk of `position`.
+     *
+     *   2. Insert a blank line before sub-period date-headers inside
+     *      `details`. A line that looks like a date header (e.g.
+     *      "MM/YYYY – MM/YYYY", "MM/YYYY -- heute", "since MM/YYYY",
+     *      "YYYY – YYYY") gets prefixed with a blank line unless it's
+     *      already the first line of details or already preceded by an
+     *      empty line. This is what visually separates consecutive
+     *      sub-periods inside one station.
+     *
+     * @param array<int|string, mixed> $stations array of row objects
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeStationsRows(array $stations): array
+    {
+        $out = [];
+        foreach ($stations as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $time     = isset($row['time']) && is_string($row['time']) ? trim($row['time']) : '';
+            $position = isset($row['position']) && is_string($row['position']) ? trim($row['position']) : '';
+            $details  = isset($row['details']) && is_string($row['details']) ? $row['details'] : '';
+
+            if ($details !== '') {
+                $details = $this->stripStationDetailsDuplicatePrefix($details, $time, $position);
+                $details = $this->ensureBlankLinesBeforeSubPeriods($details);
+                $row['details'] = $details;
+            }
+            $out[] = $row;
+        }
+        return $out;
+    }
+
+    /**
+     * Strip leading lines from `$details` that duplicate the row's outer
+     * `time` / `position` (or any slash- or comma-separated chunk of
+     * `position` ≥ 5 chars). Stops at the first non-empty, non-matching
+     * line. Whitespace-collapsed, case-insensitive comparison.
+     */
+    private function stripStationDetailsDuplicatePrefix(string $details, string $time, string $position): string
+    {
+        $needles = [];
+        if ($time !== '')     $needles[] = $time;
+        if ($position !== '') {
+            $needles[] = $position;
+            // Peel chunks so we catch partial echoes like
+            // "Web Merchandiser, Category Modern Woman" being the head of
+            // an outer "Web Merchandiser, Category Modern Woman / Substitute Einkauf Textil".
+            $chunks = preg_split('#\s*[/,]+\s*#u', $position) ?: [];
+            foreach ($chunks as $chunk) {
+                $chunk = trim((string) $chunk);
+                if (mb_strlen($chunk) >= 5) {
+                    $needles[] = $chunk;
+                }
+            }
+        }
+        if (empty($needles)) {
+            return $details;
+        }
+
+        $norm = static function (string $s): string {
+            $collapsed = preg_replace('/\s+/u', ' ', trim($s)) ?? '';
+            return function_exists('mb_strtolower') ? mb_strtolower($collapsed, 'UTF-8') : strtolower($collapsed);
+        };
+        $needleSet = [];
+        foreach ($needles as $n) {
+            $needleSet[$norm($n)] = true;
+        }
+
+        $lines = preg_split("/\r\n|\n|\r/", $details);
+        if (!is_array($lines)) {
+            return $details;
+        }
+
+        $drop = 0;
+        $count = count($lines);
+        while ($drop < $count) {
+            $stripped = trim($lines[$drop]);
+            if ($stripped === '') {
+                $drop++;
+                continue;
+            }
+            if (!isset($needleSet[$norm($stripped)])) {
+                break;
+            }
+            $drop++;
+        }
+
+        if ($drop === 0) {
+            return $details;
+        }
+
+        return ltrim(implode("\n", array_slice($lines, $drop)), "\n");
+    }
+
+    /**
+     * Insert a blank line before every line in `$details` that looks like a
+     * sub-period date header. Idempotent: never inserts two blank lines in
+     * a row, and never adds a blank in front of the very first line.
+     */
+    private function ensureBlankLinesBeforeSubPeriods(string $details): string
+    {
+        $lines = preg_split("/\r\n|\n|\r/", $details);
+        if (!is_array($lines) || count($lines) < 2) {
+            return $details;
+        }
+
+        // Date-header heuristic. Accepts:
+        //   "MM/YYYY – MM/YYYY"   (any dash: - or – or —, 1-2 chars)
+        //   "MM/YYYY -- heute"    (heute / today / present / now / jetzt)
+        //   "since|seit MM/YYYY"
+        //   "YYYY – YYYY"         (year-only ranges)
+        $datePattern = '/^\s*(?:since\s+|seit\s+)?(?:\d{1,2}\/)?\d{4}\s*[–—\-]{1,2}\s*(?:(?:\d{1,2}\/)?\d{4}|heute|today|present|now|jetzt)\s*$/iu';
+
+        $out = [];
+        foreach ($lines as $idx => $line) {
+            if ($idx > 0 && preg_match($datePattern, $line) === 1) {
+                $prev = end($out);
+                if ($prev !== false && trim((string) $prev) !== '') {
+                    $out[] = '';
+                }
+            }
+            $out[] = $line;
+        }
+        return implode("\n", $out);
+    }
+
+    /**
      * Build variable source map from form fields, falling back to hardcoded defaults.
      *
      * @param array $formFields The form's fields[] array, each with optional 'source' and 'fallback'
@@ -4053,6 +4680,14 @@ class SynaformController extends AbstractController
             if (is_array($stations) && !empty($stations)) {
                 $arrays['stations'] = $stations;
             }
+        }
+
+        // Defensive: re-run the post-extraction cleanup whenever we hand
+        // `stations` to the generator. Catches data extracted by older
+        // plugin versions, manually-edited rows, and override paths that
+        // never went through the AI normaliser.
+        if (isset($arrays['stations']) && is_array($arrays['stations'])) {
+            $arrays['stations'] = $this->normalizeStationsRows($arrays['stations']);
         }
 
         return $arrays;

@@ -496,6 +496,32 @@ export default {
       return state.templates.filter((t) => ids.includes(t.id));
     }
 
+    /**
+     * The "last worked on" timestamp for a Collection. We take the latest of:
+     *   1. the Collection's own updated_at / created_at
+     *   2. any of its datasets' updated_at / created_at
+     * so a Collection bubbles to the top whenever someone touches one of its
+     * datasets too, not only when its own metadata changes. Returns 0 for
+     * Collections with no timestamps at all (legacy rows) so they sink to
+     * the bottom rather than randomly mixing in.
+     */
+    function collectionActivityAt(c) {
+      if (!c) return 0;
+      let best = new Date(c.updated_at || c.created_at || 0).getTime() || 0;
+      const dsets = datasetsForCollection(c.id);
+      for (const d of dsets) {
+        const t = new Date(d.updated_at || d.created_at || 0).getTime() || 0;
+        if (t > best) best = t;
+      }
+      return best;
+    }
+
+    function sortCollectionsByActivity(list) {
+      return list
+        .slice()
+        .sort((a, b) => collectionActivityAt(b) - collectionActivityAt(a));
+    }
+
     // =========================================================================
     // Live preview (Phase 4b)
     // =========================================================================
@@ -1411,6 +1437,12 @@ export default {
           hint: T("setup.menu_from_template_hint"),
         },
         {
+          mode: "fromDoc",
+          icon: ICONS.sparkle,
+          label: T("setup.menu_from_doc"),
+          hint: T("setup.menu_from_doc_hint"),
+        },
+        {
           mode: "text",
           icon: ICONS.upload,
           label: T("setup.menu_from_text"),
@@ -1495,24 +1527,24 @@ export default {
     function renderCollectionsList() {
       const q = state.collectionsSearch.trim().toLowerCase();
       const allForms = state.forms || [];
-      const drafts = allForms
-        .filter((f) => isDraftCollection(f))
-        .filter((f) => {
-          if (!q) return true;
-          return (
-            f.name?.toLowerCase().includes(q) ||
-            f.description?.toLowerCase().includes(q)
-          );
-        });
-      const ready = allForms
-        .filter((f) => !isDraftCollection(f))
-        .filter((f) => {
-          if (!q) return true;
-          return (
-            f.name?.toLowerCase().includes(q) ||
-            f.description?.toLowerCase().includes(q)
-          );
-        });
+      // Both sections (drafts + ready) get sorted by most-recent-activity
+      // first so the user's current work always sits at the top instead of
+      // wherever the API happened to return it. Activity = the latest of
+      // the Collection's own updated_at and any of its datasets'
+      // updated_at, so editing a dataset bubbles its Collection up too.
+      const matchesQuery = (f) => {
+        if (!q) return true;
+        return (
+          f.name?.toLowerCase().includes(q) ||
+          f.description?.toLowerCase().includes(q)
+        );
+      };
+      const drafts = sortCollectionsByActivity(
+        allForms.filter((f) => isDraftCollection(f)).filter(matchesQuery),
+      );
+      const ready = sortCollectionsByActivity(
+        allForms.filter((f) => !isDraftCollection(f)).filter(matchesQuery),
+      );
 
       const cards = ready
         .map((c) => {
@@ -1604,6 +1636,8 @@ export default {
     function visibleWizardSteps() {
       // "noTemplate" path hides the Template step but keeps a placeholder
       // pill so the progress bar doesn't visually shrink mid-flow.
+      // "fromDoc" path keeps every step — the Template step is the
+      // dedicated AI-suggest landing area for that flow.
       return state.wizard.mode === "noTemplate"
         ? WIZARD_STEPS.filter((s) => s !== "template")
         : WIZARD_STEPS;
@@ -1638,6 +1672,12 @@ export default {
         pastedParsing: false,
         pastedError: null,
         pastedFields: null,
+        // "fromDoc" mode — AI-suggest from a placeholder-less draft .docx.
+        // Tracks per-suggestion metadata (source snippet + whether the
+        // backend was able to inject {{placeholder}} automatically).
+        fromDocApplied: 0,
+        fromDocTotal: 0,
+        fromDocModel: null,
         fields: [],
         saving: false,
         error: null,
@@ -1661,6 +1701,9 @@ export default {
       if (opts.mode === "text") {
         baseline.mode = "noTemplate";
         baseline.step = 1;
+      } else if (opts.mode === "fromDoc") {
+        baseline.mode = "fromDoc";
+        baseline.step = 1;
       } else if (mode === "template") {
         baseline.step = 1;
       }
@@ -1681,7 +1724,11 @@ export default {
       const w = state.wizard;
       switch (w.step) {
         case 0:
-          return w.mode === "template" || w.mode === "noTemplate";
+          return (
+            w.mode === "template" ||
+            w.mode === "noTemplate" ||
+            w.mode === "fromDoc"
+          );
         case 1:
           return (w.name || "").trim().length > 0;
         case 2:
@@ -1788,6 +1835,78 @@ export default {
       }
     }
 
+    // "fromDoc" mode: upload a draft .docx that has NO {{placeholders}}
+    // yet. The backend asks the AI to identify what should be variables,
+    // injects placeholders into a copy of the document, and returns the
+    // new template plus a per-suggestion application status (so the UI
+    // can flag the ones that need a manual fix in Word).
+    async function wizardAiSuggestFromDocx() {
+      const w = state.wizard;
+      const file = w.templateFile;
+      if (!file || !w.collectionId) return;
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("name", file.name.replace(/\.docx$/i, ""));
+      if (w.language) fd.append("language", w.language);
+      w.templateUploading = true;
+      w.templateError = null;
+      w.suggestionsError = null;
+      render();
+      try {
+        const res = await fetch(`${BASE}/templates/ai-suggest-from-docx`, {
+          method: "POST",
+          credentials: "include",
+          body: fd,
+        });
+        if (!res.ok) {
+          let msg = `Upload failed (${res.status})`;
+          try {
+            const j = await res.json();
+            if (j.error) msg = j.error;
+            else if (j.message) msg = j.message;
+          } catch (_) {
+            /* ignore */
+          }
+          throw new Error(msg);
+        }
+        const body = await res.json();
+        w.templateId = body.template.id;
+        w.templateName = body.template.name;
+        w.templatePlaceholderCount =
+          body.template.placeholder_count ??
+          body.template.placeholders?.length ??
+          0;
+        w.fromDocApplied = body.applied_count || 0;
+        w.fromDocTotal = body.suggestion_count || (body.suggestions || []).length;
+        w.fromDocModel = body.model || null;
+        // Reshape into the same envelope renderWizardStepFields*()
+        // expects, so existing save/select code keeps working unchanged.
+        w.suggestions = { suggestions: body.suggestions || [] };
+        const sel = {};
+        (body.suggestions || []).forEach((s, i) => {
+          sel[i] = true;
+        });
+        w.suggestionsSelected = sel;
+
+        const c = collectionById(w.collectionId);
+        const existing = Array.isArray(c?.template_ids) ? c.template_ids : [];
+        if (!existing.includes(body.template.id)) {
+          await api(`/forms/${w.collectionId}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              template_ids: [...existing, body.template.id],
+            }),
+          });
+        }
+        await Promise.all([fetchTemplates(), fetchForms()]);
+      } catch (err) {
+        w.templateError = err.message;
+      } finally {
+        w.templateUploading = false;
+        render();
+      }
+    }
+
     async function wizardLoadSuggestions() {
       const w = state.wizard;
       if (!w.templateId) return;
@@ -1837,7 +1956,14 @@ export default {
     async function wizardSaveFields() {
       const w = state.wizard;
       let chosen = [];
-      if (w.mode === "template" && w.suggestions) {
+      // Both `template` and `fromDoc` modes funnel their picks through the
+      // same `suggestions` envelope; the only difference is fromDoc never
+      // marks duplicates (each AI suggestion gets a fresh slot) and carries
+      // a `source_text`/`applied`/`applied_reason` we strip before saving.
+      if (
+        (w.mode === "template" || w.mode === "fromDoc") &&
+        w.suggestions
+      ) {
         chosen = (w.suggestions.suggestions || [])
           .map((s, i) => ({ s, i }))
           .filter(
@@ -1846,6 +1972,10 @@ export default {
           .map(({ s }) => {
             const copy = { ...s };
             delete copy._status;
+            delete copy.source_text;
+            delete copy.applied;
+            delete copy.applied_reason;
+            delete copy.placeholder;
             return copy;
           });
       } else if (w.pastedFields) {
@@ -2039,8 +2169,9 @@ export default {
       return `<div class="space-y-3">
         <h4 class="text-base font-semibold">${T("wizard.chooser_title")}</h4>
         <p class="text-sm tx-secondary">${T("wizard.chooser_subtitle")}</p>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
           ${card("template", ICONS.file, T("wizard.mode_template_title"), T("wizard.mode_template_hint"))}
+          ${card("fromDoc", ICONS.sparkle, T("wizard.mode_from_doc_title"), T("wizard.mode_from_doc_hint"))}
           ${card("noTemplate", ICONS.variable, T("wizard.mode_no_template_title"), T("wizard.mode_no_template_hint"))}
         </div>
       </div>`;
@@ -2074,38 +2205,128 @@ export default {
 
     function renderWizardStepTemplate() {
       const w = state.wizard;
+      const isFromDoc = w.mode === "fromDoc";
       const hasTemplate = !!w.templateId;
       const uploading = w.templateUploading;
       const err = w.templateError;
+      const title = isFromDoc
+        ? T("wizard.from_doc_title")
+        : T("wizard.template_title");
+      const subtitle = isFromDoc
+        ? T("wizard.from_doc_subtitle")
+        : T("wizard.template_subtitle");
+      const dropHint = isFromDoc
+        ? T("wizard.from_doc_drop_hint")
+        : T("templates.drop_hint");
+      const uploadingLabel = isFromDoc
+        ? T("wizard.from_doc_uploading")
+        : T("templates.uploading");
+      const dropAction = isFromDoc
+        ? "wizard-from-doc-pick"
+        : "wizard-template-pick";
+      const successLine = isFromDoc
+        ? `<div class="text-xs tx-secondary">${Tf("wizard.from_doc_summary", { applied: w.fromDocApplied, total: w.fromDocTotal })}${w.fromDocModel ? ` · ${T("datasets.extract_model")}: <span class="font-mono">${escHtml(w.fromDocModel)}</span>` : ""}</div>`
+        : `<div class="text-xs tx-secondary">${w.templatePlaceholderCount} ${T("templates.placeholder_count")}</div>`;
       return `<div class="space-y-3" data-testid="wizard-template-step">
-        <h4 class="text-base font-semibold">${T("wizard.template_title")}</h4>
-        <p class="text-sm tx-secondary">${T("wizard.template_subtitle")}</p>
+        <h4 class="text-base font-semibold">${escHtml(title)}</h4>
+        <p class="text-sm tx-secondary">${escHtml(subtitle)}</p>
         ${
           hasTemplate
             ? `<div class="tx-row p-4 flex items-center gap-3">
                 <span style="color:var(--status-success)">${ICONS.check}</span>
                 <div class="flex-1 min-w-0">
                   <div class="font-medium truncate">${escHtml(w.templateName || "")}</div>
-                  <div class="text-xs tx-secondary">${w.templatePlaceholderCount} ${T("templates.placeholder_count")}</div>
+                  ${successLine}
                 </div>
                 <button data-action="wizard-template-replace" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_replace")}</button>
               </div>`
             : `<label class="tx-drop" data-testid="wizard-template-dropzone">
-                <div class="inline-flex items-center justify-center w-10 h-10 rounded-full mb-2" style="background:var(--brand-alpha-light);color:var(--brand)">${ICONS.upload}</div>
-                <p class="text-sm font-medium">${T("templates.drop_hint")}</p>
-                <input type="file" data-action="wizard-template-pick" data-testid="wizard-template-file" accept=".docx" class="hidden" />
+                <div class="inline-flex items-center justify-center w-10 h-10 rounded-full mb-2" style="background:var(--brand-alpha-light);color:var(--brand)">${isFromDoc ? ICONS.sparkle : ICONS.upload}</div>
+                <p class="text-sm font-medium">${escHtml(dropHint)}</p>
+                ${isFromDoc ? `<p class="text-xs tx-secondary mt-1">${T("wizard.from_doc_drop_subhint")}</p>` : ""}
+                <input type="file" data-action="${dropAction}" data-testid="wizard-template-file" accept=".docx" class="hidden" />
               </label>`
         }
-        ${uploading ? `<div class="text-sm tx-secondary"><span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full align-middle"></span> ${T("templates.uploading")}</div>` : ""}
+        ${uploading ? `<div class="text-sm tx-secondary"><span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full align-middle"></span> ${escHtml(uploadingLabel)}</div>` : ""}
         ${err ? `<div class="text-sm" style="color:var(--status-error)">${escHtml(err)}</div>` : ""}
-        ${!hasTemplate ? `<button data-action="wizard-skip-template" data-testid="wizard-skip-template" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_skip")}</button>` : ""}
+        ${!hasTemplate && !isFromDoc ? `<button data-action="wizard-skip-template" data-testid="wizard-skip-template" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_skip")}</button>` : ""}
       </div>`;
     }
 
     function renderWizardStepFields() {
       const w = state.wizard;
+      if (w.mode === "fromDoc") return renderWizardStepFieldsFromDoc();
       if (w.mode === "template") return renderWizardStepFieldsFromTemplate();
       return renderWizardStepFieldsFromText();
+    }
+
+    // Fields step for the "fromDoc" path. Same table-of-checkboxes UI as the
+    // template path but shows the verbatim snippet the AI lifted from the
+    // document and whether the placeholder could be auto-injected (so the
+    // user knows when they need to open the .docx and fix a placeholder
+    // by hand).
+    function renderWizardStepFieldsFromDoc() {
+      const w = state.wizard;
+      if (w.suggestionsLoading || w.templateUploading) {
+        return `<div class="text-sm tx-secondary py-6 text-center">
+          <span class="animate-spin inline-block w-5 h-5 border-2 border-current border-t-transparent rounded-full"></span>
+          <p class="mt-2">${T("wizard.fields_detecting")}</p>
+        </div>`;
+      }
+      if (w.templateError || w.suggestionsError) {
+        return `<div class="text-sm" style="color:var(--status-error)">${escHtml(w.templateError || w.suggestionsError)}</div>`;
+      }
+      if (!w.suggestions || !Array.isArray(w.suggestions.suggestions)) {
+        return `<div class="text-sm tx-secondary">${T("wizard.fields_template_missing")}</div>`;
+      }
+      const sugg = w.suggestions.suggestions;
+      if (sugg.length === 0) {
+        return `<div class="text-sm tx-secondary">${T("wizard.from_doc_empty")}</div>`;
+      }
+      const truncate = (s, n) =>
+        s && s.length > n ? s.slice(0, n - 1) + "…" : s || "";
+      const rows = sugg
+        .map((s, i) => {
+          const checked = !!w.suggestionsSelected[i];
+          const appliedBadge = s.applied
+            ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium" style="background:color-mix(in srgb, var(--status-success) 12%, transparent);color:var(--status-success)">${ICONS.check} ${T("wizard.from_doc_applied")}</span>`
+            : `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium" style="background:color-mix(in srgb, var(--status-warning,#d97706) 14%, transparent);color:var(--status-warning,#d97706)" title="${T("wizard.from_doc_manual_hint")}">${ICONS.info || ICONS.sparkle} ${T("wizard.from_doc_manual")}</span>`;
+          return `<tr class="tx-divider border-t">
+            <td class="py-2 px-3 align-top"><input type="checkbox" data-action="wizard-suggestion-toggle" data-idx="${i}" data-testid="wizard-suggestion-${i}" ${checked ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" /></td>
+            <td class="py-2 px-3 font-mono text-xs align-top">${escHtml(s.key)}</td>
+            <td class="py-2 px-3 text-sm align-top">${escHtml(s.label || "")}</td>
+            <td class="py-2 px-3 text-xs align-top">${escHtml(T(`variables.type_${s.type}`, s.type))}</td>
+            <td class="py-2 px-3 text-xs align-top tx-secondary" style="max-width:18rem">
+              <div class="italic">"${escHtml(truncate(s.source_text, 80))}"</div>
+              <div class="mt-1">${appliedBadge}</div>
+            </td>
+          </tr>`;
+        })
+        .join("");
+      const summary = Tf("wizard.from_doc_fields_summary", {
+        total: sugg.length,
+        selected: Object.values(w.suggestionsSelected).filter(Boolean).length,
+        applied: w.fromDocApplied || 0,
+      });
+      return `<div class="space-y-3" data-testid="wizard-fields-from-doc">
+        <h4 class="text-base font-semibold">${T("wizard.from_doc_fields_title")}</h4>
+        <p class="text-sm tx-secondary">${T("wizard.from_doc_fields_subtitle")}</p>
+        <p class="text-xs tx-secondary">${escHtml(summary)}</p>
+        <div class="tx-card p-0 overflow-x-auto">
+          <table class="w-full text-left">
+            <thead>
+              <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
+                <th class="py-2 px-3">${T("variables.import_col_use")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_key")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_label")}</th>
+                <th class="py-2 px-3">${T("variables.import_col_type")}</th>
+                <th class="py-2 px-3">${T("wizard.from_doc_col_source")}</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
     }
 
     function renderWizardStepFieldsFromTemplate() {
@@ -4249,8 +4470,13 @@ export default {
             <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
             ${T("datasets.extract_running")}
           </div>`
-        : `<div class="flex items-center gap-2 text-sm" style="color:var(--status-success)">
-            ${ICONS.check} ${T("datasets.extract_done")}${modelInfo}
+        : `<div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-2 text-sm" style="color:var(--status-success)">
+              ${ICONS.check} ${T("datasets.extract_done")}${modelInfo}
+            </div>
+            <button type="button" data-dataset-tab="details" class="tx-btn tx-btn-sm">
+              ${T("datasets.goto_review")} →
+            </button>
           </div>`;
       return `<div class="tx-card p-5">
         <div class="flex items-center gap-2 mb-3">
@@ -6763,6 +6989,30 @@ export default {
           wizardUploadTemplate();
         });
       }
+      // "fromDoc" picker — uploads a placeholder-less draft so the AI
+      // can propose variables AND inject the {{placeholders}} on the
+      // way to creating a brand-new template.
+      const draftPicker = el.querySelector(
+        '[data-action="wizard-from-doc-pick"]',
+      );
+      if (draftPicker) {
+        draftPicker.addEventListener("change", async () => {
+          const file = draftPicker.files?.[0];
+          if (!file) return;
+          state.wizard.templateFile = file;
+          // The "fromDoc" call assumes the Collection already exists,
+          // so save the basics first (idempotent) before sending the
+          // file to the AI.
+          if (!state.wizard.collectionId) {
+            try {
+              await wizardSaveBasics();
+            } catch (_) {
+              return;
+            }
+          }
+          wizardAiSuggestFromDocx();
+        });
+      }
       el.querySelector(
         '[data-action="wizard-template-replace"]',
       )?.addEventListener("click", () => {
@@ -6771,6 +7021,9 @@ export default {
         state.wizard.templatePlaceholderCount = 0;
         state.wizard.suggestions = null;
         state.wizard.suggestionsSelected = {};
+        state.wizard.fromDocApplied = 0;
+        state.wizard.fromDocTotal = 0;
+        state.wizard.fromDocModel = null;
         render();
       });
       el.querySelector(
