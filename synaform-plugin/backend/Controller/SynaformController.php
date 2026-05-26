@@ -554,43 +554,118 @@ class SynaformController extends AbstractController
             ], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
-        $prompt = $this->buildAiSuggestFromDocxPrompt($sourceText, $language);
+        // ────────────────────────────────────────────────────────────────
+        // Multi-stage AI pipeline (see analyzeDocumentProfile() /
+        // proposeVariablesPass() / refineSuggestionSnippets() below).
+        // Stages 1 & 2 each run their own AI call; Stage 2 can run
+        // multiple top-up passes (with an exclusion list) when we get
+        // back fewer good variables than expected. Stage 3 is purely
+        // deterministic — it verifies / repairs every source_text
+        // against the source document and drops hallucinations.
+        // ────────────────────────────────────────────────────────────────
+        $pipelineLog = [
+            'doc_chars' => mb_strlen($sourceText),
+            'language_hint' => $language,
+            'stages' => [],
+        ];
+
+        $modelUsed = 'unknown';
+        $targetVariableCount = 10;
+        $maxProposalPasses   = 3;
 
         try {
-            $messages = [
-                ['role' => 'system', 'content' => 'You convert draft Word documents into reusable templates by proposing placeholder variables. Return only valid JSON.'],
-                ['role' => 'user',   'content' => $prompt],
+            // Stage 1 — document profile.
+            $profile = $this->analyzeDocumentProfile($sourceText, $userId, $language);
+            $modelUsed = $profile['_model'] ?? $modelUsed;
+            $pipelineLog['stages'][] = [
+                'stage' => 'analyze',
+                'doc_type' => $profile['doc_type'],
+                'primary_language' => $profile['primary_language'],
+                'model' => $profile['_model'] ?? null,
+                'analyzed_by_ai' => !empty($profile['_analyzed_by_ai']),
             ];
-            $aiOptions = $this->resolveAiModelOptions($userId);
-            $result    = $this->aiFacade->chat($messages, $userId, $aiOptions);
-            $aiContent = (string) ($result['content'] ?? '');
-            $modelUsed = (string) ($result['model'] ?? 'unknown');
 
-            $parsed = $this->parseJsonFromAiResponse($aiContent);
-            if ($parsed === null) {
+            // Stage 2 — proposal pass(es) with type-aware prompt.
+            $allSuggestions   = [];
+            $excludedKeys     = [];
+            $excludedSnippets = [];
+            for ($pass = 1; $pass <= $maxProposalPasses; $pass++) {
+                if (count($allSuggestions) >= $targetVariableCount) break;
+
+                $passResult = $this->proposeVariablesPass(
+                    $sourceText,
+                    $profile,
+                    $excludedKeys,
+                    $excludedSnippets,
+                    $pass,
+                    $maxProposalPasses,
+                    $userId,
+                );
+                $modelUsed = $passResult['model'] ?? $modelUsed;
+                $pipelineLog['stages'][] = [
+                    'stage' => "propose-pass-{$pass}",
+                    'returned_raw'      => $passResult['raw_count'],
+                    'kept_after_normalize' => count($passResult['suggestions']),
+                    'model'             => $passResult['model'],
+                    'response_len'      => $passResult['response_len'],
+                    'recovered_truncated' => $passResult['recovered_truncated'],
+                ];
+                if (empty($passResult['suggestions'])) break;
+
+                foreach ($passResult['suggestions'] as $s) {
+                    if (isset($excludedKeys[$s['key']])) continue;
+                    $allSuggestions[]            = $s;
+                    $excludedKeys[$s['key']]     = true;
+                    $excludedSnippets[mb_strtolower((string) $s['source_text'])] = true;
+                }
+            }
+
+            if (empty($allSuggestions)) {
                 return $this->json([
                     'success' => false,
-                    'error'   => 'AI returned an unparseable response.',
+                    'error'   => 'The AI did not propose any usable variables for this document. Try uploading a richer document, or use the manual wizard mode.',
+                    'pipeline' => $pipelineLog,
                 ], Response::HTTP_UNPROCESSABLE_ENTITY);
             }
-            $rawSuggestions = isset($parsed[0]) ? $parsed : ($parsed['suggestions'] ?? ($parsed['fields'] ?? []));
-            $suggestions    = $this->normalizeAiSuggestionsFromDocx($rawSuggestions, $sourceText);
+
+            // Stage 3 — verify / repair every source_text against the
+            // actual document. Drops hallucinations, normalises
+            // whitespace, picks the canonical casing.
+            $refined = $this->refineSuggestionSnippets($allSuggestions, $sourceText);
+            $pipelineLog['stages'][] = [
+                'stage' => 'refine',
+                'kept'    => count($refined['suggestions']),
+                'dropped' => $refined['dropped'],
+                'repaired' => $refined['repaired'],
+            ];
+            $suggestions = $refined['suggestions'];
 
             if (empty($suggestions)) {
                 return $this->json([
                     'success' => false,
-                    'error'   => 'The AI did not propose any variables for this document.',
+                    'error'   => 'The AI proposed variables but none of them could be located in the document. Try a richer document or shorten the source text.',
+                    'pipeline' => $pipelineLog,
                 ], Response::HTTP_UNPROCESSABLE_ENTITY);
             }
         } catch (\Throwable $e) {
-            $this->logger->error('AI suggest-from-docx failed: ' . $e->getMessage());
+            $this->logger->error('AI suggest-from-docx pipeline failed', [
+                'err' => $e->getMessage(),
+                'trace' => substr($e->getTraceAsString(), 0, 2000),
+                'pipeline' => $pipelineLog,
+            ]);
 
             return $this->json([
                 'success' => false,
                 'error'   => 'AI suggestion failed: ' . $e->getMessage(),
+                'pipeline' => $pipelineLog,
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
 
+        // ────────────────────────────────────────────────────────────────
+        // Stage 4 — persist the .docx, inject the {{placeholders}}, and
+        // run the normal post-upload bookkeeping (placeholders extract,
+        // lint, HTML preview, plugin_data write).
+        // ────────────────────────────────────────────────────────────────
         $templateId = 'tpl_' . bin2hex(random_bytes(6));
         $dir        = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId;
         if (!is_dir($dir)) {
@@ -612,6 +687,12 @@ class SynaformController extends AbstractController
             $preview = null;
         }
 
+        // Persist the language reported by Stage 1 onto the template
+        // when the caller didn't pass one explicitly. The extraction
+        // step downstream picks this up to keep generated values in
+        // the same language as the template.
+        $templateLanguage = $language !== '' ? $language : ($profile['primary_language'] ?? '');
+
         $templateData = [
             'id'                 => $templateId,
             'name'               => $name,
@@ -620,15 +701,29 @@ class SynaformController extends AbstractController
             'placeholder_count'  => count($placeholders),
             'preview'            => $preview,
             'lint'               => $lint,
-            'language'           => $language,
+            'language'           => $templateLanguage,
             'created_at'         => date('c'),
             'updated_at'         => date('c'),
             'origin'             => 'ai_suggested_from_docx',
+            'origin_profile'     => [
+                'doc_type'         => $profile['doc_type'] ?? 'other',
+                'doc_type_label'   => $profile['doc_type_label'] ?? '',
+                'primary_language' => $profile['primary_language'] ?? '',
+                'summary'          => $profile['summary'] ?? '',
+                'sections'         => $profile['sections'] ?? [],
+            ],
         ];
 
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId, $templateData);
 
         $appliedCount = count(array_filter($suggestions, static fn (array $s): bool => !empty($s['applied'])));
+
+        $this->logger->info('AI suggest-from-docx: completed', [
+            'template'        => $templateId,
+            'suggestions'     => count($suggestions),
+            'applied'         => $appliedCount,
+            'pipeline'        => $pipelineLog,
+        ]);
 
         return $this->json([
             'success'           => true,
@@ -637,6 +732,12 @@ class SynaformController extends AbstractController
             'suggestion_count'  => count($suggestions),
             'applied_count'     => $appliedCount,
             'model'             => $modelUsed,
+            'profile'           => [
+                'doc_type'         => $profile['doc_type'] ?? 'other',
+                'doc_type_label'   => $profile['doc_type_label'] ?? '',
+                'primary_language' => $profile['primary_language'] ?? '',
+                'summary'          => $profile['summary'] ?? '',
+            ],
         ], Response::HTTP_CREATED);
     }
 
@@ -3606,6 +3707,10 @@ class SynaformController extends AbstractController
 
     private function extractTextFromDocx(string $path): ?string
     {
+        // Pass 1 — PhpWord-driven traversal. Cleanest output (paragraph
+        // breaks, table cell tabbing) but misses anything PhpWord wraps in
+        // an element type without getText/getElements/getRows. Common
+        // miss: headers + footers of CV templates.
         try {
             $phpWord = PhpWordIOFactory::load($path);
             $text = '';
@@ -3613,63 +3718,688 @@ class SynaformController extends AbstractController
                 foreach ($section->getElements() as $element) {
                     $text .= $this->extractElementText($element) . "\n";
                 }
+                // Walk headers and footers too — sections expose them as
+                // separate getHeaders()/getFooters() collections rather
+                // than as elements of the section body.
+                if (method_exists($section, 'getHeaders')) {
+                    foreach ($section->getHeaders() as $header) {
+                        foreach ($header->getElements() ?? [] as $element) {
+                            $text .= $this->extractElementText($element) . "\n";
+                        }
+                    }
+                }
+                if (method_exists($section, 'getFooters')) {
+                    foreach ($section->getFooters() as $footer) {
+                        foreach ($footer->getElements() ?? [] as $element) {
+                            $text .= $this->extractElementText($element) . "\n";
+                        }
+                    }
+                }
             }
 
-            return trim($text) !== '' ? $text : null;
+            if (trim($text) !== '') {
+                return $text;
+            }
+            // PhpWord parsed the document but didn't surface any text.
+            // Fall through to the raw-XML pass.
+            $this->logger->info('Synaform: PhpWord returned empty text, falling back to raw XML', ['path' => $path]);
         } catch (\Throwable $e) {
-            $this->logger->warning('DOCX text extraction failed: ' . $e->getMessage());
+            // PhpWord refused the file outright (exotic Word features,
+            // strict-mode parser, etc.). The raw-XML pass below is much
+            // more forgiving so we still give it a shot.
+            $this->logger->warning('Synaform: PhpWord extraction failed, falling back to raw XML', ['err' => $e->getMessage()]);
+        }
 
+        // Pass 2 — raw XML extraction. Reads every <w:t> node in the
+        // document, headers, and footers. Same approach as
+        // extractPlaceholders(), so anything that has detectable
+        // placeholders also has detectable plain text.
+        return $this->extractTextFromDocxRaw($path);
+    }
+
+    /**
+     * Pull readable text out of a .docx by reading its XML parts directly.
+     * Walks every `<w:p>` paragraph in document.xml and every header /
+     * footer part, joins the text inside, and separates paragraphs with
+     * newlines. Used as a fallback when PhpWord can't extract anything
+     * (exotic Word features, strict-mode parser refusals, or content
+     * tucked into element types PhpWord's iterator doesn't surface).
+     *
+     * Returns null only when the zip can't be opened or the XML yields
+     * no text at all anywhere.
+     */
+    private function extractTextFromDocxRaw(string $path): ?string
+    {
+        $zip = new \ZipArchive();
+        if ($zip->open($path) !== true) {
+            $this->logger->warning('Synaform: raw extraction could not open docx', ['path' => $path]);
             return null;
+        }
+
+        $paragraphs = [];
+        try {
+            foreach ($this->collectDocumentPartNames($zip) as $partName) {
+                $xml = $zip->getFromName($partName);
+                if ($xml === false || $xml === '') {
+                    continue;
+                }
+                // Match each <w:p>…</w:p> paragraph (non-greedy, multiline)
+                // and pull the text out of every <w:t> inside it.
+                if (!preg_match_all('#<w:p\b[^>]*>(.*?)</w:p>#us', $xml, $paraMatches)) {
+                    continue;
+                }
+                foreach ($paraMatches[1] as $paraInner) {
+                    $paraText = '';
+                    if (preg_match_all('#<w:t(?:\s[^>]*)?>([^<]*)</w:t>#u', $paraInner, $tMatches)) {
+                        foreach ($tMatches[1] as $chunk) {
+                            $paraText .= html_entity_decode((string) $chunk, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+                        }
+                    }
+                    // Honour tab markers and explicit line breaks inside
+                    // the paragraph. <w:br/> can carry attributes so
+                    // match permissively.
+                    if (preg_match('#<w:tab\b#', $paraInner)) {
+                        $paraText = preg_replace_callback(
+                            '#<w:tab\b[^>]*/?>#',
+                            static fn () => "\t",
+                            $paraText,
+                        ) ?? $paraText;
+                    }
+                    if (trim($paraText) !== '') {
+                        $paragraphs[] = $paraText;
+                    }
+                }
+            }
+        } finally {
+            $zip->close();
+        }
+
+        if (empty($paragraphs)) {
+            return null;
+        }
+
+        return implode("\n", $paragraphs);
+    }
+
+    // =====================================================================
+    // AI Suggest-from-DOCX pipeline — see templatesAiSuggestFromDocx() for
+    // the orchestrator. The pipeline turns a draft Word document into a
+    // reusable template by running multiple AI passes plus a deterministic
+    // verification stage.
+    //
+    //   Stage 1 — analyzeDocumentProfile()      classify the doc
+    //   Stage 2 — proposeVariablesPass()        (called up to 3×) propose vars
+    //   Stage 3 — refineSuggestionSnippets()    verify / repair source_text
+    //   Stage 4 — applyPlaceholdersToDocx()     deterministic XML rewrite
+    // =====================================================================
+
+    /**
+     * Per-doc-type variable hints. Fed to the proposal prompt so the model
+     * gets concrete examples of what matters for THIS kind of document
+     * instead of guessing in the abstract. Keep the lists short and
+     * unambiguous — they're prompts, not contracts.
+     */
+    private const SUGGEST_DOC_TYPE_HINTS = [
+        'cv' => [
+            'description'     => 'A candidate CV / resume.',
+            'priority_vars'   => 'candidate full name, current/most-recent employer, current/most-recent role title, dates of the current employment, contact email, contact phone, address (street + city + zip), date of birth, nationality, target position, languages list, key skills list',
+            'avoid'           => 'do NOT propose section headings ("Berufserfahrung", "Ausbildung", "Skills"), and do NOT propose each individual job entry — career history is collected separately as a repeating row group',
+        ],
+        'offer_letter' => [
+            'description'     => 'A job offer / employment-offer letter.',
+            'priority_vars'   => 'recipient name, recipient address, position title, employer name, start date, annual salary, bonus / variable comp, working hours, notice period, signing deadline, sender name, sender title',
+            'avoid'           => 'do NOT propose legal boilerplate paragraphs',
+        ],
+        'contract' => [
+            'description'     => 'A formal contract between two or more parties.',
+            'priority_vars'   => 'party A name, party A address, party B name, party B address, effective date, contract term (length / end date), payment amount, payment cadence, jurisdiction, signing date, signer names',
+            'avoid'           => 'do NOT propose clause headings or recitals',
+        ],
+        'proposal' => [
+            'description'     => 'A sales or services proposal.',
+            'priority_vars'   => 'client name, client company, project title, project scope summary, project start date, project end date, total amount, payment terms, proposal valid-until date, sender / account manager name',
+            'avoid'           => 'do NOT propose multi-page service descriptions verbatim — pick the project title and scope summary instead',
+        ],
+        'invoice' => [
+            'description'     => 'An invoice or bill.',
+            'priority_vars'   => 'invoice number, invoice date, due date, biller name, biller address, customer name, customer address, line-item descriptions, line-item amounts, subtotal, tax, total, payment terms, payment reference',
+            'avoid'           => 'do NOT propose currency symbols or recurring header text',
+        ],
+        'report' => [
+            'description'     => 'A report (status, financial, project, …).',
+            'priority_vars'   => 'report title, reporting period (start–end), report date, author name, author role, executive-summary key figures, top headline metric value',
+            'avoid'           => 'do NOT propose long body sections — pick titles and key figures only',
+        ],
+        'brief' => [
+            'description'     => 'A creative / project brief.',
+            'priority_vars'   => 'client name, project name, deadline, budget, target audience description, key message, deliverables list, sender name',
+            'avoid'           => 'do NOT propose long narrative paragraphs',
+        ],
+        'letter' => [
+            'description'     => 'A formal letter.',
+            'priority_vars'   => 'sender name, sender address, recipient name, recipient address, letter date, subject line, salutation name, signature name, signature title',
+            'avoid'           => 'do NOT propose body-paragraph sentences as variables',
+        ],
+        'other' => [
+            'description'     => 'A general document of unknown type.',
+            'priority_vars'   => 'document title, primary recipient name, key date(s), key amount(s), names of the parties / people involved, contact details, deadlines',
+            'avoid'           => 'do NOT propose long passages — keep snippets short and meaningful',
+        ],
+    ];
+
+    /**
+     * Trim the document text we send to the model to a sensible budget.
+     * Smart truncation: keep the head and the tail when the doc is too
+     * long, so we preserve both the document title / opening AND any
+     * signature / footer info, which is often where dates and signer
+     * names live.
+     */
+    private function clipDocumentForPrompt(string $text, int $headChars = 22000, int $tailChars = 6000): string
+    {
+        $len = function_exists('mb_strlen') ? mb_strlen($text) : strlen($text);
+        if ($len <= $headChars + $tailChars + 200) {
+            return $text;
+        }
+        $head = function_exists('mb_substr') ? mb_substr($text, 0, $headChars) : substr($text, 0, $headChars);
+        $tail = function_exists('mb_substr') ? mb_substr($text, $len - $tailChars) : substr($text, $len - $tailChars);
+        return $head . "\n…[middle of document omitted — " . ($len - $headChars - $tailChars) . " characters skipped]…\n" . $tail;
+    }
+
+    /**
+     * Stage 1 — classify the document. Small AI call (≤ 1500 tokens) that
+     * returns a profile we feed into the type-aware proposal prompt.
+     *
+     * Falls back to a generic "other" profile (and logs the failure) when
+     * the AI is unavailable, returns garbage, or doesn't include enough
+     * of the expected fields. The pipeline keeps working in that case —
+     * just with a less-targeted proposal prompt.
+     *
+     * @return array{
+     *   doc_type: string,
+     *   doc_type_label: string,
+     *   primary_language: string,
+     *   summary: string,
+     *   sections: list<string>,
+     *   _analyzed_by_ai?: bool,
+     *   _model?: string,
+     * }
+     */
+    private function analyzeDocumentProfile(string $sourceText, int $userId, string $languageHint): array
+    {
+        // We only need the start of the doc to classify it; classification
+        // doesn't need to see every bullet point.
+        $excerpt = $this->clipDocumentForPrompt($sourceText, 6000, 1500);
+        $allowedTypes = implode(' | ', array_map(
+            static fn (string $t): string => '"' . $t . '"',
+            array_keys(self::SUGGEST_DOC_TYPE_HINTS),
+        ));
+        $hintForLanguage = $languageHint !== ''
+            ? "The caller provided a UI-language hint of \"{$languageHint}\". Use that for `doc_type_label` if it makes sense; the `primary_language` field should still reflect the document's own language."
+            : 'No UI-language hint provided — pick whichever language the document is mostly written in.';
+
+        $prompt = <<<PROMPT
+        You are classifying a Word document so we can later turn it into a reusable template.
+
+        Read the excerpt below and return ONE JSON object — nothing else, no markdown, no prose. The object MUST have EXACTLY these keys:
+
+          "doc_type"         one of: {$allowedTypes}
+          "doc_type_label"   short human-readable label for the doc type, in the document's own language (max 40 chars)
+          "primary_language" 2-letter ISO 639-1 code of the document language ("en", "de", "es", "tr", "fr", "it", "nl", "pt", "pl")
+          "summary"          one sentence describing what the document is (max 200 chars)
+          "sections"         list of section headings visible in the document (max 10 short strings)
+
+        Rules:
+        - Pick "other" if no listed type fits — don't force-fit.
+        - {$hintForLanguage}
+        - Return ONLY the JSON object. No code fences. No commentary.
+
+        Document excerpt:
+        ---
+        {$excerpt}
+        ---
+        PROMPT;
+
+        $fallback = [
+            'doc_type'         => 'other',
+            'doc_type_label'   => 'Document',
+            'primary_language' => $languageHint !== '' ? $languageHint : 'en',
+            'summary'          => '',
+            'sections'         => [],
+            '_analyzed_by_ai'  => false,
+            '_model'           => 'unknown',
+        ];
+
+        try {
+            $messages = [
+                ['role' => 'system', 'content' => 'You classify Word documents. Always return a single JSON object — no prose, no markdown fences.'],
+                ['role' => 'user',   'content' => $prompt],
+            ];
+            $aiOptions = $this->resolveAiModelOptions($userId);
+            $aiOptions['max_tokens'] = 1500;
+            $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+            $content = (string) ($result['content'] ?? '');
+            $modelUsed = (string) ($result['model'] ?? 'unknown');
+
+            $parsed = $this->parseJsonFromAiResponse($content);
+            // We asked for a single object, but be tolerant if a model
+            // wraps it in an array.
+            if (is_array($parsed) && isset($parsed[0]) && is_array($parsed[0])) {
+                $parsed = $parsed[0];
+            }
+            if (!is_array($parsed)) {
+                $this->logger->info('Synaform analyze: unparseable response, using fallback', [
+                    'model' => $modelUsed,
+                    'preview' => mb_substr($content, 0, 300),
+                ]);
+                $fallback['_model'] = $modelUsed;
+                return $fallback;
+            }
+
+            $docType = isset($parsed['doc_type']) && is_string($parsed['doc_type'])
+                ? strtolower(trim($parsed['doc_type']))
+                : 'other';
+            if (!isset(self::SUGGEST_DOC_TYPE_HINTS[$docType])) {
+                $docType = 'other';
+            }
+
+            $primaryLang = isset($parsed['primary_language']) && is_string($parsed['primary_language'])
+                ? $this->normalizeLanguage($parsed['primary_language'])
+                : '';
+            if ($primaryLang === '') {
+                $primaryLang = $languageHint !== '' ? $languageHint : 'en';
+            }
+
+            $sections = [];
+            if (isset($parsed['sections']) && is_array($parsed['sections'])) {
+                foreach ($parsed['sections'] as $s) {
+                    if (is_string($s) && trim($s) !== '') {
+                        $sections[] = trim($s);
+                        if (count($sections) >= 10) break;
+                    }
+                }
+            }
+
+            return [
+                'doc_type'         => $docType,
+                'doc_type_label'   => isset($parsed['doc_type_label']) && is_string($parsed['doc_type_label'])
+                    ? mb_substr(trim($parsed['doc_type_label']), 0, 60)
+                    : ucfirst($docType),
+                'primary_language' => $primaryLang,
+                'summary'          => isset($parsed['summary']) && is_string($parsed['summary'])
+                    ? mb_substr(trim($parsed['summary']), 0, 240)
+                    : '',
+                'sections'         => $sections,
+                '_analyzed_by_ai'  => true,
+                '_model'           => $modelUsed,
+            ];
+        } catch (\Throwable $e) {
+            $this->logger->warning('Synaform analyze: AI call failed, using fallback', ['err' => $e->getMessage()]);
+            return $fallback;
         }
     }
 
     /**
-     * Build the prompt used by the "AI suggests variables from a draft document"
-     * flow. The AI sees the raw extracted text of the .docx and is asked to
-     * propose a small set of variables we can templatise; for each variable it
-     * MUST echo back the exact verbatim substring (`source_text`) so we can
-     * locate it in the document XML and replace it with `{{key}}`.
+     * Stage 2 — type-aware variable proposal. Sends the document plus the
+     * profile from Stage 1 and a list of keys / snippets to AVOID (so we
+     * can re-call this for a top-up pass without re-proposing the same
+     * variables). Returns the normalised suggestions list plus diagnostic
+     * info we surface in the pipeline log.
+     *
+     * @param array<string, true> $excludedKeys     keys we already kept
+     * @param array<string, true> $excludedSnippets lowercase source_texts already kept
+     * @return array{
+     *   suggestions: list<array<string, mixed>>,
+     *   raw_count: int,
+     *   model: string,
+     *   response_len: int,
+     *   recovered_truncated: bool,
+     * }
      */
-    private function buildAiSuggestFromDocxPrompt(string $documentText, string $languageCode): string
-    {
-        $languageName = $this->languageName($languageCode !== '' ? $languageCode : 'de');
-        // Hard cap the document we send to the model so we don't blow the
-        // context window on long contracts/reports. ~16 KB ≈ 4-5k tokens.
-        $cap = 16000;
-        if (function_exists('mb_strlen') && mb_strlen($documentText) > $cap) {
-            $documentText = mb_substr($documentText, 0, $cap) . "\n…[truncated]…";
-        } elseif (strlen($documentText) > $cap) {
-            $documentText = substr($documentText, 0, $cap) . "\n…[truncated]…";
-        }
+    private function proposeVariablesPass(
+        string $sourceText,
+        array $profile,
+        array $excludedKeys,
+        array $excludedSnippets,
+        int $passIndex,
+        int $maxPasses,
+        int $userId,
+    ): array {
+        $docText = $this->clipDocumentForPrompt($sourceText, 22000, 6000);
+        $docType = $profile['doc_type'] ?? 'other';
+        $hints   = self::SUGGEST_DOC_TYPE_HINTS[$docType] ?? self::SUGGEST_DOC_TYPE_HINTS['other'];
+        $language = $profile['primary_language'] ?? 'en';
+        $languageName = $this->languageName($language);
+        $docTypeLabel = $profile['doc_type_label'] ?? ucfirst($docType);
+        $summary = $profile['summary'] ?? '';
+        $sections = !empty($profile['sections']) ? implode('; ', $profile['sections']) : '(none detected)';
 
-        return <<<PROMPT
-        You are turning a draft Word document into a reusable template by proposing the variables that should become placeholders.
+        $passContext = $passIndex === 1
+            ? "This is the first proposal pass — propose the most valuable variables."
+            : "This is top-up pass #{$passIndex} of {$maxPasses}. The variables listed under \"Already proposed\" below have ALREADY been accepted; propose only DIFFERENT variables that complement them.";
 
-        Goal:
-        Read the document below and identify 5–20 distinct pieces of text that are likely to change every time someone fills out this template (names, dates, addresses, role titles, amounts, IDs, deadlines, bullet lists, etc.). Propose them as variables we can later replace with {{placeholders}}.
+        $excludedKeysList = empty($excludedKeys) ? '(none yet)'
+            : implode(', ', array_keys($excludedKeys));
+        $excludedSnippetsList = empty($excludedSnippets) ? '(none yet)'
+            : implode(' | ', array_map(
+                static fn (string $s): string => '"' . mb_substr($s, 0, 60) . '"',
+                array_keys($excludedSnippets),
+            ));
 
-        Return ONLY a JSON array. Each item MUST have:
-        - "key"          (string, lowercase, ASCII, words separated by hyphens, max 32 chars, unique)
-        - "label"        (string, human-readable label in {$languageName})
-        - "type"         (one of: "text", "textarea", "number", "date", "select", "list")
-        - "source"       (one of: "form", "ai")  — "form" for things a user types in a questionnaire, "ai" for things best extracted from another document (CV, contract, brief)
-        - "source_text"  (string, the EXACT verbatim substring as it appears in the document below — same casing, same punctuation, NO surrounding whitespace, NO ellipses, NO paraphrasing)
-        - "hint"         (string|null, optional short note explaining the variable)
+        $prompt = <<<PROMPT
+        You are turning a draft {$docTypeLabel} into a reusable Word template by proposing the variables that should become {{placeholders}}.
 
-        Rules:
-        - source_text MUST be a contiguous run of characters from the document below. If the value spans multiple separate sentences or paragraphs, pick the most identifying short substring instead.
-        - Prefer source_text snippets that are 1–60 characters; never longer than 200.
-        - Never propose source_text that is a single common word ("the", "and", a single date format placeholder) or boilerplate that appears more than 3 times in the document — those break replacement.
-        - Skip headings, legal boilerplate, signatures, and anything that is not a meaningful variable.
-        - Keys MUST be unique. Use English snake/hyphen-case keys even when the label is in another language.
+        Document profile (from a prior analysis pass):
+          • doc_type:          {$docType}
+          • doc_type_label:    {$docTypeLabel}
+          • primary_language:  {$language}
+          • summary:           {$summary}
+          • sections visible:  {$sections}
+
+        Per-type guidance:
+          • {$hints['description']}
+          • Variables that almost always matter for this type:
+              {$hints['priority_vars']}
+          • {$hints['avoid']}
+
+        Pass context:
+          {$passContext}
+
+        Already proposed (DO NOT repeat — neither these keys nor these source snippets):
+          keys:     {$excludedKeysList}
+          snippets: {$excludedSnippetsList}
+
+        Return ONLY a JSON array (compact, no extra whitespace). Each item MUST have EXACTLY these 5 keys:
+        - "key"          string, lowercase ASCII, hyphen-separated, max 32 chars, unique within this response AND not in the exclusion list above
+        - "label"        string, short human-readable label in {$languageName}
+        - "type"         one of: "text", "textarea", "number", "date", "select", "list"
+        - "source"       one of: "form" (user types it in a questionnaire) or "ai" (best extracted from a sibling document like a CV)
+        - "source_text"  string, the EXACT verbatim substring as it appears in the document below — SAME casing, SAME punctuation, NO surrounding whitespace, NO ellipses, NO paraphrasing
+
+        Hard rules:
+        - Return between 6 and 12 entries. Quality > quantity.
+        - Each `source_text` MUST be a CONTIGUOUS run of characters that appears literally in the document below. If the text appears more than 3 times, pick a different identifying snippet or skip the variable.
+        - Snippet length: 1–60 characters strongly preferred, never more than 200.
+        - Skip section headings, legal boilerplate, signatures and anything that is not a real variable.
+        - Keys MUST be unique. Use English hyphen-case keys even when the label is in another language.
         - For dates use "date". For monetary amounts use "number". For multi-line free text use "textarea". For comma/bullet lists use "list".
-        - Return ONLY the JSON array, no prose, no markdown fences.
+        - DO NOT include any other keys.
+        - Return ONLY the JSON array. No prose. No markdown fences. No trailing commas.
 
         Document:
         ---
-        {$documentText}
+        {$docText}
         ---
         PROMPT;
+
+        $messages = [
+            ['role' => 'system', 'content' => 'You convert draft Word documents into reusable templates by proposing placeholder variables. Always return a single compact JSON array — no prose, no markdown fences.'],
+            ['role' => 'user',   'content' => $prompt],
+        ];
+        $aiOptions = $this->resolveAiModelOptions($userId);
+        // Very generous cap — JSON of 12 detailed objects + reasoning
+        // tokens on o-series models still has headroom here.
+        $aiOptions['max_tokens'] = 16000;
+
+        $recoveredTruncated = false;
+        try {
+            $result    = $this->aiFacade->chat($messages, $userId, $aiOptions);
+            $aiContent = (string) ($result['content'] ?? '');
+            $modelUsed = (string) ($result['model'] ?? 'unknown');
+        } catch (\Throwable $e) {
+            $this->logger->error('Synaform proposeVariablesPass: chat call failed', [
+                'pass' => $passIndex,
+                'err'  => $e->getMessage(),
+            ]);
+            return [
+                'suggestions'         => [],
+                'raw_count'           => 0,
+                'model'               => 'unknown',
+                'response_len'        => 0,
+                'recovered_truncated' => false,
+            ];
+        }
+
+        $parsed = $this->parseJsonFromAiResponse($aiContent);
+        if ($parsed === null) {
+            // Try partial recovery for truncated responses.
+            $recovered = $this->recoverTruncatedJsonArray($aiContent);
+            if (is_array($recovered) && !empty($recovered)) {
+                $parsed = $recovered;
+                $recoveredTruncated = true;
+                $this->logger->info('Synaform proposeVariablesPass: partial recovery', [
+                    'pass'     => $passIndex,
+                    'recovered' => count($recovered),
+                ]);
+            }
+        }
+        if (!is_array($parsed)) {
+            $this->logger->warning('Synaform proposeVariablesPass: unparseable response', [
+                'pass'        => $passIndex,
+                'model'       => $modelUsed,
+                'response_len' => strlen($aiContent),
+                'preview_head' => mb_substr($aiContent, 0, 400),
+            ]);
+            return [
+                'suggestions'         => [],
+                'raw_count'           => 0,
+                'model'               => $modelUsed,
+                'response_len'        => strlen($aiContent),
+                'recovered_truncated' => false,
+            ];
+        }
+
+        $rawSuggestions = isset($parsed[0]) ? $parsed : ($parsed['suggestions'] ?? ($parsed['fields'] ?? []));
+        $rawCount = is_array($rawSuggestions) ? count($rawSuggestions) : 0;
+        $normalised = $this->normalizeAiSuggestionsFromDocx($rawSuggestions, $sourceText);
+
+        // Strip out anything that would shadow an already-accepted key.
+        $filtered = array_values(array_filter(
+            $normalised,
+            static fn (array $s): bool => !isset($excludedKeys[$s['key']]),
+        ));
+
+        return [
+            'suggestions'         => $filtered,
+            'raw_count'           => $rawCount,
+            'model'               => $modelUsed,
+            'response_len'        => strlen($aiContent),
+            'recovered_truncated' => $recoveredTruncated,
+        ];
+    }
+
+    /**
+     * Stage 3 — deterministic verification + repair of every suggestion's
+     * source_text against the actual document. The proposal stage already
+     * dropped obvious hallucinations (where the snippet wasn't present at
+     * all) via normalizeAiSuggestionsFromDocx; this stage does the
+     * inverse: when an exact match exists but the casing or whitespace
+     * differs from what the model echoed back, we REPAIR the snippet to
+     * use the document's verbatim text so applyPlaceholdersToDocx() can
+     * actually substitute.
+     *
+     * Match strategies in priority order:
+     *   1. Exact substring                   — accept as-is
+     *   2. Whitespace-collapsed match        — repair to verbatim
+     *   3. Case-insensitive match            — repair to verbatim
+     *   4. Case + whitespace-insensitive     — repair to verbatim
+     *
+     * Anything still unlocatable is dropped (counted under `dropped`).
+     *
+     * @param list<array<string, mixed>> $suggestions
+     * @return array{
+     *   suggestions: list<array<string, mixed>>,
+     *   dropped: int,
+     *   repaired: int,
+     * }
+     */
+    private function refineSuggestionSnippets(array $suggestions, string $sourceText): array
+    {
+        $kept     = [];
+        $dropped  = 0;
+        $repaired = 0;
+
+        // Pre-compute helpers for the whitespace-collapsed search.
+        $docCollapsedLower = function_exists('mb_strtolower')
+            ? mb_strtolower(preg_replace('/\s+/u', ' ', $sourceText) ?? $sourceText, 'UTF-8')
+            : strtolower(preg_replace('/\s+/u', ' ', $sourceText) ?? $sourceText);
+
+        foreach ($suggestions as $s) {
+            $snippet = is_string($s['source_text'] ?? null) ? (string) $s['source_text'] : '';
+            if ($snippet === '') {
+                $dropped++;
+                continue;
+            }
+
+            // 1. Exact match — keep verbatim.
+            if (str_contains($sourceText, $snippet)) {
+                $kept[] = $s;
+                continue;
+            }
+
+            // 2. Whitespace-collapsed match. Try to find the snippet in
+            //    the document after collapsing runs of whitespace; when
+            //    we find a hit, recover the verbatim original.
+            $snippetCollapsed = preg_replace('/\s+/u', ' ', $snippet) ?? $snippet;
+            $verbatim = $this->findVerbatimMatch($sourceText, $snippetCollapsed, false);
+            if ($verbatim !== null) {
+                $s['source_text']   = $verbatim;
+                $s['repaired_from'] = $snippet;
+                $kept[]             = $s;
+                $repaired++;
+                continue;
+            }
+
+            // 3. Case + whitespace-insensitive match.
+            $verbatim = $this->findVerbatimMatch($sourceText, $snippetCollapsed, true);
+            if ($verbatim !== null) {
+                $s['source_text']   = $verbatim;
+                $s['repaired_from'] = $snippet;
+                $kept[]             = $s;
+                $repaired++;
+                continue;
+            }
+
+            // Couldn't locate — drop. We log at info so it's findable when
+            // someone wonders why a proposed variable didn't show up.
+            $this->logger->info('Synaform refine: dropping unlocatable suggestion', [
+                'key'     => $s['key'] ?? '?',
+                'snippet' => mb_substr($snippet, 0, 80),
+            ]);
+            $dropped++;
+        }
+
+        return [
+            'suggestions' => $kept,
+            'dropped'     => $dropped,
+            'repaired'    => $repaired,
+        ];
+    }
+
+    /**
+     * Search the source text for a contiguous run of words matching
+     * $snippetCollapsed (whitespace already collapsed to single spaces).
+     * When found, return the verbatim slice from the original document
+     * (preserving its actual whitespace / casing) so the caller can use
+     * it as the canonical source_text for placeholder substitution.
+     *
+     * Returns null when no match exists.
+     */
+    private function findVerbatimMatch(string $sourceText, string $snippetCollapsed, bool $caseInsensitive): ?string
+    {
+        $snippetCollapsed = trim($snippetCollapsed);
+        if ($snippetCollapsed === '') return null;
+
+        // Build a regex where every internal space in the snippet
+        // matches any whitespace run in the source.
+        $pattern = preg_replace_callback(
+            '/\s+/u',
+            static fn (): string => '\s+',
+            preg_quote($snippetCollapsed, '#'),
+        ) ?? preg_quote($snippetCollapsed, '#');
+        $flags = 'u';
+        if ($caseInsensitive) $flags .= 'i';
+        $regex = '#' . $pattern . '#' . $flags;
+
+        if (preg_match($regex, $sourceText, $m) === 1) {
+            return $m[0];
+        }
+        return null;
+    }
+
+    /**
+     * Recover whatever complete JSON objects we can from a truncated AI
+     * response. The common failure mode for the "suggest from docx" flow
+     * is the model running out of tokens mid-array, leaving something like
+     * `[ {...}, {...}, {"key": "x", "lab` with no closing bracket. The
+     * standard parser refuses unclosed JSON, but the objects BEFORE the
+     * cutoff are still valid and useful.
+     *
+     * Strategy: find every balanced top-level `{...}` block inside the
+     * outer (unclosed) `[` and decode each independently. Returns a list
+     * of decoded objects, or null when nothing usable can be salvaged.
+     *
+     * @return list<array<string, mixed>>|null
+     */
+    private function recoverTruncatedJsonArray(string $content): ?array
+    {
+        $content = trim($content);
+        // Strip common decoration that parseJsonFromAiResponse normally
+        // handles (markdown fences, harmony channel markers) so the same
+        // input reaches us cleaned up the same way.
+        $content = preg_replace('/<\|[^|]+\|>/u', '', $content) ?? $content;
+        $content = trim($content);
+        if (preg_match('/```(?:json|JSON)?\s*\n?([\s\S]*?)$/u', $content, $m)) {
+            $candidate = trim($m[1]);
+            if ($candidate !== '') {
+                $content = $candidate;
+            }
+        }
+        if (!str_starts_with($content, '[')) {
+            return null;
+        }
+
+        $objects = [];
+        $depth = 0;
+        $start = -1;
+        $inString = false;
+        $escape = false;
+        $len = strlen($content);
+        for ($i = 1; $i < $len; $i++) {
+            $c = $content[$i];
+            if ($escape) {
+                $escape = false;
+                continue;
+            }
+            if ($c === '\\') {
+                $escape = true;
+                continue;
+            }
+            if ($c === '"') {
+                $inString = !$inString;
+                continue;
+            }
+            if ($inString) {
+                continue;
+            }
+            if ($c === '{') {
+                if ($depth === 0) {
+                    $start = $i;
+                }
+                $depth++;
+            } elseif ($c === '}') {
+                $depth--;
+                if ($depth === 0 && $start >= 0) {
+                    $blob = substr($content, $start, $i - $start + 1);
+                    $decoded = json_decode($blob, true);
+                    if (is_array($decoded)) {
+                        $objects[] = $decoded;
+                    }
+                    $start = -1;
+                }
+            }
+        }
+
+        return empty($objects) ? null : $objects;
     }
 
     /**
