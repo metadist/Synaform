@@ -253,7 +253,17 @@
     "language_label": "Template language",
     "language_hint": "AI extraction will write values in this language. Falls back to the Collection language if unset.",
     "language_inherit": "Use Collection language",
-    "language_updated": "Template language updated"
+    "language_updated": "Template language updated",
+    "lint_warnings": "warning(s)",
+    "lint_infos": "info(s)",
+    "lint_uploaded_with_findings": "Template uploaded \u2014 doctor flagged some items",
+    "lint_dialog_title": "Template Doctor",
+    "lint_dialog_subtitle": "Found {errors} error(s), {warnings} warning(s), {infos} info note(s) across {placeholders} placeholders.",
+    "lint_dialog_footer": "Errors mean the engine WILL produce broken output \u2014 please fix them in Word. Warnings mean the layout may be sub-optimal. Infos are auto-fixed by the engine but worth tidying up in the source.",
+    "lint_severity_error": "Error",
+    "lint_severity_warning": "Warning",
+    "lint_severity_info": "Info",
+    "lint_hint_label": "Fix"
   },
   "datasets": {
     "title": "Datasets",

@@ -253,7 +253,17 @@
     "language_label": "\u015eablon dili",
     "language_hint": "YZ \u00e7\u0131kar\u0131m\u0131 de\u011ferleri bu dilde yazacakt\u0131r. Bo\u015f b\u0131rak\u0131l\u0131rsa Collection dili kullan\u0131l\u0131r.",
     "language_inherit": "Collection dilini kullan",
-    "language_updated": "\u015eablon dili g\u00fcncellendi"
+    "language_updated": "\u015eablon dili g\u00fcncellendi",
+    "lint_warnings": "uyar\u0131",
+    "lint_infos": "bilgi",
+    "lint_uploaded_with_findings": "\u015eablon y\u00fcklendi \u2014 Doctor baz\u0131 noktalar\u0131 i\u015faretledi",
+    "lint_dialog_title": "\u015eablon Doktoru",
+    "lint_dialog_subtitle": "{placeholders} yer tutucuda {errors} hata, {warnings} uyar\u0131, {infos} bilgi bulundu.",
+    "lint_dialog_footer": "Hatalar \u00e7\u0131kt\u0131n\u0131n bozulaca\u011f\u0131 anlam\u0131na gelir \u2014 l\u00fctfen Word\u2019de d\u00fczeltin. Uyar\u0131lar riskli yerle\u015fimi g\u00f6sterir. Bilgileri Synaform motoru otomatik d\u00fczeltir; yine de kayna\u011f\u0131 temiz tutmak iyidir.",
+    "lint_severity_error": "Hata",
+    "lint_severity_warning": "Uyar\u0131",
+    "lint_severity_info": "Bilgi",
+    "lint_hint_label": "D\u00fczeltme"
   },
   "datasets": {
     "title": "Veri k\u00fcmeleri",

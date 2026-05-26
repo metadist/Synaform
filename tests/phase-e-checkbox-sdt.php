@@ -40,9 +40,15 @@ declare(strict_types=1);
  * Exit code: 0 on pass, non-zero on regression.
  */
 
+// Mirror the production regex in `convertCheckboxMarkersInPart`. Capture
+// groups (must stay in sync):
+//   1 = rPr block, 2 = inline-middle (<w:tab/>, <w:br/>, …),
+//   3 = <w:t …> opening tag, 4 = before-text, 5 = state,
+//   6 = checked glyph, 7 = unchecked glyph, 8 = after-text.
 $rPrInner = '(?:(?!</w:rPr>|<w:r\b|</w:r>).)*?';
 $rPrAlt = '(<w:rPr\b[^/]*?>' . $rPrInner . '</w:rPr>|<w:rPr\b[^/]*?/>)?';
-$pattern = '#<w:r\b[^>]*>' . $rPrAlt
+$inlineMid = '((?:(?!<w:t[\s>/]|<w:r\b|</w:r>).)*?)';
+$pattern = '#<w:r\b[^>]*>' . $rPrAlt . $inlineMid
     . '(<w:t\b[^>]*>)([^<]*?)\[\[SYNCB\|(on|off)\|([^|]+)\|([^\]]+)\]\]([^<]*?)</w:t></w:r>#s';
 
 $fails = [];
@@ -75,12 +81,14 @@ while ($loops++ < 10) {
         static function (array $m) use (&$passCount): string {
             $passCount++;
             $rPr = $m[1] ?? '';
-            $tOpen = $m[2];
-            $before = $m[3];
-            $state = $m[4];
-            $checkedGlyph = $m[5];
-            $uncheckedGlyph = $m[6];
-            $after = $m[7];
+            $inlineMid = $m[2] ?? '';
+            // $m[3] = <w:t…>, $m[4] = before, $m[5] = state,
+            // $m[6] = checked, $m[7] = unchecked, $m[8] = after.
+            $before = $m[4];
+            $state = $m[5];
+            $checkedGlyph = $m[6];
+            $uncheckedGlyph = $m[7];
+            $after = $m[8];
 
             // Stand-in for buildCheckboxSdtXml — only the structure matters
             // here, not the w14:checkbox attributes.
@@ -95,7 +103,9 @@ while ($loops++ < 10) {
 
             $out = '';
             if ($before !== '') {
-                $out .= '<w:r>' . $rPr . '<w:t xml:space="preserve">' . $before . '</w:t></w:r>';
+                $out .= '<w:r>' . $rPr . $inlineMid . '<w:t xml:space="preserve">' . $before . '</w:t></w:r>';
+            } elseif ($inlineMid !== '') {
+                $out .= '<w:r>' . $rPr . $inlineMid . '</w:r>';
             }
             $out .= $sdt;
             if ($after !== '') {

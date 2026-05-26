@@ -253,7 +253,17 @@
     "language_label": "Vorlagensprache",
     "language_hint": "Die KI-Extraktion liefert Werte in dieser Sprache. F\u00e4llt auf die Collection-Sprache zur\u00fcck, wenn nichts gew\u00e4hlt ist.",
     "language_inherit": "Collection-Sprache verwenden",
-    "language_updated": "Vorlagensprache aktualisiert"
+    "language_updated": "Vorlagensprache aktualisiert",
+    "lint_warnings": "Warnung(en)",
+    "lint_infos": "Hinweis(e)",
+    "lint_uploaded_with_findings": "Template hochgeladen \u2014 Doctor hat Auff\u00e4lligkeiten gefunden",
+    "lint_dialog_title": "Template Doctor",
+    "lint_dialog_subtitle": "{errors} Fehler, {warnings} Warnung(en), {infos} Hinweis(e) bei {placeholders} Platzhaltern gefunden.",
+    "lint_dialog_footer": "Fehler bedeuten: die Engine erzeugt fehlerhafte Dokumente \u2014 bitte in Word korrigieren. Warnungen weisen auf riskante Layouts hin. Infos werden vom Synaform-Renderer automatisch ausgeglichen, sollten aber im Quell-Template aufger\u00e4umt werden.",
+    "lint_severity_error": "Fehler",
+    "lint_severity_warning": "Warnung",
+    "lint_severity_info": "Hinweis",
+    "lint_hint_label": "Korrektur"
   },
   "datasets": {
     "title": "Datens\u00e4tze",

@@ -253,7 +253,17 @@
     "language_label": "Idioma de la plantilla",
     "language_hint": "La extracci\u00f3n de IA escribir\u00e1 los valores en este idioma. Si est\u00e1 vac\u00edo, se usa el idioma de la Collection.",
     "language_inherit": "Usar el idioma de la Collection",
-    "language_updated": "Idioma de la plantilla actualizado"
+    "language_updated": "Idioma de la plantilla actualizado",
+    "lint_warnings": "advertencia(s)",
+    "lint_infos": "informaci\u00f3n",
+    "lint_uploaded_with_findings": "Plantilla cargada \u2014 el Doctor se\u00f1al\u00f3 algunas cosas",
+    "lint_dialog_title": "Doctor de plantillas",
+    "lint_dialog_subtitle": "Se encontraron {errors} error(es), {warnings} advertencia(s), {infos} informaci\u00f3n en {placeholders} marcadores.",
+    "lint_dialog_footer": "Los errores significan que el motor producir\u00e1 salida rota \u2014 corr\u00edgelos en Word. Las advertencias indican layouts arriesgados. Los avisos los corrige el motor autom\u00e1ticamente, pero conviene limpiarlos en el origen.",
+    "lint_severity_error": "Error",
+    "lint_severity_warning": "Advertencia",
+    "lint_severity_info": "Aviso",
+    "lint_hint_label": "Soluci\u00f3n"
   },
   "datasets": {
     "title": "Datasets",

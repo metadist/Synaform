@@ -374,17 +374,113 @@ export default {
     }
 
     function showToast(msg, type = "success") {
-      const bg = type === "error" ? "#fef2f2" : "#f0fdf4";
-      const color = type === "error" ? "#991b1b" : "#166534";
-      const border = type === "error" ? "#fecaca" : "#bbf7d0";
+      const palette = {
+        success: { bg: "#f0fdf4", color: "#166534", border: "#bbf7d0" },
+        error: { bg: "#fef2f2", color: "#991b1b", border: "#fecaca" },
+        info: { bg: "#eff6ff", color: "#1e40af", border: "#bfdbfe" },
+      };
+      const p = palette[type] || palette.success;
       const div = document.createElement("div");
-      div.style.cssText = `position:fixed;top:16px;right:16px;z-index:9999;background:${bg};color:${color};border:1px solid ${border};padding:10px 18px;border-radius:8px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,.15);transition:opacity .3s;`;
+      div.style.cssText = `position:fixed;top:16px;right:16px;z-index:9999;background:${p.bg};color:${p.color};border:1px solid ${p.border};padding:10px 18px;border-radius:8px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,.15);transition:opacity .3s;max-width:520px;`;
       div.textContent = msg;
       document.body.appendChild(div);
       setTimeout(() => {
         div.style.opacity = "0";
         setTimeout(() => div.remove(), 300);
-      }, 2700);
+      }, 4500);
+    }
+
+    /**
+     * Modal dialog that lists template-doctor findings — what's wrong, what
+     * the engine will do about it, and how to fix the source DOCX. We open
+     * it on upload only when there is at least one ERROR-severity finding;
+     * warnings/infos surface as a toast that links here.
+     */
+    function showTemplateLintDialog(template, lint) {
+      const findings = (lint && lint.findings) || [];
+      const summary = (lint && lint.summary) || {};
+      const sevColor = {
+        error: {
+          bg: "#fef2f2",
+          border: "#fecaca",
+          color: "#991b1b",
+          chip: "#dc2626",
+        },
+        warning: {
+          bg: "#fffbeb",
+          border: "#fde68a",
+          color: "#92400e",
+          chip: "#d97706",
+        },
+        info: {
+          bg: "#eff6ff",
+          border: "#bfdbfe",
+          color: "#1e40af",
+          chip: "#2563eb",
+        },
+      };
+      const overlay = document.createElement("div");
+      overlay.style.cssText =
+        "position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:10000;display:flex;align-items:center;justify-content:center;";
+      const card = document.createElement("div");
+      card.style.cssText =
+        "background:#fff;max-width:680px;width:92%;max-height:88vh;overflow:auto;border-radius:14px;padding:22px 26px;box-shadow:0 20px 50px rgba(0,0,0,.25);font-size:14px;color:#0f172a;";
+      const title = template?.name || T("templates.lint_dialog_title");
+      const subtitle = T("templates.lint_dialog_subtitle")
+        .replace("{errors}", String(summary.errors ?? 0))
+        .replace("{warnings}", String(summary.warnings ?? 0))
+        .replace("{infos}", String(summary.infos ?? 0))
+        .replace("{placeholders}", String(summary.placeholders ?? 0));
+      const body = findings
+        .map((f) => {
+          const p = sevColor[f.severity] || sevColor.info;
+          const sevLabel =
+            T(`templates.lint_severity_${f.severity}`) || f.severity;
+          const safeMsg = (f.message || "").replace(
+            /[<>&]/g,
+            (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c],
+          );
+          const safeHint = (f.hint || "").replace(
+            /[<>&]/g,
+            (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c],
+          );
+          return `
+            <div style="background:${p.bg};border:1px solid ${p.border};color:${p.color};
+                        border-radius:10px;padding:12px 14px;margin:10px 0;">
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+                <span style="background:${p.chip};color:#fff;font-size:11px;text-transform:uppercase;
+                             letter-spacing:.5px;padding:2px 8px;border-radius:999px;">${sevLabel}</span>
+                <code style="font-size:11px;color:#475569;">${f.code}</code>
+              </div>
+              <div style="font-weight:500;line-height:1.4;">${safeMsg}</div>
+              <div style="margin-top:8px;font-size:13px;color:#475569;line-height:1.5;">
+                <strong>${T("templates.lint_hint_label")}:</strong> ${safeHint}
+              </div>
+            </div>`;
+        })
+        .join("");
+      card.innerHTML = `
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;">
+          <div>
+            <div style="font-size:18px;font-weight:600;margin-bottom:2px;">${T("templates.lint_dialog_title")}</div>
+            <div style="font-size:13px;color:#64748b;">${title}</div>
+          </div>
+          <button id="tx-lint-close" style="background:#0f172a;color:#fff;border:0;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px;">${T("app.close") || "Close"}</button>
+        </div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;font-size:13px;color:#334155;margin-bottom:6px;">
+          ${subtitle}
+        </div>
+        ${body}
+        <div style="font-size:12px;color:#64748b;margin-top:12px;line-height:1.5;">
+          ${T("templates.lint_dialog_footer")}
+        </div>`;
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+      const close = () => overlay.remove();
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) close();
+      });
+      card.querySelector("#tx-lint-close")?.addEventListener("click", close);
     }
 
     function collectionById(id) {
@@ -5319,6 +5415,35 @@ export default {
               }
             }
             showToast(T("app.saved"));
+            // Surface template-doctor findings inline so the customer can
+            // fix layout risks BEFORE the first generation breaks the
+            // output. Errors are always shown; warnings/infos are folded
+            // into a single summary line so we never spam.
+            const lint = res.template?.lint;
+            if (lint && Array.isArray(lint.findings) && lint.findings.length) {
+              const errs = lint.findings.filter((f) => f.severity === "error");
+              const warns = lint.findings.filter(
+                (f) => f.severity === "warning",
+              );
+              const infos = lint.findings.filter((f) => f.severity === "info");
+              if (errs.length) {
+                showTemplateLintDialog(res.template, lint);
+              } else {
+                const summary = [];
+                if (warns.length)
+                  summary.push(
+                    `${warns.length} ${T("templates.lint_warnings")}`,
+                  );
+                if (infos.length)
+                  summary.push(`${infos.length} ${T("templates.lint_infos")}`);
+                if (summary.length) {
+                  showToast(
+                    `${T("templates.lint_uploaded_with_findings")} (${summary.join(", ")})`,
+                    "info",
+                  );
+                }
+              }
+            }
             await Promise.all([fetchTemplates(), fetchForms()]);
             render();
           } catch (err) {

@@ -476,6 +476,7 @@ class SynaformController extends AbstractController
         $file->move($dir, 'template.docx');
 
         $placeholders = $this->extractPlaceholders($dir . '/template.docx');
+        $lint = $this->lintTemplate($dir . '/template.docx');
 
         // Build the HTML preview skeleton once and cache it on the template record.
         // Non-fatal: if it fails (malformed docx, exotic content), generation and
@@ -500,6 +501,7 @@ class SynaformController extends AbstractController
             'placeholders' => $placeholders,
             'placeholder_count' => count($placeholders),
             'preview' => $preview,
+            'lint' => $lint,
             'language' => $language,
             'created_at' => date('c'),
             'updated_at' => date('c'),
@@ -535,6 +537,43 @@ class SynaformController extends AbstractController
         return $this->json([
             'success' => true,
             'template' => $template,
+        ]);
+    }
+
+    #[Route('/templates/{templateId}/lint', name: 'templates_lint', methods: ['GET'])]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/synaform/templates/{templateId}/lint',
+        summary: 'Audit a template for placement issues that risk breaking generation',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Linter findings')]
+    public function templatesLint(int $userId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $template = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId);
+        if (!$template) {
+            return $this->json(['success' => false, 'error' => 'Template not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $path = $this->uploadDir . '/' . $userId . '/synaform/templates/' . $templateId . '/template.docx';
+        if (!is_file($path)) {
+            return $this->json(['success' => false, 'error' => 'Template file not found on disk'], Response::HTTP_NOT_FOUND);
+        }
+
+        $lint = $this->lintTemplate($path);
+        // Refresh cached lint on the template record so subsequent
+        // templates_get calls return the latest findings without a re-audit.
+        $template['lint'] = $lint;
+        $template['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_TEMPLATE, $templateId, $template);
+
+        return $this->json([
+            'success' => true,
+            'lint' => $lint,
         ]);
     }
 
@@ -2600,6 +2639,304 @@ class SynaformController extends AbstractController
     }
 
     /**
+     * Static template audit. Runs at upload time and on demand. Surfaces
+     * structural risks the customer can fix in Word *before* the first
+     * generation breaks the layout.
+     *
+     * Each finding has:
+     *   - code     stable identifier ("LIST_INLINE_TEXT", …)
+     *   - severity 'error' | 'warning' | 'info'
+     *   - message  human-readable explanation
+     *   - hint     concrete fix the customer can apply in Word
+     *   - context  the placeholder(s) that triggered the finding
+     *
+     * Severity policy:
+     *   - 'error'   the engine WILL produce broken output. Block release.
+     *   - 'warning' the engine MAY produce sub-optimal layout. Releasable
+     *               but the customer should redesign the template.
+     *   - 'info'    the engine compensates automatically (e.g. via the
+     *               cleanTemplateMacros pre-pass), but flagging the source
+     *               template still helps the customer keep the .docx
+     *               clean.
+     *
+     * @return array{
+     *   ok: bool,
+     *   summary: array{
+     *     errors: int,
+     *     warnings: int,
+     *     infos: int,
+     *     placeholders: int,
+     *     paragraphs_with_placeholder: int,
+     *     bare_rows_promoted: int
+     *   },
+     *   findings: list<array{
+     *     code: string,
+     *     severity: string,
+     *     message: string,
+     *     hint: string,
+     *     context: array<string, mixed>
+     *   }>
+     * }
+     */
+    private function lintTemplate(string $docxPath): array
+    {
+        $findings = [];
+        $summary = [
+            'errors' => 0,
+            'warnings' => 0,
+            'infos' => 0,
+            'placeholders' => 0,
+            'paragraphs_with_placeholder' => 0,
+            'bare_rows_promoted' => 0,
+        ];
+
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            return [
+                'ok' => false,
+                'summary' => $summary,
+                'findings' => [[
+                    'code' => 'OPEN_FAILED',
+                    'severity' => 'error',
+                    'message' => 'Could not open the .docx — the upload may be corrupt.',
+                    'hint' => 'Re-save the template in Word and try again.',
+                    'context' => [],
+                ]],
+            ];
+        }
+
+        $partNames = $this->collectDocumentPartNames($zip);
+        $bodyXml = $zip->getFromName('word/document.xml') ?: '';
+        $headerFooterXml = '';
+        foreach ($partNames as $name) {
+            if ($name === 'word/document.xml') {
+                continue;
+            }
+            $headerFooterXml .= ($zip->getFromName($name) ?: '') . "\n";
+        }
+        $zip->close();
+
+        // Defragment {{...}} so structural matchers see clean placeholder
+        // tokens — exactly what cleanTemplateMacros does at generation time.
+        $defrag = function (string $xml): string {
+            $xml = preg_replace('/\{(<[^>]*>)*\{/', '{{', $xml) ?? $xml;
+            $xml = preg_replace('/\}(<[^>]*>)*\}/', '}}', $xml) ?? $xml;
+            $xml = preg_replace_callback('/\{\{(.*?)\}\}/s', function ($m) {
+                $inner = strip_tags($m[1]);
+                $inner = preg_replace('/\s+/', '', $inner) ?? '';
+                return '{{' . trim($inner) . '}}';
+            }, $xml) ?? $xml;
+            return $xml;
+        };
+        $bodyXml = $defrag($bodyXml);
+        $headerFooterXml = $defrag($headerFooterXml);
+
+        // Quick aggregate counts for the summary card.
+        $allMacroCount = preg_match_all('/\{\{[^}]+\}\}/', $bodyXml . "\n" . $headerFooterXml);
+        $summary['placeholders'] = $allMacroCount ?: 0;
+
+        // Walk every <w:p> in the body, collect the placeholders it hosts and
+        // the inline tokens (text / tab / break) between them, then run the
+        // per-paragraph rules. Multi-placeholder, list-inline-text, and
+        // table-cell-collision findings all live here.
+        $paragraphs = [];
+        if (preg_match_all('#<w:p\b[^>]*>(?:(?!</w:p>).)*?</w:p>#s', $bodyXml, $pm)) {
+            $paragraphs = $pm[0];
+        }
+
+        foreach ($paragraphs as $paraXml) {
+            if (strpos($paraXml, '{{') === false) {
+                continue;
+            }
+            $summary['paragraphs_with_placeholder']++;
+
+            // Build a flat token sequence: text-fragments + tab/break markers,
+            // in document order. Tabs / breaks are separators that "rescue" a
+            // shared paragraph from looking like a collision.
+            $tokens = [];
+            preg_match_all('#<w:t[^>]*>([^<]*)</w:t>|<w:tab/>|<w:br/>#', $paraXml, $tm, PREG_SET_ORDER);
+            foreach ($tm as $t) {
+                if (str_starts_with($t[0], '<w:tab')) {
+                    $tokens[] = ['type' => 'sep', 'glyph' => 'tab'];
+                } elseif (str_starts_with($t[0], '<w:br')) {
+                    $tokens[] = ['type' => 'sep', 'glyph' => 'br'];
+                } else {
+                    $tokens[] = ['type' => 'text', 'text' => $t[1]];
+                }
+            }
+            $flat = '';
+            foreach ($tokens as $t) {
+                $flat .= $t['type'] === 'text' ? $t['text'] : ' ';
+            }
+            $macroKeys = [];
+            if (preg_match_all('/\{\{([^{}]+)\}\}/', $flat, $mm)) {
+                $macroKeys = array_values(array_map('trim', $mm[1]));
+            }
+            if (empty($macroKeys)) {
+                continue;
+            }
+
+            // Rule 1: multiple placeholders in one paragraph with NO separator.
+            //
+            // Walk the flat text and check that between any two placeholders
+            // there is at least one space, tab, line-break, or visible glyph.
+            // Two placeholders that abut directly (e.g. `{{a}}{{b}}`) collide
+            // visually at render time — that's the v4-hhff Werdegang bug.
+            //
+            // Whitespace counts as a valid separator (matches what Word
+            // actually renders), so common shapes like
+            //   "Profil {{fullname}} {{generated_month}} {{generated_year}}"
+            // or "{{zip}} {{city}}" are NOT flagged. We want to catch only
+            // truly-fused placeholders.
+            if (count($macroKeys) >= 2) {
+                $colliding = [];
+                if (preg_match_all('/\{\{([^{}]+)\}\}\{\{([^{}]+)\}\}/', $flat, $cm, PREG_SET_ORDER)) {
+                    foreach ($cm as $pair) {
+                        $colliding[] = trim($pair[1]) . ' / ' . trim($pair[2]);
+                    }
+                }
+                if (!empty($colliding)) {
+                    $findings[] = [
+                        'code' => 'MULTIPLE_PLACEHOLDERS_NO_SEPARATOR',
+                        'severity' => 'error',
+                        'message' => sprintf(
+                            'Two placeholders are fused with no separator: %s. Their values will collide.',
+                            implode(' · ', $colliding),
+                        ),
+                        'hint' => 'In Word, place a tab, space, line-break, or table-cell boundary between the placeholders. '
+                               .  'For Werdegang time + employer, put each in its own table cell.',
+                        'context' => ['placeholder_pairs' => $colliding],
+                    ];
+                }
+            }
+
+            // Rule 2: a list-typed placeholder shares a paragraph with other
+            // text. The engine renders one paragraph per list item by cloning
+            // the host paragraph; surrounding text gets duplicated on every
+            // item or orphaned, which surprises the customer.
+            $rowFieldShape = static fn (string $k): bool => preg_match('/\.[a-z0-9_]+\.N$/i', $k) === 1;
+            $listLikeShape = function (string $k) use ($rowFieldShape): bool {
+                if ($rowFieldShape($k)) {
+                    return false; // row-group fields use cloneRow, not paragraph cloning
+                }
+                if (str_starts_with($k, 'checkb.') || str_starts_with($k, 'optional.')) {
+                    return false;
+                }
+                if (str_contains($k, '.')) {
+                    return false; // sub-fields like target.position handled elsewhere
+                }
+                $listSuffixes = ['list', 'positions', 'positions_for_target', 'benefits',
+                                 'languages', 'other_skills', 'education', 'skills'];
+                foreach ($listSuffixes as $s) {
+                    if ($k === $s || str_ends_with($k, '_' . $s) || str_ends_with($k, $s)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            foreach ($macroKeys as $k) {
+                if (!$listLikeShape($k)) {
+                    continue;
+                }
+                // Strip the placeholder from the flat text, see if anything
+                // textually meaningful remains in the same paragraph.
+                $without = str_replace('{{' . $k . '}}', '', $flat);
+                $without = trim(preg_replace('/\s+/', ' ', $without) ?? '');
+                if ($without !== '' && mb_strlen($without) > 1) {
+                    $findings[] = [
+                        'code' => 'LIST_INLINE_TEXT',
+                        'severity' => 'warning',
+                        'message' => sprintf(
+                            'List placeholder {{%s}} shares a paragraph with text ("%s"). The surrounding text will be duplicated for every list item.',
+                            $k,
+                            mb_substr($without, 0, 60),
+                        ),
+                        'hint' => 'Move {{' . $k . '}} onto its own paragraph. Put any heading text on the line above it.',
+                        'context' => ['placeholder' => $k, 'inline_text' => $without],
+                    ];
+                }
+            }
+        }
+
+        // Rule 3: bare <w:tr> rows that host row-group placeholders. The
+        // generation pre-pass auto-promotes these (see ensureRowsCarryAttributes),
+        // but flagging them invites the customer to fix the source so the
+        // template stays clean if exported elsewhere.
+        if (preg_match_all('#<w:tr>(?:(?!</w:tr>).)*?\{\{([^}]*?\.N)\}\}(?:(?!</w:tr>).)*?</w:tr>#s', $bodyXml, $rm)) {
+            $bareRows = array_unique($rm[1]);
+            $summary['bare_rows_promoted'] = count($bareRows);
+            if (!empty($bareRows)) {
+                $findings[] = [
+                    'code' => 'BARE_TR_ROW_GROUP_HOST',
+                    'severity' => 'info',
+                    'message' => sprintf(
+                        'Row-group placeholders (%s) sit in bare <w:tr> rows. Synaplan auto-patches this at generation time, '
+                            . 'but the source template will be more robust if you re-edit the row in Word.',
+                        implode(', ', array_map(static fn ($k) => '{{' . $k . '}}', $bareRows)),
+                    ),
+                    'hint' => 'In Word: click anywhere in the row → right-click → Table Properties → OK. Saving re-emits the row '
+                            . 'with attribute-bearing markup that PhpWord identifies unambiguously.',
+                    'context' => ['placeholders' => $bareRows],
+                ];
+            }
+        }
+
+        // Rule 4: list / row-group placeholders inside a header or footer.
+        // expandListParagraphs and expandTableBlocks are body-only by design;
+        // such placeholders render as raw scalar text in headers/footers.
+        if ($headerFooterXml !== '' && preg_match_all('/\{\{([^{}]+)\}\}/', $headerFooterXml, $hm)) {
+            foreach (array_unique(array_map('trim', $hm[1])) as $hk) {
+                if (str_ends_with($hk, '.N') || (preg_match('/^[a-z0-9_]+$/i', $hk) && in_array($hk, [
+                        'languages', 'other_skills', 'benefits', 'education',
+                        'relevant_positions', 'relevant_positions_for_target',
+                ], true))) {
+                    $findings[] = [
+                        'code' => 'LIST_OR_ROW_IN_HEADER_FOOTER',
+                        'severity' => 'warning',
+                        'message' => sprintf(
+                            'Placeholder {{%s}} lives in a header or footer; list/row expansion is body-only.',
+                            $hk,
+                        ),
+                        'hint' => 'Headers and footers support scalar placeholders only ({{fullname}}, {{generated_year}}, …). '
+                               .  'Move the list into the document body.',
+                        'context' => ['placeholder' => $hk],
+                    ];
+                }
+            }
+        }
+
+        // Rule 5: placeholders nested inside a content control (<w:sdt>).
+        // PhpWord's setValue cannot reach text inside an SDT's stored value,
+        // so the placeholder is left as literal text in the output.
+        if (preg_match_all('#<w:sdt\b(?:(?!</w:sdt>).)*?\{\{([^{}]+)\}\}(?:(?!</w:sdt>).)*?</w:sdt>#s', $bodyXml, $sm)) {
+            $sdtKeys = array_unique(array_map('trim', $sm[1]));
+            if (!empty($sdtKeys)) {
+                $findings[] = [
+                    'code' => 'PLACEHOLDER_INSIDE_SDT',
+                    'severity' => 'warning',
+                    'message' => sprintf(
+                        'Placeholders nested inside a Word content control: %s. They will not be substituted.',
+                        implode(', ', array_map(static fn ($k) => '{{' . $k . '}}', $sdtKeys)),
+                    ),
+                    'hint' => 'In Word: select the content control → Developer tab → Properties → "Contents cannot be edited" off, '
+                            . 'or replace the SDT with plain text containing the placeholder.',
+                    'context' => ['placeholders' => $sdtKeys],
+                ];
+            }
+        }
+
+        foreach ($findings as $f) {
+            $summary[$f['severity'] . 's']++;
+        }
+
+        return [
+            'ok' => $summary['errors'] === 0,
+            'summary' => $summary,
+            'findings' => $findings,
+        ];
+    }
+
+    /**
      * Convert a DOCX to PDF via a headless LibreOffice invocation. The PDF is
      * written next to the source DOCX with a `.pdf` extension and cached there
      * as long as the DOCX is fresher (mtime >= DOCX mtime). Returns null if
@@ -4092,6 +4429,24 @@ class SynaformController extends AbstractController
             // font during Word autocorrect / cut-paste.
             $xml = $this->normalizePlaceholderRunFonts($xml);
 
+            // CloneRow defensive pass: PhpWord's TemplateProcessor::findRowStart
+            // searches BACKWARD for `<w:tr ` (with the trailing space — i.e. a
+            // row carrying at least one attribute) before falling back to bare
+            // `<w:tr>`. When a customer-authored template uses a bare `<w:tr>`
+            // for the row hosting `{{group.col.N}}` placeholders (anything we
+            // generate programmatically tends to look that way), findRowStart
+            // skips that row and matches the LAST attributed `<w:tr ` ABOVE the
+            // current table — which is typically the closing row of the
+            // PREVIOUS table on the page. cloneRow then duplicates a slice that
+            // spans both tables and the table boundary, producing the
+            // "sonstige Kenntnisse leaks into Werdegang" bug we hit on the v5
+            // NeedleHaystack template before this fix. Inject a stable
+            // synthetic `w:rsidR` attribute onto every bare `<w:tr>` so
+            // findRowStart always lands on the right row. The attribute is
+            // schema-valid, ignored by Word, and the value is deterministic
+            // so re-running the pass is byte-stable.
+            $xml = $this->ensureRowsCarryAttributes($xml);
+
             $zip->addFromString($partName, $xml);
         }
 
@@ -4148,6 +4503,28 @@ class SynaformController extends AbstractController
      *   3. otherwise the run is left untouched and falls back to the
      *      document-default behaviour — same as before this pass existed.
      */
+    /**
+     * Promote every bare `<w:tr>` opening tag to `<w:tr w:rsidR="…">` so
+     * PhpWord's `TemplateProcessor::findRowStart()` can locate the host row
+     * of a row-group placeholder. See the comment in `cleanTemplateMacros`
+     * for the rationale; the regression test lives in
+     * `tests/phase-c2-clonerow-bare-tr.php`.
+     *
+     * The attribute value is a fixed sentinel so the transform is
+     * idempotent: running the pass twice produces byte-identical output.
+     * Rows that already carry any attribute are left untouched.
+     */
+    private function ensureRowsCarryAttributes(string $xml): string
+    {
+        $patched = preg_replace(
+            '#<w:tr>#',
+            '<w:tr w:rsidR="00000000" w:rsidTr="00000000">',
+            $xml
+        );
+
+        return is_string($patched) ? $patched : $xml;
+    }
+
     private function normalizePlaceholderRunFonts(string $xml): string
     {
         $documentWide = $this->detectDocumentDominantRunStyle($xml);
@@ -5344,13 +5721,23 @@ class SynaformController extends AbstractController
         // We capture:
         //   1 = the rPr block (preserved on the surviving runs so the
         //       generated DOCX keeps the template's font/size/color),
-        //   2 = the literal <w:t …> opening tag (with its xml:space attr
+        //   2 = inline-content nodes that sit between </w:rPr> and <w:t>
+        //       in the original run (e.g. <w:tab/>, <w:br/>, <w:sym/>,
+        //       <w:noBreakHyphen/>, <w:cr/>, …). These are preserved on
+        //       the surviving "before" run only, so the visual layout —
+        //       e.g. the tab that separates the checkbox glyph from its
+        //       label in the v4 hhff template — is kept intact. Without
+        //       this slot, customer-authored runs that carry a `<w:tab/>`
+        //       between rPr and the placeholder text never matched and
+        //       the SDT post-pass left every checkbox as a literal
+        //       `[[SYNCB|on|☒|☐]]` token in the final document.
+        //   3 = the literal <w:t …> opening tag (with its xml:space attr
         //       intact),
-        //   3 = text before the marker,
-        //   4 = state ("on"/"off"),
-        //   5 = checked glyph,
-        //   6 = unchecked glyph,
-        //   7 = text after the marker.
+        //   4 = text before the marker,
+        //   5 = state ("on"/"off"),
+        //   6 = checked glyph,
+        //   7 = unchecked glyph,
+        //   8 = text after the marker.
         // The body uses [^<]* to stay inside a single text node (no nested
         // elements), which is exactly what PhpWord setValue produces.
         //
@@ -5371,7 +5758,13 @@ class SynaformController extends AbstractController
         // unbalanced `<w:sdt>` count.
         $rPrInner = '(?:(?!</w:rPr>|<w:r\b|</w:r>).)*?';
         $rPrAlt = '(<w:rPr\b[^/]*?>' . $rPrInner . '</w:rPr>|<w:rPr\b[^/]*?/>)?';
-        $pattern = '#<w:r\b[^>]*>' . $rPrAlt
+        // Tempered token for the optional inline-content nodes between
+        // </w:rPr> and <w:t>. Allows arbitrary OOXML inline children
+        // (<w:tab/>, <w:br/>, <w:sym/>, <w:noBreakHyphen/>, …) but
+        // refuses to cross into a <w:t…> opening tag or a run boundary,
+        // so the regex never matches across a different run.
+        $inlineMid = '((?:(?!<w:t[\s>/]|<w:r\b|</w:r>).)*?)';
+        $pattern = '#<w:r\b[^>]*>' . $rPrAlt . $inlineMid
             . '(<w:t\b[^>]*>)([^<]*?)\[\[SYNCB\|(on|off)\|([^|]+)\|([^\]]+)\]\]([^<]*?)</w:t></w:r>#s';
 
         // Iterate so that runs containing multiple SYNCB markers all get
@@ -5389,21 +5782,30 @@ class SynaformController extends AbstractController
                     ++$count;
                     ++$passCount;
                     $rPr = $match[1] ?? '';
-                    $tOpen = $match[2];
-                    $before = $match[3];
-                    $state = $match[4];
-                    $checkedGlyph = $match[5];
-                    $uncheckedGlyph = $match[6];
-                    $after = $match[7];
+                    $inlineMid = $match[2] ?? '';
+                    $tOpen = $match[3];
+                    $before = $match[4];
+                    $state = $match[5];
+                    $checkedGlyph = $match[6];
+                    $uncheckedGlyph = $match[7];
+                    $after = $match[8];
 
                     // Force xml:space="preserve" on surviving text fragments
                     // so leading/trailing whitespace around the original
                     // placeholder is not collapsed by Word's XML parser.
                     $tOpenPreserved = $this->ensureXmlSpacePreserve($tOpen);
 
+                    // The inline middle (e.g. <w:tab/>) belongs visually
+                    // BEFORE the SDT — it's what separated the leading text
+                    // from the placeholder in the source layout. Emit it
+                    // exactly once, on the leading run if there is "before"
+                    // text, otherwise as its own bare run so the tab/break
+                    // still lands ahead of the checkbox glyph.
                     $out = '';
                     if ($before !== '') {
-                        $out .= '<w:r>' . $rPr . $tOpenPreserved . $before . '</w:t></w:r>';
+                        $out .= '<w:r>' . $rPr . $inlineMid . $tOpenPreserved . $before . '</w:t></w:r>';
+                    } elseif ($inlineMid !== '') {
+                        $out .= '<w:r>' . $rPr . $inlineMid . '</w:r>';
                     }
                     $out .= $this->buildCheckboxSdtXml($state === 'on', $checkedGlyph, $uncheckedGlyph);
                     if ($after !== '') {
