@@ -1,4 +1,11 @@
-const TX_VERSION = "v3.3.1";
+const TX_VERSION = "v3.5.0";
+// Combined with TX_VERSION when fetching plugin assets (i18n bundles, etc.)
+// to defeat stale browser caches whenever a new build of index.js is loaded.
+// The host (PluginView.vue) already cache-busts index.js itself with
+// Date.now(), so this constant changes on every plugin reload — meaning i18n
+// is guaranteed fresh whenever the plugin code is, even if someone forgets
+// to bump TX_VERSION on a release.
+const TX_LOAD_TS = Date.now();
 
 export default {
   mount(el, context) {
@@ -209,7 +216,7 @@ export default {
       const lang = localStorage.getItem("language") || "en";
       if (!force && lang === _loadedLang && Object.keys(t).length > 0)
         return false;
-      const cb = `?v=${TX_VERSION}`;
+      const cb = `?v=${TX_VERSION}&_=${TX_LOAD_TS}`;
       try {
         const res = await fetch(`${ASSET_BASE}/i18n/${lang}.json${cb}`);
         if (res.ok) {
