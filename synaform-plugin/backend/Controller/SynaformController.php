@@ -570,8 +570,12 @@ class SynaformController extends AbstractController
         ];
 
         $modelUsed = 'unknown';
-        $targetVariableCount = 10;
-        $maxProposalPasses   = 3;
+        // Hard ceiling on the merged result so an enormous contract
+        // (or a model that proposes dozens of low-value variables)
+        // doesn't drown the UI. Tuned higher than the old 10-variable
+        // early-exit because windowed scanning legitimately surfaces
+        // more variables on multi-page docs.
+        $finalCap = 40;
 
         try {
             // Stage 1 — document profile.
@@ -585,38 +589,54 @@ class SynaformController extends AbstractController
                 'analyzed_by_ai' => !empty($profile['_analyzed_by_ai']),
             ];
 
-            // Stage 2 — proposal pass(es) with type-aware prompt.
+            // Stage 2 — windowed proposal scan. Walks the WHOLE document
+            // (chunked into overlapping windows on paragraph boundaries)
+            // instead of only the head+tail clip. Each window gets its
+            // own AI call with the keys/snippets accepted so far in the
+            // exclusion list, so windows don't propose duplicates.
+            $windows = $this->splitDocumentIntoWindows($sourceText);
+            $totalWindows = count($windows);
+            $pipelineLog['windows_scanned'] = $totalWindows;
+
             $allSuggestions   = [];
             $excludedKeys     = [];
             $excludedSnippets = [];
-            for ($pass = 1; $pass <= $maxProposalPasses; $pass++) {
-                if (count($allSuggestions) >= $targetVariableCount) break;
-
+            foreach ($windows as $i => $windowText) {
                 $passResult = $this->proposeVariablesPass(
                     $sourceText,
+                    $windowText,
                     $profile,
                     $excludedKeys,
                     $excludedSnippets,
-                    $pass,
-                    $maxProposalPasses,
+                    $i + 1,
+                    $totalWindows,
                     $userId,
                 );
                 $modelUsed = $passResult['model'] ?? $modelUsed;
                 $pipelineLog['stages'][] = [
-                    'stage' => "propose-pass-{$pass}",
-                    'returned_raw'      => $passResult['raw_count'],
+                    'stage'                => sprintf('propose-window-%d-of-%d', $i + 1, $totalWindows),
+                    'window_chars'         => function_exists('mb_strlen') ? mb_strlen($windowText) : strlen($windowText),
+                    'returned_raw'         => $passResult['raw_count'],
                     'kept_after_normalize' => count($passResult['suggestions']),
-                    'model'             => $passResult['model'],
-                    'response_len'      => $passResult['response_len'],
-                    'recovered_truncated' => $passResult['recovered_truncated'],
+                    'model'                => $passResult['model'],
+                    'response_len'         => $passResult['response_len'],
+                    'recovered_truncated'  => $passResult['recovered_truncated'],
                 ];
-                if (empty($passResult['suggestions'])) break;
-
+                // Empty window result is fine (boilerplate-only slice);
+                // keep scanning the rest of the document.
                 foreach ($passResult['suggestions'] as $s) {
-                    if (isset($excludedKeys[$s['key']])) continue;
+                    if (isset($excludedKeys[$s['key']])) {
+                        continue;
+                    }
+                    if (isset($excludedSnippets[mb_strtolower((string) $s['source_text'])])) {
+                        continue;
+                    }
                     $allSuggestions[]            = $s;
                     $excludedKeys[$s['key']]     = true;
                     $excludedSnippets[mb_strtolower((string) $s['source_text'])] = true;
+                    if (count($allSuggestions) >= $finalCap) {
+                        break 2;
+                    }
                 }
             }
 
@@ -3906,6 +3926,101 @@ class SynaformController extends AbstractController
     }
 
     /**
+     * Split the source text into overlapping windows so the proposal stage
+     * can scan the WHOLE document instead of only the head+tail clip.
+     *
+     * Pre-fix symptom: the AI saw `clipDocumentForPrompt(22 000, 6 000)` and,
+     * combined with the "return between 6 and 12 entries" instruction and
+     * the per-doc-type priority-var hints, it always locked onto the very
+     * first page — names, addresses, dates — and never proposed anything
+     * from page 2+. Multi-pass calls didn't help because every pass saw
+     * the same clipped slice.
+     *
+     * The splitter:
+     *   - Anchors window boundaries on paragraph breaks (`\n`) so we never
+     *     cut a candidate snippet in half mid-word.
+     *   - Adds a small backward overlap between windows so a candidate
+     *     that straddles the boundary is still seen whole in one window.
+     *   - Caps the number of windows so a runaway 500-page upload doesn't
+     *     fan out into 50 AI calls; we head/tail-clip beyond the cap.
+     *
+     * @return list<string>
+     */
+    private function splitDocumentIntoWindows(
+        string $text,
+        int $windowChars = 18000,
+        int $overlapChars = 2000,
+        int $maxWindows = 12,
+    ): array {
+        $len = function_exists('mb_strlen') ? mb_strlen($text) : strlen($text);
+        if ($len === 0) {
+            return [];
+        }
+        // Short docs: one window, no overlap, no clip.
+        if ($len <= $windowChars) {
+            return [$text];
+        }
+        // Pull every paragraph break offset once — we use them to nudge each
+        // window's end forward to the nearest paragraph boundary so we never
+        // slice through the middle of a candidate snippet.
+        $paragraphOffsets = [0];
+        $offset = 0;
+        $hasMb = function_exists('mb_strpos');
+        while (true) {
+            $next = $hasMb ? mb_strpos($text, "\n", $offset) : strpos($text, "\n", $offset);
+            if ($next === false) {
+                break;
+            }
+            $paragraphOffsets[] = $next + 1;
+            $offset = $next + 1;
+        }
+        $paragraphOffsets[] = $len;
+        $totalBreaks = count($paragraphOffsets);
+
+        $windows = [];
+        $cursor = 0;
+        $lastEnd = 0;
+        while ($cursor < $len && count($windows) < $maxWindows) {
+            $rawEnd = min($cursor + $windowChars, $len);
+            // Find the largest paragraph break ≤ rawEnd. Falls back to
+            // rawEnd when the doc is one giant paragraph.
+            $end = $rawEnd;
+            for ($i = $totalBreaks - 1; $i >= 0; $i--) {
+                $candidate = $paragraphOffsets[$i];
+                if ($candidate <= $rawEnd && $candidate > $cursor + 1000) {
+                    $end = $candidate;
+                    break;
+                }
+            }
+            $slice = $hasMb
+                ? mb_substr($text, $cursor, $end - $cursor)
+                : substr($text, $cursor, $end - $cursor);
+            $windows[] = $slice;
+            $lastEnd = $end;
+            if ($end >= $len) {
+                break;
+            }
+            // Step forward, leaving an overlap so a snippet that straddles
+            // the cut is still complete in the next window.
+            $cursor = max($end - $overlapChars, $cursor + 1);
+        }
+
+        // Doc was longer than maxWindows × windowChars. Replace the LAST
+        // window with a tail slice so the signature block / last-page
+        // fields are still visible to the AI; otherwise long contracts
+        // would only ever get scanned up to ~12 × 18 k characters.
+        if ($lastEnd < $len) {
+            $tailStart = max($len - $windowChars, $lastEnd - $overlapChars);
+            $tail = $hasMb
+                ? mb_substr($text, $tailStart, $len - $tailStart)
+                : substr($text, $tailStart, $len - $tailStart);
+            $windows[count($windows) - 1] = $tail;
+        }
+
+        return $windows;
+    }
+
+    /**
      * Stage 1 — classify the document. Small AI call (≤ 1500 tokens) that
      * returns a profile we feed into the type-aware proposal prompt.
      *
@@ -3926,9 +4041,12 @@ class SynaformController extends AbstractController
      */
     private function analyzeDocumentProfile(string $sourceText, int $userId, string $languageHint): array
     {
-        // We only need the start of the doc to classify it; classification
-        // doesn't need to see every bullet point.
-        $excerpt = $this->clipDocumentForPrompt($sourceText, 6000, 1500);
+        // We only need a representative slice of the doc to classify it;
+        // classification doesn't need to see every bullet point. Slightly
+        // wider than the original 6 000 / 1 500 because a long offer
+        // letter or report can have a 6 KB cover page that hides the
+        // actual document type from a head-only excerpt.
+        $excerpt = $this->clipDocumentForPrompt($sourceText, 10000, 3000);
         $allowedTypes = implode(' | ', array_map(
             static fn (string $t): string => '"' . $t . '"',
             array_keys(self::SUGGEST_DOC_TYPE_HINTS),
@@ -4057,14 +4175,15 @@ class SynaformController extends AbstractController
      */
     private function proposeVariablesPass(
         string $sourceText,
+        string $windowText,
         array $profile,
         array $excludedKeys,
         array $excludedSnippets,
-        int $passIndex,
-        int $maxPasses,
+        int $windowIndex,
+        int $totalWindows,
         int $userId,
     ): array {
-        $docText = $this->clipDocumentForPrompt($sourceText, 22000, 6000);
+        $docText = $windowText;
         $docType = $profile['doc_type'] ?? 'other';
         $hints   = self::SUGGEST_DOC_TYPE_HINTS[$docType] ?? self::SUGGEST_DOC_TYPE_HINTS['other'];
         $language = $profile['primary_language'] ?? 'en';
@@ -4073,9 +4192,16 @@ class SynaformController extends AbstractController
         $summary = $profile['summary'] ?? '';
         $sections = !empty($profile['sections']) ? implode('; ', $profile['sections']) : '(none detected)';
 
-        $passContext = $passIndex === 1
-            ? "This is the first proposal pass — propose the most valuable variables."
-            : "This is top-up pass #{$passIndex} of {$maxPasses}. The variables listed under \"Already proposed\" below have ALREADY been accepted; propose only DIFFERENT variables that complement them.";
+        // Multi-window scan: tell the model exactly which slice of the
+        // document it is looking at so it stops gravitating back to
+        // first-page content on later windows. The hard rule that follows
+        // ("only variables visible BELOW") is the lever that breaks the
+        // first-page lock-in.
+        if ($totalWindows > 1) {
+            $windowContext = "This is window {$windowIndex} of {$totalWindows} from a longer document. You are seeing ONLY this slice. Propose variables that are visible IN THIS WINDOW, even if they look less central than variables that may exist earlier or later in the document. Other windows are handled by separate calls.";
+        } else {
+            $windowContext = "You are seeing the entire document — propose every meaningful variable visible below.";
+        }
 
         $excludedKeysList = empty($excludedKeys) ? '(none yet)'
             : implode(', ', array_keys($excludedKeys));
@@ -4101,10 +4227,10 @@ class SynaformController extends AbstractController
               {$hints['priority_vars']}
           • {$hints['avoid']}
 
-        Pass context:
-          {$passContext}
+        Window context:
+          {$windowContext}
 
-        Already proposed (DO NOT repeat — neither these keys nor these source snippets):
+        Already proposed by previous windows (DO NOT repeat — neither these keys nor these source snippets):
           keys:     {$excludedKeysList}
           snippets: {$excludedSnippetsList}
 
@@ -4113,19 +4239,19 @@ class SynaformController extends AbstractController
         - "label"        string, short human-readable label in {$languageName}
         - "type"         one of: "text", "textarea", "number", "date", "select", "list"
         - "source"       one of: "form" (user types it in a questionnaire) or "ai" (best extracted from a sibling document like a CV)
-        - "source_text"  string, the EXACT verbatim substring as it appears in the document below — SAME casing, SAME punctuation, NO surrounding whitespace, NO ellipses, NO paraphrasing
+        - "source_text"  string, the EXACT verbatim substring as it appears in the WINDOW below — SAME casing, SAME punctuation, NO surrounding whitespace, NO ellipses, NO paraphrasing
 
         Hard rules:
-        - Return between 6 and 12 entries. Quality > quantity.
-        - Each `source_text` MUST be a CONTIGUOUS run of characters that appears literally in the document below. If the text appears more than 3 times, pick a different identifying snippet or skip the variable.
+        - Propose every meaningful variable visible in this window. Return 0 entries if nothing varies in this slice (boilerplate, signatures, headings only); otherwise prefer thoroughness over brevity (up to ~15 entries per window is fine).
+        - Each `source_text` MUST be a CONTIGUOUS run of characters that appears literally in the WINDOW below. If the text appears more than 3 times in this window, pick a different identifying snippet or skip the variable.
         - Snippet length: 1–60 characters strongly preferred, never more than 200.
         - Skip section headings, legal boilerplate, signatures and anything that is not a real variable.
-        - Keys MUST be unique. Use English hyphen-case keys even when the label is in another language.
+        - Keys MUST be unique within your response AND must NOT appear in the exclusion list above. Use English hyphen-case keys even when the label is in another language.
         - For dates use "date". For monetary amounts use "number". For multi-line free text use "textarea". For comma/bullet lists use "list".
         - DO NOT include any other keys.
         - Return ONLY the JSON array. No prose. No markdown fences. No trailing commas.
 
-        Document:
+        Window:
         ---
         {$docText}
         ---
@@ -4147,8 +4273,9 @@ class SynaformController extends AbstractController
             $modelUsed = (string) ($result['model'] ?? 'unknown');
         } catch (\Throwable $e) {
             $this->logger->error('Synaform proposeVariablesPass: chat call failed', [
-                'pass' => $passIndex,
-                'err'  => $e->getMessage(),
+                'window' => $windowIndex,
+                'of'     => $totalWindows,
+                'err'    => $e->getMessage(),
             ]);
             return [
                 'suggestions'         => [],
@@ -4167,15 +4294,17 @@ class SynaformController extends AbstractController
                 $parsed = $recovered;
                 $recoveredTruncated = true;
                 $this->logger->info('Synaform proposeVariablesPass: partial recovery', [
-                    'pass'     => $passIndex,
+                    'window'    => $windowIndex,
+                    'of'        => $totalWindows,
                     'recovered' => count($recovered),
                 ]);
             }
         }
         if (!is_array($parsed)) {
             $this->logger->warning('Synaform proposeVariablesPass: unparseable response', [
-                'pass'        => $passIndex,
-                'model'       => $modelUsed,
+                'window'       => $windowIndex,
+                'of'           => $totalWindows,
+                'model'        => $modelUsed,
                 'response_len' => strlen($aiContent),
                 'preview_head' => mb_substr($aiContent, 0, 400),
             ]);
