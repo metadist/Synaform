@@ -184,11 +184,32 @@ class SynaformController extends AbstractController
         // Tika probe — direct curl against /version. Self-contained so the
         // dashboard works even if TikaClient is reconfigured later. Times
         // the round-trip so the UI can flag a slow/degraded Tika service.
-        $tikaUrl = rtrim((string) ($_ENV['TIKA_BASE_URL'] ?? 'http://tika:9998'), '/');
-        $tikaProbe = $this->probeHttpEndpoint($tikaUrl . '/version');
+        //
+        // Auth: production runs Tika behind basic auth (the public host
+        // http://tika.synaplan.com requires TIKA_HTTP_USER /
+        // TIKA_HTTP_PASS — same env vars synaplan core's TikaClient
+        // already uses). Without forwarding those creds, the probe got
+        // HTTP 401 in production while real extractions worked fine.
+        // Prefer TIKA_BASE_URL but fall back to TIKA_URL since some
+        // deployments only set one of them in their env.
+        $tikaUrl = rtrim((string) (
+            $_ENV['TIKA_BASE_URL']
+            ?? $_ENV['TIKA_URL']
+            ?? getenv('TIKA_BASE_URL')
+            ?: getenv('TIKA_URL')
+            ?: 'http://tika:9998'
+        ), '/');
+        $tikaUser = (string) ($_ENV['TIKA_HTTP_USER'] ?? getenv('TIKA_HTTP_USER') ?: '');
+        $tikaPass = (string) ($_ENV['TIKA_HTTP_PASS'] ?? getenv('TIKA_HTTP_PASS') ?: '');
+        $tikaProbe = $this->probeHttpEndpoint(
+            $tikaUrl . '/version',
+            3,
+            $tikaUser !== '' ? [$tikaUser, $tikaPass] : null,
+        );
         $tika = [
             'enabled' => true,
             'url' => $tikaUrl,
+            'auth' => $tikaUser !== '' ? 'basic (user=' . $tikaUser . ')' : 'none',
             'reachable' => $tikaProbe['ok'],
             'http_code' => $tikaProbe['http'],
             'roundtrip_ms' => $tikaProbe['ms'],
@@ -331,18 +352,27 @@ class SynaformController extends AbstractController
      * round-trip time in ms, raw body and any low-level cURL error so the
      * UI can show "reachable / degraded / down" with one glance.
      *
+     * @param array{0: string, 1: string}|null $basicAuth Optional [user, pass] for HTTP basic auth
+     *
      * @return array{ok: bool, http: int, ms: int, body: string, error: string}
      */
-    private function probeHttpEndpoint(string $url, int $timeoutSec = 3): array
+    private function probeHttpEndpoint(string $url, int $timeoutSec = 3, ?array $basicAuth = null): array
     {
         $t0 = microtime(true);
         $ch = curl_init($url);
-        curl_setopt_array($ch, [
+        $opts = [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT => $timeoutSec,
             CURLOPT_CONNECTTIMEOUT => $timeoutSec,
             CURLOPT_USERAGENT => 'Synaform-Dashboard/1.0',
-        ]);
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 3,
+        ];
+        if ($basicAuth !== null && isset($basicAuth[0]) && $basicAuth[0] !== '') {
+            $opts[CURLOPT_HTTPAUTH] = CURLAUTH_BASIC;
+            $opts[CURLOPT_USERPWD] = $basicAuth[0] . ':' . ($basicAuth[1] ?? '');
+        }
+        curl_setopt_array($ch, $opts);
         $body = curl_exec($ch);
         $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $err = curl_error($ch) ?: '';
@@ -1266,7 +1296,15 @@ class SynaformController extends AbstractController
             ];
             $aiOptions = $this->resolveAiModelOptions($userId);
             $aiOptions['max_tokens'] = max(3000, count($targetFields) * 350);
-            $aiOptions['reasoning_effort'] = 'minimal';
+            // Native thinking-disable for Google Gemini Flash — the
+            // cross-provider `reasoning_effort` map only handles
+            // 'off'/'low'/'medium'/'high'/'dynamic'; sending 'minimal'
+            // (which doesn't match) silently falls through to Google's
+            // server-side default thinking budget and burns 5–8 s per
+            // call. `thinking_budget: 0` is the native passthrough.
+            // For non-Google providers it's a harmless extra option.
+            $aiOptions['thinking_budget'] = 0;
+            $aiOptions['reasoning_effort'] = 'low';
             $aiOptions['temperature'] = 0.2;
 
             $started = microtime(true);
@@ -2379,6 +2417,11 @@ class SynaformController extends AbstractController
 
         $combinedText = implode("\n\n", $allTexts);
 
+        // Hoisted from below — needed by the single-call adaptive
+        // path so the gate decision and per-group `onlyMissing` skip
+        // share the same flag.
+        $onlyMissing = $request->query->getBoolean('onlyMissing', false);
+
         $fields = $form['fields'] ?? [];
         $allowedKeys = array_values(array_filter(
             array_map(static fn ($f) => (string) ($f['key'] ?? ''), $fields),
@@ -2396,18 +2439,130 @@ class SynaformController extends AbstractController
         $extractionLanguageName = $this->languageName($extractionLanguage);
 
         // ────────────────────────────────────────────────────────────────
-        // Grouped extraction pipeline (v3.7.1+).
+        // Adaptive extraction strategy (v3.7.3+).
         //
-        // Instead of one monolithic AI call that asks for ALL fields at
-        // once (which truncates on Gemini's thinking-budget trap and
-        // wastes tokens re-extracting already-filled fields on a
-        // re-run), we cluster the form into 3-7 logical groups via an
-        // AI pre-step (cached on the form), then run one focused
-        // extraction call per group. Per-group benefits:
-        //   - Smaller output → fits well below maxOutputTokens, no truncation.
-        //   - Per-group failure isolation: one bad group costs you 5 fields, not 26.
-        //   - `?onlyMissing=1` skips groups whose fields are already filled.
-        //   - Per-group telemetry surfaces in the response (which the UI shows).
+        // Stage 1 — fast single-call attempt.
+        //   One AI call asks for the full field list at once. With
+        //   modern fast models (Gemini 3.5 Flash, GPT-5.4) this fits
+        //   comfortably below maxOutputTokens and finishes in 20–30s
+        //   vs the 60–90s of 8 sequential grouped calls.
+        //
+        // Stage 2 — grouped fallback (v3.7.1+ pipeline).
+        //   If the single call truncates, returns malformed JSON, or
+        //   returns far fewer keys than the form has, we fall back to
+        //   the per-group pipeline below — which has per-group failure
+        //   isolation, type-aware max_tokens, and per-group telemetry.
+        //
+        // Skipped for ?onlyMissing=1 — that flow needs per-group skip
+        // decisions, which are clearer in the grouped path.
+        // ────────────────────────────────────────────────────────────────
+        $singleStarted = microtime(true);
+        $singleCallSuggestions = null;
+        $singleCallTelemetry = null;
+        $singleCallReason = '';
+
+        if (!$onlyMissing && !empty($allowedKeys)) {
+            $allFieldsSubset = array_values(array_filter(
+                $fields,
+                static fn ($f) => in_array((string) ($f['key'] ?? ''), $allowedKeys, true)
+            ));
+
+            $prompt = $this->buildGroupedExtractionPrompt(
+                $allFieldsSubset,
+                $combinedText,
+                $extractionLanguageName,
+                null,
+            );
+
+            try {
+                $messages = [
+                    ['role' => 'system', 'content' => 'You are a precise document parsing assistant. Return only valid JSON.'],
+                    ['role' => 'user', 'content' => $prompt],
+                ];
+                $aiOptions = $this->resolveAiModelOptions($userId);
+                $aiOptions['max_tokens'] = 16000;
+                $aiOptions['thinking_budget'] = 0;
+                $aiOptions['reasoning_effort'] = 'low';
+                $aiOptions['temperature'] = 0;
+
+                $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+                $singleElapsedMs = (int) ((microtime(true) - $singleStarted) * 1000);
+                $content = (string) ($result['content'] ?? '');
+                $modelUsed = (string) ($result['model'] ?? 'unknown');
+                $parsed = $this->parseJsonFromAiResponse($content);
+
+                // Acceptance criteria: valid JSON object (not array,
+                // not null) AND at least 50 % of the form's field
+                // keys are present in the response. The 50 % gate
+                // catches mid-stream truncation — a healthy single
+                // call on this CV returns 25/26 fields, a truncated
+                // one cuts off after the first few. Below the gate,
+                // we fall through to grouped which is robust.
+                $threshold = max(5, (int) ceil(count($allowedKeys) * 0.5));
+                if (
+                    is_array($parsed)
+                    && !array_is_list($parsed)
+                    && count($parsed) >= $threshold
+                ) {
+                    $clean = [];
+                    foreach ($parsed as $k => $v) {
+                        if (is_string($k) && $k !== '' && in_array($k, $allowedKeys, true)) {
+                            $clean[$k] = $v;
+                        }
+                    }
+                    $singleCallSuggestions = $clean;
+                    $singleCallTelemetry = [
+                        'strategy' => 'single_call',
+                        'model' => $modelUsed,
+                        'elapsed_ms' => $singleElapsedMs,
+                        'fields_returned' => count($clean),
+                        'fields_in_form' => count($allowedKeys),
+                        'response_chars' => strlen($content),
+                    ];
+                } else {
+                    $singleCallReason = $parsed === null
+                        ? 'unparseable_response'
+                        : (is_array($parsed) && array_is_list($parsed)
+                            ? 'top_level_array'
+                            : 'below_threshold (' . (is_array($parsed) ? count($parsed) : 0) . '/' . $threshold . ')');
+                    $this->logger->info('Synaform: single-call extraction below threshold, falling back to grouped', [
+                        'candidateId' => $candidateId,
+                        'model' => $modelUsed,
+                        'response_chars' => strlen($content),
+                        'parsed_kind' => $parsed === null ? 'null' : (is_array($parsed) && array_is_list($parsed) ? 'list' : (is_array($parsed) ? count($parsed) . '_keys' : 'unknown')),
+                        'threshold' => $threshold,
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                $singleCallReason = 'exception: ' . $e->getMessage();
+                $this->logger->warning('Synaform: single-call extraction threw, falling back to grouped', [
+                    'candidateId' => $candidateId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        } else {
+            $singleCallReason = $onlyMissing ? 'only_missing_mode' : 'no_fields';
+        }
+
+        // Single-call won → return early without running the grouped
+        // pipeline at all. Massive wall-time savings on the happy path.
+        if ($singleCallSuggestions !== null) {
+            return $this->json([
+                'success' => true,
+                'suggestions' => $singleCallSuggestions,
+                'documents_parsed' => count($allTexts),
+                'model' => $singleCallTelemetry['model'] ?? 'unknown',
+                'doc_chars' => mb_strlen($combinedText),
+                'fields_returned' => count($singleCallSuggestions),
+                'strategy' => 'single_call',
+                'single_call' => $singleCallTelemetry,
+                'total_elapsed_ms' => $singleCallTelemetry['elapsed_ms'] ?? 0,
+                'ocr_cache' => $cacheStats,
+            ]);
+        }
+
+        // ────────────────────────────────────────────────────────────────
+        // Stage 2 — grouped extraction (fallback path).
         // ────────────────────────────────────────────────────────────────
         $groups = $this->getOrBuildExtractionGroups($userId, $form);
         if (empty($groups)) {
@@ -2418,7 +2573,7 @@ class SynaformController extends AbstractController
             ]];
         }
 
-        $onlyMissing = $request->query->getBoolean('onlyMissing', false);
+        // ($onlyMissing already resolved above, before single-call gate.)
         $existingValues = $entry['field_values'] ?? [];
         if (!is_array($existingValues) || (function_exists('array_is_list') && array_is_list($existingValues))) {
             $existingValues = [];
@@ -2516,7 +2671,11 @@ class SynaformController extends AbstractController
                 ];
                 $aiOptions = $this->resolveAiModelOptions($userId);
                 $aiOptions['max_tokens'] = $maxTokens;
-                $aiOptions['reasoning_effort'] = 'minimal';
+                // Disable Gemini Flash's hidden thinking budget (saves
+                // 5–8 s per call). See note on the form-enhancement
+                // call above for why both keys are set.
+                $aiOptions['thinking_budget'] = 0;
+                $aiOptions['reasoning_effort'] = 'low';
                 $aiOptions['temperature'] = 0;
 
                 $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
@@ -2625,6 +2784,8 @@ class SynaformController extends AbstractController
             'total_elapsed_ms' => $totalElapsedMs,
             'only_missing' => $onlyMissing,
             'ocr_cache' => $cacheStats,
+            'strategy' => $onlyMissing ? 'grouped_only_missing' : 'grouped_fallback',
+            'single_call_skipped_reason' => $singleCallReason ?: null,
         ]);
     }
 
@@ -2828,6 +2989,11 @@ class SynaformController extends AbstractController
         - Return null for any field where no matching information is found. Do NOT guess or invent data.
         - If a document is an interview transcript, extract answers to questions that match the field descriptions.
 
+        Anti-duplication rules (applied to every field):
+        - If the source uses "Label: Value" patterns (e.g. "Position: …", "Tätigkeit: …", "Rolle: …", "Aufgaben: …", "Branche: …", "Zeitraum: …", "Firma: …", "Arbeitgeber: …"), return ONLY the value. NEVER include the label itself in the field value.
+        - Each fact belongs to exactly ONE field. When two fields could plausibly hold the same value (e.g. a position name appears in both `current_position` and inside a `stations` row), use the field whose description fits best and leave the other shorter / abstract / empty rather than echoing the same string verbatim.
+        - For row-table fields like `stations`, the bullet entries (column with type=list) must be ACTIVITY descriptions. NEVER repeat the row's `position`, `employer`, or `time` value as a bullet; those are already in their own columns. In particular, the FIRST bullet must NOT be the position title or start with the position title (even if the source CV's job line "Interim-CTO at Vicoland - 5 team" reads naturally as a bullet — split that line: extract "Interim-CTO" into the `position` column, "Vicoland" into `employer`, "5 team" or any concrete metric into a separate bullet, and drop everything that's redundant). Each bullet stands on its own as a verb-led achievement or responsibility, e.g. "Aufbau einer cloudbasierten Sicherheits-Lösung", not "CTO bei Vicoland — Aufbau einer Sicherheits-Lösung".
+
         Form fields:
         {$fieldsBlock}
 
@@ -2998,11 +3164,13 @@ class SynaformController extends AbstractController
                 ['role' => 'user', 'content' => $prompt],
             ];
             $aiOptions = $this->resolveAiModelOptions($userId);
-            // Clustering output is tiny (just keys + labels) but
-            // Gemini 2.5+ Flash burns part of maxOutputTokens on
-            // hidden "thinking", so we keep a generous budget.
+            // Clustering output is tiny (just keys + labels) — disable
+            // thinking entirely so this one-time call returns in 2–3 s
+            // instead of 8–10 s (Gemini Flash silently burns thinking
+            // tokens when no thinkingConfig is sent).
             $aiOptions['max_tokens'] = 4000;
-            $aiOptions['reasoning_effort'] = 'minimal';
+            $aiOptions['thinking_budget'] = 0;
+            $aiOptions['reasoning_effort'] = 'low';
             $aiOptions['temperature'] = 0;
 
             $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
@@ -8024,6 +8192,99 @@ class SynaformController extends AbstractController
      * @param array<string, array<int, array<string, mixed>>> $arrays       group => rows[]
      * @param array<int, array<string, mixed>> $formFields
      */
+    /**
+     * Deterministic post-pass dedup: drop any bullet from a rich-list
+     * column whose text equals (or is prefixed by) another column's
+     * value in the same row. Catches the "Interim-CTO" position that
+     * the AI sometimes leaks into `details` even after explicit
+     * prompt rules forbid it — typically because the source CV line
+     * starts with the role title and the AI copies the whole line as
+     * the first bullet.
+     *
+     * Match modes (case-insensitive, whitespace-tolerant):
+     *   - exact equality  ("Interim-CTO" === "Interim-CTO")
+     *   - bullet starts with the sibling value, optionally followed
+     *     by punctuation/space ("Interim-CTO – 5 team", "Interim-CTO,
+     *     Berlin", "Interim-CTO bei Vicoland")
+     *   - bullet IS the sibling value with simple wrapping
+     *     ("Position: Interim-CTO" — strip "Position: " labels too)
+     *
+     * Only sibling values longer than 3 chars participate, to avoid
+     * stripping legitimate bullets that happen to start with a
+     * generic word ("CEO" alone is long enough to match; "of" is
+     * not).
+     *
+     * @param list<mixed>           $bullets    The detail bullets the AI returned
+     * @param array<string, mixed>  $row        The full row dict (so we can read time/employer/position siblings)
+     * @param string                $thisCol    The column being rendered (we don't dedup against ourselves)
+     *
+     * @return list<string>
+     */
+    private function dedupeBulletsAgainstSiblings(array $bullets, array $row, string $thisCol): array
+    {
+        $siblingValues = [];
+        foreach ($row as $col => $val) {
+            if ($col === $thisCol) {
+                continue;
+            }
+            if (!is_string($val)) {
+                continue;
+            }
+            $clean = trim($val);
+            if (mb_strlen($clean) < 4) {
+                continue;
+            }
+            $siblingValues[] = $clean;
+        }
+        if (empty($siblingValues)) {
+            return array_values(array_map(static fn ($b) => is_string($b) ? $b : (string) $b, $bullets));
+        }
+
+        $labels = ['Position', 'Tätigkeit', 'Rolle', 'Job', 'Aufgaben', 'Verantwortung', 'Firma', 'Arbeitgeber', 'Zeitraum'];
+        $labelPrefix = '/^\s*(?:' . implode('|', array_map('preg_quote', $labels)) . ')\s*[:\-–]\s*/iu';
+
+        $kept = [];
+        foreach ($bullets as $bullet) {
+            if (!is_string($bullet)) {
+                $bullet = (string) $bullet;
+            }
+            $b = trim($bullet);
+            if ($b === '') {
+                continue;
+            }
+            // Strip leading "Label: " from the bullet for comparison
+            $bForMatch = preg_replace($labelPrefix, '', $b) ?? $b;
+            $bLower = mb_strtolower($bForMatch);
+
+            $isDup = false;
+            foreach ($siblingValues as $sib) {
+                $sibLower = mb_strtolower($sib);
+                if ($bLower === $sibLower) {
+                    $isDup = true;
+                    break;
+                }
+                if (str_starts_with($bLower, $sibLower)) {
+                    // Position followed by a separator or end-of-string
+                    $tail = substr($bLower, strlen($sibLower));
+                    if ($tail === '' || preg_match('/^[\s\-–:,;\.\(\)\/]/u', $tail) === 1) {
+                        $isDup = true;
+                        break;
+                    }
+                }
+            }
+            if (!$isDup) {
+                $kept[] = $bullet;
+            } else {
+                $this->logger->info('Synaform: dropped bullet duplicating sibling column', [
+                    'bullet' => mb_substr($b, 0, 100),
+                    'matched_sibling' => 'col_value',
+                ]);
+            }
+        }
+
+        return $kept;
+    }
+
     private function expandRichRowColumns(string $docxPath, array $richSubfields, array $arrays, array $formFields): void
     {
         if (empty($richSubfields)) {
@@ -8096,6 +8357,18 @@ class SynaformController extends AbstractController
                 } elseif (is_string($row) && $col === 'details') {
                     // Legacy "stations" entries stored as plain strings.
                     $raw = $row;
+                }
+
+                // Deterministic safety net: even if the AI ignored the
+                // prompt rule "never repeat the row's position/employer/time
+                // as a bullet" (and they sometimes do, depending on model and
+                // CV format), strip any bullet that equals or is prefixed by
+                // a sibling-column value. This guarantees the rendered
+                // template never shows the position twice — once as the
+                // {{stations.position.N}} paragraph above the bullets, and
+                // once as the first bullet itself.
+                if (is_array($raw) && is_array($row)) {
+                    $raw = $this->dedupeBulletsAgainstSiblings($raw, $row, $col);
                 }
 
                 foreach (["{{{$richKey}.N#{$num}}}", "{{{$richKey}#{$num}}}"] as $placeholder) {
@@ -8223,10 +8496,20 @@ class SynaformController extends AbstractController
      */
     private function renderBulletList(array $items, string $basePPr, ?int $bulletNumId, string $baseRPr = ''): string
     {
+        // `<w:widowControl w:val="0"/>` lets Word split a single long
+        // bullet that wraps to 4–5 lines across a page boundary. The
+        // default (widowControl on) keeps at least 2 lines together at
+        // the start/end of every paragraph, which can push a long
+        // bullet entirely to the next page when only 1 line would fit
+        // at the bottom — making the previous page look short. Each
+        // bullet is its own paragraph with no keepNext, so successive
+        // bullets always break freely between each other.
         $bulletPPr = $bulletNumId !== null
             ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
+                . '<w:widowControl w:val="0"/>'
                 . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>'
-            : '<w:pPr><w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
+            : '<w:pPr><w:widowControl w:val="0"/>'
+                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
 
         $out = '';
         foreach ($items as $item) {
@@ -8951,10 +9234,18 @@ class SynaformController extends AbstractController
         // pPr, because that pPr already carries the host's bullet numId for
         // exactly this purpose; reusing it verbatim would double-indent. We
         // build a clean bullet pPr instead.
+        //
+        // `<w:widowControl w:val="0"/>` allows Word to split a single long
+        // bullet that wraps across a page boundary — without this, a long
+        // wrapped bullet would jump entirely to the next page and leave the
+        // previous one looking short. Successive bullets always break freely
+        // from each other (no keepNext anywhere).
         $bulletPPr = $bulletNumId !== null
             ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
+                . '<w:widowControl w:val="0"/>'
                 . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>'
-            : '<w:pPr><w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
+            : '<w:pPr><w:widowControl w:val="0"/>'
+                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
 
         // Non-bullet paragraphs (date/title/spacer) inherit the host paragraph
         // pPr but with any list-bullet numPr stripped — otherwise the title
