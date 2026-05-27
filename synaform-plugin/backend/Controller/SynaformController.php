@@ -1201,6 +1201,339 @@ class SynaformController extends AbstractController
         return $this->json(['success' => true, 'message' => 'Form deleted']);
     }
 
+    #[Route('/forms/{formId}/enhance-fields', name: 'forms_enhance_fields', methods: ['POST'])]
+    #[OA\Post(
+        path: '/api/v1/user/{userId}/plugins/synaform/forms/{formId}/enhance-fields',
+        summary: 'Use AI to suggest richer description / examples / negative_hint for form fields. Returns suggestions only — caller must save via PUT /forms/{formId} to apply.',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Per-field enhancement suggestions')]
+    public function formsEnhanceFields(int $userId, string $formId, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $form = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, $formId);
+        if (!$form) {
+            return $this->json(['success' => false, 'error' => 'Form not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        $fields = $form['fields'] ?? [];
+        if (empty($fields)) {
+            return $this->json(['success' => false, 'error' => 'Form has no fields to enhance'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $body = json_decode($request->getContent(), true) ?? [];
+        $requestedKeys = is_array($body['field_keys'] ?? null)
+            ? array_values(array_filter(array_map('strval', $body['field_keys']), static fn ($k) => $k !== ''))
+            : [];
+        $sampleCandidateId = (string) ($body['sample_candidate_id'] ?? '');
+
+        // Resolve which fields to enhance: explicit list, or all fields.
+        $targetFields = $fields;
+        if (!empty($requestedKeys)) {
+            $targetFields = array_values(array_filter(
+                $fields,
+                static fn ($f) => in_array((string) ($f['key'] ?? ''), $requestedKeys, true)
+            ));
+            if (empty($targetFields)) {
+                return $this->json(['success' => false, 'error' => 'None of the requested field_keys exist in the form'], Response::HTTP_BAD_REQUEST);
+            }
+        }
+
+        // Sample-doc grounding: pull text from the most recent candidate
+        // (or the explicitly named one) so the AI's `examples` are
+        // anchored in real values from the user's actual data instead
+        // of generic placeholders.
+        [$sampleText, $sampleMeta] = $this->loadSampleDocumentText($userId, $formId, $sampleCandidateId);
+
+        $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
+        $extractionLanguageName = $this->languageName($extractionLanguage);
+
+        $prompt = $this->buildFieldEnhancementPrompt(
+            $fields,
+            $targetFields,
+            $sampleText,
+            $extractionLanguageName,
+        );
+
+        try {
+            $messages = [
+                ['role' => 'system', 'content' => 'You are a senior form-design assistant. Return ONLY valid JSON.'],
+                ['role' => 'user', 'content' => $prompt],
+            ];
+            $aiOptions = $this->resolveAiModelOptions($userId);
+            $aiOptions['max_tokens'] = max(3000, count($targetFields) * 350);
+            $aiOptions['reasoning_effort'] = 'minimal';
+            $aiOptions['temperature'] = 0.2;
+
+            $started = microtime(true);
+            $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+            $elapsedMs = (int) ((microtime(true) - $started) * 1000);
+            $content = (string) ($result['content'] ?? '');
+            $modelUsed = (string) ($result['model'] ?? 'unknown');
+
+            $parsed = $this->parseJsonFromAiResponse($content);
+            if (!is_array($parsed)) {
+                $this->logger->warning('Synaform: enhance-fields AI returned unparseable response', [
+                    'formId' => $formId,
+                    'model' => $modelUsed,
+                    'response_chars' => strlen($content),
+                    'raw_preview' => mb_substr($content, 0, 400),
+                ]);
+
+                return $this->json([
+                    'success' => false,
+                    'error' => 'AI returned an unparseable response. Try again or switch the chat model in Settings.',
+                    'debug' => [
+                        'model' => $modelUsed,
+                        'response_chars' => strlen($content),
+                        'raw_preview' => mb_substr($content, 0, 400),
+                    ],
+                ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+
+            $suggestions = $parsed['fields'] ?? null;
+            if (!is_array($suggestions) && array_is_list($parsed)) {
+                $suggestions = $parsed;
+            }
+            if (!is_array($suggestions)) {
+                return $this->json([
+                    'success' => false,
+                    'error' => 'AI response did not contain a fields array.',
+                    'debug' => ['model' => $modelUsed, 'parsed_keys' => array_keys($parsed)],
+                ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+
+            $targetKeys = array_map(static fn ($f) => (string) ($f['key'] ?? ''), $targetFields);
+            $byKey = [];
+            foreach ($fields as $f) {
+                $k = (string) ($f['key'] ?? '');
+                if ($k !== '') {
+                    $byKey[$k] = $f;
+                }
+            }
+
+            $enhancements = [];
+            foreach ($suggestions as $s) {
+                if (!is_array($s)) {
+                    continue;
+                }
+                $key = (string) ($s['key'] ?? '');
+                if ($key === '' || !in_array($key, $targetKeys, true) || !isset($byKey[$key])) {
+                    continue;
+                }
+                $current = $byKey[$key];
+                $suggestedDescription = isset($s['description']) && is_string($s['description'])
+                    ? trim($s['description']) : '';
+                $suggestedNegative = isset($s['negative_hint']) && is_string($s['negative_hint'])
+                    ? trim($s['negative_hint']) : '';
+                $suggestedExamples = [];
+                if (isset($s['examples']) && is_array($s['examples'])) {
+                    foreach ($s['examples'] as $ex) {
+                        if (is_string($ex) && trim($ex) !== '') {
+                            $suggestedExamples[] = trim($ex);
+                        }
+                    }
+                    $suggestedExamples = array_values(array_slice(array_unique($suggestedExamples), 0, 4));
+                }
+
+                // Skip if AI returned nothing meaningful for this field.
+                if ($suggestedDescription === '' && $suggestedNegative === '' && empty($suggestedExamples)) {
+                    continue;
+                }
+
+                $enhancements[] = [
+                    'key' => $key,
+                    'label' => (string) ($current['label'] ?? $key),
+                    'type' => (string) ($current['type'] ?? 'text'),
+                    'current' => [
+                        'description' => (string) ($current['description'] ?? ''),
+                        'examples' => is_array($current['examples'] ?? null) ? $current['examples'] : [],
+                        'negative_hint' => (string) ($current['negative_hint'] ?? ''),
+                        'hint' => (string) ($current['hint'] ?? ''),
+                    ],
+                    'suggested' => [
+                        'description' => $suggestedDescription,
+                        'examples' => $suggestedExamples,
+                        'negative_hint' => $suggestedNegative,
+                    ],
+                ];
+            }
+
+            return $this->json([
+                'success' => true,
+                'enhancements' => $enhancements,
+                'model' => $modelUsed,
+                'elapsed_ms' => $elapsedMs,
+                'sample' => $sampleMeta,
+                'fields_requested' => count($targetFields),
+                'fields_returned' => count($enhancements),
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger->error('Synaform: enhance-fields failed', [
+                'formId' => $formId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $this->json([
+                'success' => false,
+                'error' => 'Field enhancement failed: ' . $e->getMessage(),
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Pull plain text from the most recent (or named) candidate that
+     * has any extractable source — CV, additional docs, URLs. Used to
+     * ground enhance-fields example values in the user's real data.
+     *
+     * @return array{0: ?string, 1: array{candidate_id: ?string, filename: ?string, doc_chars: int}}
+     */
+    private function loadSampleDocumentText(int $userId, string $formId, string $explicitCandidateId = ''): array
+    {
+        $meta = ['candidate_id' => null, 'filename' => null, 'doc_chars' => 0];
+        $candidate = null;
+
+        if ($explicitCandidateId !== '') {
+            $candidate = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $explicitCandidateId);
+            if ($candidate && ($candidate['form_id'] ?? null) !== $formId) {
+                $candidate = null;
+            }
+        }
+
+        // Fall back to the most-recent candidate of this form that has a CV.
+        if (!$candidate) {
+            $all = $this->pluginData->list($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE) ?? [];
+            $matches = array_values(array_filter(
+                $all,
+                static fn ($c) => is_array($c)
+                    && ($c['form_id'] ?? null) === $formId
+                    && !empty($c['files']['cv'])
+            ));
+            usort($matches, static fn ($a, $b) => strcmp((string) ($b['updated_at'] ?? ''), (string) ($a['updated_at'] ?? '')));
+            $candidate = $matches[0] ?? null;
+        }
+
+        if (!$candidate) {
+            return [null, $meta];
+        }
+
+        $candidateId = (string) ($candidate['id'] ?? '');
+        $cv = $candidate['files']['cv'] ?? null;
+        if (!is_array($cv) || empty($cv['stored_as'])) {
+            $meta['candidate_id'] = $candidateId;
+            return [null, $meta];
+        }
+
+        $storedAs = (string) $cv['stored_as'];
+        $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
+        $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
+
+        try {
+            [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+            $text = is_string($text) ? trim($text) : '';
+            if ($text === '') {
+                $meta['candidate_id'] = $candidateId;
+                $meta['filename'] = $cv['filename'] ?? null;
+                return [null, $meta];
+            }
+            // Cap to keep enhance-fields prompt bounded — examples don't
+            // need the whole document.
+            $cap = 8000;
+            if (function_exists('mb_strlen') && mb_strlen($text) > $cap) {
+                $text = mb_substr($text, 0, $cap) . "\n…[truncated]…";
+            }
+            $meta['candidate_id'] = $candidateId;
+            $meta['filename'] = $cv['filename'] ?? null;
+            $meta['doc_chars'] = function_exists('mb_strlen') ? mb_strlen($text) : strlen($text);
+
+            return [$text, $meta];
+        } catch (\Throwable $e) {
+            $this->logger->warning('Synaform: loadSampleDocumentText failed', [
+                'candidateId' => $candidateId,
+                'error' => $e->getMessage(),
+            ]);
+            $meta['candidate_id'] = $candidateId;
+            return [null, $meta];
+        }
+    }
+
+    /**
+     * Build the prompt that asks the AI to enrich the chosen fields
+     * with description / examples / negative_hint. Sees the FULL form
+     * context (not just target fields) so it can disambiguate sibling
+     * fields ("there is both current_position AND target_position
+     * here, make sure your description distinguishes them").
+     */
+    private function buildFieldEnhancementPrompt(
+        array $allFields,
+        array $targetFields,
+        ?string $sampleText,
+        string $extractionLanguageName,
+    ): string {
+        $fmtCurrent = static function (array $f): string {
+            $key = (string) ($f['key'] ?? '');
+            $label = (string) ($f['label'] ?? $key);
+            $type = (string) ($f['type'] ?? 'text');
+            $existing = [];
+            if (!empty($f['description'])) {
+                $existing[] = 'description="' . trim((string) $f['description']) . '"';
+            } elseif (!empty($f['hint'])) {
+                $existing[] = 'hint="' . trim((string) $f['hint']) . '"';
+            }
+            if (!empty($f['examples']) && is_array($f['examples'])) {
+                $existing[] = 'examples=' . json_encode($f['examples'], JSON_UNESCAPED_UNICODE);
+            }
+            if (!empty($f['negative_hint'])) {
+                $existing[] = 'negative_hint="' . trim((string) $f['negative_hint']) . '"';
+            }
+            if (!empty($f['options'])) {
+                $existing[] = 'options=' . json_encode($f['options'], JSON_UNESCAPED_UNICODE);
+            }
+            $line = sprintf('- %s (type=%s, label="%s")', $key, $type, $label);
+            if (!empty($existing)) {
+                $line .= "\n  current: " . implode('; ', $existing);
+            }
+            return $line;
+        };
+
+        $fullFormBlock = implode("\n", array_map($fmtCurrent, $allFields));
+        $targetKeysBlock = implode(', ', array_map(static fn ($f) => '"' . ($f['key'] ?? '') . '"', $targetFields));
+
+        $sampleBlock = '';
+        if ($sampleText !== null && $sampleText !== '') {
+            $sampleBlock = "\n\n        Sample source document (for grounding examples in real data — do NOT copy values verbatim into descriptions):\n        ---\n        " . $sampleText . "\n        ---\n";
+        }
+
+        return <<<PROMPT
+        You are improving the variable definitions for a data-extraction form.
+
+        For each TARGET field listed below, you will return three properties that help a downstream AI extract the field accurately from documents. The form's full field list is shown so you can disambiguate sibling fields (e.g. distinguish current_position from target_position when both exist).
+
+        Return values:
+        - description: 1–3 sentences explaining WHAT this field is, WHERE in a document to look for it, and any format/conventions. Reference the field's relationship to siblings if relevant. Write in {$extractionLanguageName}.
+        - examples: 2–4 short example values demonstrating the expected format. Use realistic-looking data. If a sample document is provided below, the examples may draw lightly from it but should not copy verbatim PII (no real names, real emails, real phone numbers). For "select" fields, the examples MUST be a subset of the allowed options.
+        - negative_hint: 1 short sentence (or empty string) describing what this field is NOT — common confusions or look-alikes to avoid.
+
+        Form full context (existing field definitions):
+        {$fullFormBlock}{$sampleBlock}
+
+        TARGET field keys to enhance: [{$targetKeysBlock}]
+
+        Return ONLY valid JSON in this exact shape (one entry per TARGET field):
+        {"fields":[{"key":"<field_key>","description":"...","examples":["...","..."],"negative_hint":"..."}]}
+
+        Rules:
+        - Only return fields whose key is in the TARGET list.
+        - If you have nothing useful to add for a field, omit it from the array entirely.
+        - Do NOT echo or modify "key", "label", "type" — only the three new properties.
+        - Do NOT invent fields that aren't in the TARGET list.
+        PROMPT;
+    }
+
     #[Route('/forms/import-parse', name: 'forms_import_parse', methods: ['POST'], priority: 10)]
     #[OA\Post(
         path: '/api/v1/user/{userId}/plugins/synaform/forms/import-parse',
@@ -1406,9 +1739,39 @@ class SynaformController extends AbstractController
 
         $updatable = ['name', 'form_id', 'template_id', 'status', 'field_values'];
         foreach ($updatable as $field) {
-            if (array_key_exists($field, $data)) {
-                $existing[$field] = $data[$field];
+            if (!array_key_exists($field, $data)) {
+                continue;
             }
+            // field_values MUST be an associative map keyed by string
+            // field keys. Reject lists / numeric-keyed maps so a
+            // malformed AI response (top-level array) can never poison
+            // the candidate's stored values — that broke template
+            // generation for users in v3.7.0.
+            if ($field === 'field_values') {
+                $val = $data[$field];
+                if (!is_array($val)) {
+                    return $this->json([
+                        'success' => false,
+                        'error' => 'field_values must be a JSON object keyed by field key',
+                    ], Response::HTTP_UNPROCESSABLE_ENTITY);
+                }
+                if ($val !== [] && array_is_list($val)) {
+                    return $this->json([
+                        'success' => false,
+                        'error' => 'field_values must be a keyed object, not an array',
+                    ], Response::HTTP_UNPROCESSABLE_ENTITY);
+                }
+                $cleaned = [];
+                foreach ($val as $k => $v) {
+                    if (!is_string($k) || $k === '') {
+                        continue;
+                    }
+                    $cleaned[$k] = $v;
+                }
+                $existing[$field] = $cleaned;
+                continue;
+            }
+            $existing[$field] = $data[$field];
         }
         if (array_key_exists('delete_after_months', $data)) {
             $existing['delete_after_months'] = $this->normalizeRetentionMonths($data['delete_after_months']);
@@ -1912,7 +2275,7 @@ class SynaformController extends AbstractController
         tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Parsed field suggestions')]
-    public function candidatesParseDocuments(int $userId, string $candidateId, #[CurrentUser] ?User $user): JsonResponse
+    public function candidatesParseDocuments(int $userId, string $candidateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
     {
         if (!$this->canAccessPlugin($user, $userId)) {
             return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
@@ -1978,26 +2341,279 @@ class SynaformController extends AbstractController
         $combinedText = implode("\n\n", $allTexts);
 
         $fields = $form['fields'] ?? [];
+        $allowedKeys = array_values(array_filter(
+            array_map(static fn ($f) => (string) ($f['key'] ?? ''), $fields),
+            static fn ($k) => $k !== ''
+        ));
+        $fieldsByKey = [];
+        foreach ($fields as $f) {
+            $key = (string) ($f['key'] ?? '');
+            if ($key !== '') {
+                $fieldsByKey[$key] = $f;
+            }
+        }
+
+        $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
+        $extractionLanguageName = $this->languageName($extractionLanguage);
+
+        // ────────────────────────────────────────────────────────────────
+        // Grouped extraction pipeline (v3.7.1+).
+        //
+        // Instead of one monolithic AI call that asks for ALL fields at
+        // once (which truncates on Gemini's thinking-budget trap and
+        // wastes tokens re-extracting already-filled fields on a
+        // re-run), we cluster the form into 3-7 logical groups via an
+        // AI pre-step (cached on the form), then run one focused
+        // extraction call per group. Per-group benefits:
+        //   - Smaller output → fits well below maxOutputTokens, no truncation.
+        //   - Per-group failure isolation: one bad group costs you 5 fields, not 26.
+        //   - `?onlyMissing=1` skips groups whose fields are already filled.
+        //   - Per-group telemetry surfaces in the response (which the UI shows).
+        // ────────────────────────────────────────────────────────────────
+        $groups = $this->getOrBuildExtractionGroups($userId, $form);
+        if (empty($groups)) {
+            $groups = [[
+                'key' => 'all',
+                'label' => 'All fields',
+                'field_keys' => $allowedKeys,
+            ]];
+        }
+
+        $onlyMissing = $request->query->getBoolean('onlyMissing', false);
+        $existingValues = $entry['field_values'] ?? [];
+        if (!is_array($existingValues) || (function_exists('array_is_list') && array_is_list($existingValues))) {
+            $existingValues = [];
+        }
+
+        $allMerged = [];
+        $groupTelemetry = [];
+        $modelUsed = null;
+        $startedAll = microtime(true);
+
+        foreach ($groups as $group) {
+            $groupKey = (string) ($group['key'] ?? '');
+            $groupLabel = (string) ($group['label'] ?? $groupKey);
+            $rawFieldKeys = array_map('strval', (array) ($group['field_keys'] ?? []));
+            $groupFieldKeys = array_values(array_intersect($rawFieldKeys, $allowedKeys));
+            if (empty($groupFieldKeys)) {
+                continue;
+            }
+
+            // Skip groups whose fields are all already populated when the
+            // caller asks for incremental extraction. "Filled" means
+            // non-null, non-empty-string, and (for arrays) non-empty.
+            if ($onlyMissing) {
+                $allFilled = true;
+                foreach ($groupFieldKeys as $k) {
+                    if (!$this->fieldValueIsFilled($existingValues[$k] ?? null)) {
+                        $allFilled = false;
+                        break;
+                    }
+                }
+                if ($allFilled) {
+                    $groupTelemetry[] = [
+                        'key' => $groupKey,
+                        'label' => $groupLabel,
+                        'fields_in_group' => count($groupFieldKeys),
+                        'fields_returned' => 0,
+                        'skipped' => true,
+                        'reason' => 'already_filled',
+                        'elapsed_ms' => 0,
+                    ];
+                    continue;
+                }
+            }
+
+            $subset = array_values(array_filter(
+                $fields,
+                static fn ($f) => in_array((string) ($f['key'] ?? ''), $groupFieldKeys, true)
+            ));
+            $prompt = $this->buildGroupedExtractionPrompt(
+                $subset,
+                $combinedText,
+                $extractionLanguageName,
+                $groupLabel,
+            );
+
+            // Per-group max_tokens scales with group size. A 5-field
+            // group fits in ~2-3 k tokens; tables (stations) need
+            // headroom but rarely > 8 k. Cap keeps Gemini's thinking
+            // budget bounded so we can't truncate inside one group.
+            $maxTokens = max(2000, min(8000, count($subset) * 800));
+
+            $started = microtime(true);
+            try {
+                $messages = [
+                    ['role' => 'system', 'content' => 'You are a precise document parsing assistant. Return only valid JSON.'],
+                    ['role' => 'user', 'content' => $prompt],
+                ];
+                $aiOptions = $this->resolveAiModelOptions($userId);
+                $aiOptions['max_tokens'] = $maxTokens;
+                $aiOptions['reasoning_effort'] = 'minimal';
+                $aiOptions['temperature'] = 0;
+
+                $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+                $content = (string) ($result['content'] ?? '');
+                $modelUsed = $result['model'] ?? $modelUsed;
+                $parsed = $this->parseJsonFromAiResponse($content);
+                $elapsedMs = (int) ((microtime(true) - $started) * 1000);
+
+                if ($parsed === null || !is_array($parsed) || array_is_list($parsed)) {
+                    $rawPreview = mb_substr($content, 0, 500);
+                    $this->logger->warning('Synaform: group extraction returned unusable shape', [
+                        'candidateId' => $candidateId,
+                        'group' => $groupKey,
+                        'model' => $modelUsed,
+                        'response_chars' => strlen($content),
+                        'parsed_kind' => $parsed === null ? 'null' : (array_is_list($parsed) ? 'list' : 'unknown'),
+                        'raw_preview' => $rawPreview,
+                    ]);
+                    $groupTelemetry[] = [
+                        'key' => $groupKey,
+                        'label' => $groupLabel,
+                        'fields_in_group' => count($groupFieldKeys),
+                        'fields_returned' => 0,
+                        'succeeded' => false,
+                        'error' => $content === '' ? 'empty AI response' : 'unparseable AI response',
+                        'response_chars' => strlen($content),
+                        'elapsed_ms' => $elapsedMs,
+                    ];
+                    continue;
+                }
+
+                $groupClean = [];
+                foreach ($parsed as $k => $v) {
+                    if (!is_string($k) || !in_array($k, $groupFieldKeys, true)) {
+                        continue;
+                    }
+                    $groupClean[$k] = $v;
+                }
+                foreach ($groupClean as $k => $v) {
+                    $allMerged[$k] = $v;
+                }
+                $groupTelemetry[] = [
+                    'key' => $groupKey,
+                    'label' => $groupLabel,
+                    'fields_in_group' => count($groupFieldKeys),
+                    'fields_returned' => count($groupClean),
+                    'succeeded' => true,
+                    'elapsed_ms' => $elapsedMs,
+                ];
+            } catch (\Throwable $e) {
+                $elapsedMs = (int) ((microtime(true) - $started) * 1000);
+                $this->logger->warning('Synaform: group extraction failed', [
+                    'candidateId' => $candidateId,
+                    'group' => $groupKey,
+                    'error' => $e->getMessage(),
+                ]);
+                $groupTelemetry[] = [
+                    'key' => $groupKey,
+                    'label' => $groupLabel,
+                    'fields_in_group' => count($groupFieldKeys),
+                    'fields_returned' => 0,
+                    'succeeded' => false,
+                    'error' => $e->getMessage(),
+                    'elapsed_ms' => $elapsedMs,
+                ];
+            }
+        }
+
+        $totalElapsedMs = (int) ((microtime(true) - $startedAll) * 1000);
+        $groupsRun = array_values(array_filter($groupTelemetry, static fn ($g) => empty($g['skipped'])));
+        $groupsSucceeded = array_values(array_filter($groupsRun, static fn ($g) => !empty($g['succeeded'])));
+        $groupsSkipped = array_values(array_filter($groupTelemetry, static fn ($g) => !empty($g['skipped'])));
+
+        // Overall failure: nothing ran (no groups had work to do, all
+        // skipped) OR all run-groups failed AND we have no merged fields.
+        if (count($groupsRun) > 0 && count($groupsSucceeded) === 0 && empty($allMerged)) {
+            $worst = $groupsRun[0] ?? [];
+
+            return $this->json([
+                'success' => false,
+                'error' => $worst['error'] ?? 'Document parsing failed for every field group.',
+                'documents_parsed' => count($allTexts),
+                'model' => $modelUsed ?? 'unknown',
+                'doc_chars' => mb_strlen($combinedText),
+                'groups' => $groupTelemetry,
+                'groups_total' => count($groupTelemetry),
+                'groups_succeeded' => 0,
+                'groups_skipped' => count($groupsSkipped),
+                'total_elapsed_ms' => $totalElapsedMs,
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+
+        return $this->json([
+            'success' => true,
+            'suggestions' => $allMerged,
+            'documents_parsed' => count($allTexts),
+            'model' => $modelUsed ?? 'unknown',
+            'doc_chars' => mb_strlen($combinedText),
+            'fields_returned' => count($allMerged),
+            'groups' => $groupTelemetry,
+            'groups_total' => count($groupTelemetry),
+            'groups_succeeded' => count($groupsSucceeded),
+            'groups_skipped' => count($groupsSkipped),
+            'total_elapsed_ms' => $totalElapsedMs,
+            'only_missing' => $onlyMissing,
+        ]);
+    }
+
+    /**
+     * Build the field-extraction prompt for a focused subset of fields.
+     * The rules block is constant, only the fields block changes per
+     * group. Pulled out of candidatesParseDocuments() so each group
+     * can render its own prompt with just its own fields, keeping
+     * the AI output small enough to fit in one response.
+     *
+     * Distinct from the legacy buildExtractionPrompt() helper used by
+     * the chat-message extraction path (different signature/purpose).
+     */
+    private function buildGroupedExtractionPrompt(
+        array $fieldsSubset,
+        string $combinedText,
+        string $extractionLanguageName,
+        ?string $groupContext = null,
+    ): string {
         $fieldDescriptions = [];
-        foreach ($fields as $field) {
+        foreach ($fieldsSubset as $field) {
             $type = $field['type'] ?? 'text';
-            $desc = $field['key'] . ' (' . $type . '): ' . ($field['label'] ?? $field['key']);
-            if (!empty($field['hint'])) {
-                $desc .= ' — ' . $field['hint'];
+            $key = (string) ($field['key'] ?? '');
+            $label = (string) ($field['label'] ?? $key);
+            // Header line: `key (type): label`
+            $lines = [$key . ' (' . $type . '): ' . $label];
+
+            // Rich semantic context (v3.7.2+). `description` is the
+            // primary disambiguator. `examples` anchor expected format.
+            // `negative_hint` rules out common confusions. Legacy
+            // `hint` continues to work as a short fallback when no
+            // description is present.
+            if (!empty($field['description'])) {
+                $lines[] = '  Description: ' . trim((string) $field['description']);
+            } elseif (!empty($field['hint'])) {
+                $lines[] = '  Description: ' . trim((string) $field['hint']);
+            }
+            if (!empty($field['examples']) && is_array($field['examples'])) {
+                $exQuoted = array_map(static fn ($e) => '"' . trim((string) $e) . '"', $field['examples']);
+                $lines[] = '  Examples: ' . implode(', ', $exQuoted);
+            }
+            if (!empty($field['negative_hint'])) {
+                $lines[] = '  NOT: ' . trim((string) $field['negative_hint']);
             }
             if (!empty($field['options'])) {
-                $desc .= ' [allowed values: ' . implode(', ', $field['options']) . ']';
+                $lines[] = '  Allowed values (return ONE of these or null): ' . implode(', ', $field['options']);
             }
-            if ($type === 'list') {
-                $desc .= ' [return as JSON array of strings]';
+            if ($type === 'list' && empty($field['options'])) {
+                $lines[] = '  Format: JSON array of strings, one entry per item.';
             }
+
             if ($type === 'table') {
                 $columns = $field['columns'] ?? [];
                 $colDescs = array_map(function ($c) {
-                    $key = (string) ($c['key'] ?? '');
-                    $label = (string) ($c['label'] ?? $key);
+                    $ck = (string) ($c['key'] ?? '');
+                    $cl = (string) ($c['label'] ?? $ck);
                     $colType = (string) ($c['type'] ?? 'text');
-                    return $key . ' (' . $label . ', type=' . $colType . ')';
+
+                    return $ck . ' (' . $cl . ', type=' . $colType . ')';
                 }, $columns);
                 $flatListCols = [];
                 $structuredListCols = [];
@@ -2011,35 +2627,34 @@ class SynaformController extends AbstractController
                         $flatListCols[] = (string) ($c['key'] ?? '');
                     }
                 }
-                $desc .= ' — columns: ' . implode(', ', $colDescs)
-                    . '. [return as JSON array of objects with these column keys]';
+                $lines[] = '  Columns: ' . implode(', ', $colDescs)
+                    . '. Return JSON array of objects with these column keys.';
                 if (!empty($flatListCols)) {
-                    $desc .= ' — the following columns must be JSON arrays of short strings, one bullet per item, no markdown, no dashes, no numbering: '
+                    $lines[] = '  These columns must be JSON arrays of short strings, one bullet per item, no markdown, no dashes, no numbering: '
                         . implode(', ', $flatListCols);
                 }
                 if (!empty($structuredListCols)) {
-                    $desc .= ' — the following columns are STRUCTURED HR-profile lists. Return a JSON array of strings that follow this pattern per position at the employer: '
-                        . '(1) optional date range header (e.g. "08/2024 – 07/2025") rendered as a bold sub-heading, '
-                        . '(2) the position title as a single string with no bullet prefix, '
-                        . '(3) one task per element afterwards. Use an empty string "" to separate two positions at the same employer. '
-                        . 'For a single-position station you may omit the date header — the first item is then the position title. '
-                        . 'Do NOT include "-", "•", "*" or numbering inside the strings; the renderer adds bullets automatically. '
-                        . 'Columns: ' . implode(', ', $structuredListCols);
+                    $lines[] = '  STRUCTURED HR-profile list columns: ' . implode(', ', $structuredListCols)
+                        . '. Each entry follows: (1) optional date range header (e.g. "08/2024 – 07/2025"), '
+                        . '(2) position title as a single string with no bullet prefix, '
+                        . '(3) one task per element afterwards. Use empty string "" to separate two positions at the same employer. '
+                        . 'For a single-position station you may omit the date header. '
+                        . 'Do NOT include "-", "•", "*" or numbering inside the strings; the renderer adds bullets automatically.';
                 }
             }
-            $fieldDescriptions[] = $desc;
+            $fieldDescriptions[] = implode("\n", $lines);
         }
 
         $fieldsBlock = implode("\n", array_map(fn ($d) => '- ' . $d, $fieldDescriptions));
+        $contextLine = $groupContext !== null && $groupContext !== ''
+            ? "Field group: {$groupContext}\n\n"
+            : '';
 
-        $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
-        $extractionLanguageName = $this->languageName($extractionLanguage);
-
-        $prompt = <<<PROMPT
+        return <<<PROMPT
         You are an assistant that extracts form field values from documents.
         Below are the form fields that need to be filled, followed by the document text.
 
-        IMPORTANT - Output language: All free-text string values you return MUST be
+        {$contextLine}IMPORTANT - Output language: All free-text string values you return MUST be
         written in {$extractionLanguageName}. If the source documents are in another
         language, translate descriptive text (job titles, summaries, list items,
         achievements, education descriptions, etc.) into {$extractionLanguageName}.
@@ -2065,32 +2680,259 @@ class SynaformController extends AbstractController
         {$combinedText}
         ---
 
-        Return ONLY a valid JSON object where keys are the field keys and values are the extracted data.
+        Return ONLY a valid JSON object where keys are the field keys (from the list above) and values are the extracted data. Do NOT include keys that are not in the list.
+        PROMPT;
+    }
+
+    /**
+     * "Filled" check used by the onlyMissing query param so we can skip
+     * groups that already have user-supplied values. Treats null,
+     * empty string, and empty arrays as unfilled. Booleans and
+     * numbers count as filled (a saved `false` checkbox is a real
+     * answer).
+     */
+    private function fieldValueIsFilled(mixed $v): bool
+    {
+        if ($v === null || $v === '') {
+            return false;
+        }
+        if (is_array($v)) {
+            return !empty($v);
+        }
+        return true;
+    }
+
+    /**
+     * Lazily compute and cache an AI-driven clustering of the form's
+     * fields into 3-7 logical extraction groups. Cached on the form
+     * itself, keyed by a hash of the field shape so the cache
+     * invalidates cleanly whenever the admin edits fields/types.
+     *
+     * On AI failure we fall back to a single all-fields group; the
+     * caller still gets a working extraction, just without per-group
+     * isolation benefits.
+     *
+     * @return array<int, array{key: string, label: string, field_keys: list<string>}>
+     */
+    private function getOrBuildExtractionGroups(int $userId, array &$form): array
+    {
+        $fields = $form['fields'] ?? [];
+        if (empty($fields)) {
+            return [];
+        }
+        $signature = $this->extractionGroupsSignature($fields);
+        $cached = $form['extraction_groups'] ?? null;
+        $cachedSig = $form['extraction_groups_signature'] ?? null;
+        if (is_array($cached) && !empty($cached) && $cachedSig === $signature) {
+            return $cached;
+        }
+
+        $groups = $this->askAiToClusterFields($fields, $userId);
+        if (empty($groups)) {
+            // Fallback: single all-fields group. Still passes through
+            // the new pipeline so per-group telemetry is consistent.
+            $groups = [[
+                'key' => 'all',
+                'label' => 'All fields',
+                'field_keys' => array_values(array_filter(
+                    array_map(static fn ($f) => (string) ($f['key'] ?? ''), $fields),
+                    static fn ($k) => $k !== ''
+                )),
+            ]];
+        }
+
+        // Persist the cache. We swallow set() errors silently — failing
+        // to cache is just a performance hit on the next call, not a
+        // correctness issue.
+        try {
+            $form['extraction_groups'] = $groups;
+            $form['extraction_groups_signature'] = $signature;
+            $form['extraction_groups_built_at'] = date('c');
+            $formId = (string) ($form['id'] ?? '');
+            if ($formId !== '') {
+                $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, $formId, $form);
+            }
+        } catch (\Throwable $e) {
+            $this->logger->warning('Synaform: failed to persist extraction_groups cache', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return $groups;
+    }
+
+    /**
+     * Hash the relevant shape of fields[] so we can detect when the
+     * admin has edited the form (added/removed/retyped a field) and
+     * needs the AI re-grouping refreshed.
+     */
+    private function extractionGroupsSignature(array $fields): string
+    {
+        $keys = [];
+        foreach ($fields as $f) {
+            $keys[] = ($f['key'] ?? '') . ':' . ($f['type'] ?? 'text');
+        }
+        sort($keys);
+
+        return sha1(implode('|', $keys));
+    }
+
+    /**
+     * Ask the AI to cluster the form's fields into 3-7 logical groups
+     * for parallel/incremental extraction. Returns
+     * `[{key, label, field_keys: [...]}, ...]`. Empty array on any
+     * failure mode (caller falls back to a single group).
+     *
+     * @return list<array{key: string, label: string, field_keys: list<string>}>
+     */
+    private function askAiToClusterFields(array $fields, int $userId): array
+    {
+        $list = [];
+        foreach ($fields as $f) {
+            $key = (string) ($f['key'] ?? '');
+            if ($key === '') {
+                continue;
+            }
+            $type = (string) ($f['type'] ?? 'text');
+            $label = (string) ($f['label'] ?? $key);
+            $entry = "{$key} (type={$type}, label=\"{$label}\")";
+            if ($type === 'table') {
+                $entry .= ' [TABLE — likely its own group due to output volume]';
+            }
+            $list[] = $entry;
+        }
+        if (empty($list)) {
+            return [];
+        }
+
+        $fieldsBlock = implode("\n", array_map(fn ($s) => '- ' . $s, $list));
+        $prompt = <<<PROMPT
+        You are organising a form definition into logical extraction groups.
+
+        We will run separate document-extraction AI calls per group, so each
+        group should be small enough that the JSON output for that group's
+        fields fits comfortably in a few thousand tokens, and each group
+        should contain semantically related fields that a person would fill
+        out together.
+
+        Guidelines:
+        - Aim for 3 to 7 groups.
+        - Group related fields together (personal info, contact, current job, target job, education, skills, mobility, history-table, etc.).
+        - Put each TABLE field in its own group — tables produce far more JSON output than scalar fields.
+        - Use lowercase snake_case keys (e.g. "personal_info", "contact", "work_history").
+        - Use short human labels (e.g. "Personal info", "Contact", "Work history").
+        - Every field key must appear in exactly ONE group.
+        - Do not invent field keys that are not in the list.
+
+        Form fields:
+        {$fieldsBlock}
+
+        Return ONLY valid JSON in this exact shape:
+        {"groups":[{"key":"...","label":"...","field_keys":["...","..."]}]}
         PROMPT;
 
         try {
             $messages = [
-                ['role' => 'system', 'content' => 'You are a precise document parsing assistant. Return only valid JSON.'],
+                ['role' => 'system', 'content' => 'You are an expert form designer. Return only valid JSON.'],
                 ['role' => 'user', 'content' => $prompt],
             ];
             $aiOptions = $this->resolveAiModelOptions($userId);
-            $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
-            $content = $result['content'] ?? '';
+            // Clustering output is tiny (just keys + labels) but
+            // Gemini 2.5+ Flash burns part of maxOutputTokens on
+            // hidden "thinking", so we keep a generous budget.
+            $aiOptions['max_tokens'] = 4000;
+            $aiOptions['reasoning_effort'] = 'minimal';
+            $aiOptions['temperature'] = 0;
 
+            $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+            $content = (string) ($result['content'] ?? '');
             $parsed = $this->parseJsonFromAiResponse($content);
-            if ($parsed === null) {
-                return $this->json(['success' => false, 'error' => 'Failed to parse AI response'], Response::HTTP_UNPROCESSABLE_ENTITY);
+            if (!is_array($parsed)) {
+                $this->logger->warning('Synaform: clustering AI returned unparseable response', [
+                    'model' => $result['model'] ?? 'unknown',
+                    'response_chars' => strlen($content),
+                    'raw_preview' => mb_substr($content, 0, 400),
+                ]);
+
+                return [];
             }
 
-            return $this->json([
-                'success' => true,
-                'suggestions' => $parsed,
-                'documents_parsed' => count($allTexts),
-                'model' => $result['model'] ?? 'unknown',
-            ]);
+            $rawGroups = $parsed['groups'] ?? null;
+            if (!is_array($rawGroups)) {
+                // Some models drop the wrapper and return the array
+                // directly. Accept that shape too.
+                $rawGroups = (array_is_list($parsed) ? $parsed : null);
+            }
+            if (!is_array($rawGroups) || empty($rawGroups)) {
+                $this->logger->warning('Synaform: clustering AI returned no groups', [
+                    'model' => $result['model'] ?? 'unknown',
+                    'parsed_keys' => is_array($parsed) ? array_keys($parsed) : null,
+                    'raw_preview' => mb_substr($content, 0, 400),
+                ]);
+
+                return [];
+            }
+
+            $allowedKeys = array_values(array_filter(
+                array_map(static fn ($f) => (string) ($f['key'] ?? ''), $fields),
+                static fn ($k) => $k !== ''
+            ));
+            $seen = [];
+            $clean = [];
+            foreach ($rawGroups as $g) {
+                if (!is_array($g)) {
+                    continue;
+                }
+                $gkey = (string) ($g['key'] ?? '');
+                $glabel = (string) ($g['label'] ?? $gkey);
+                $gfieldKeys = array_values(array_filter(
+                    array_map('strval', (array) ($g['field_keys'] ?? [])),
+                    static fn ($k) => $k !== ''
+                ));
+                $gfieldKeys = array_values(array_intersect($gfieldKeys, $allowedKeys));
+                $gfieldKeys = array_values(array_filter(
+                    $gfieldKeys,
+                    static function ($k) use (&$seen) {
+                        if (isset($seen[$k])) {
+                            return false;
+                        }
+                        $seen[$k] = true;
+
+                        return true;
+                    }
+                ));
+                if (empty($gfieldKeys)) {
+                    continue;
+                }
+                if ($gkey === '') {
+                    $gkey = 'group_' . (count($clean) + 1);
+                }
+                $clean[] = [
+                    'key' => $gkey,
+                    'label' => $glabel !== '' ? $glabel : $gkey,
+                    'field_keys' => $gfieldKeys,
+                ];
+            }
+
+            // If the AI dropped any keys, sweep the remainder into a
+            // catch-all group so they still get extracted. Better
+            // than silently losing fields.
+            $missing = array_values(array_diff($allowedKeys, array_keys($seen)));
+            if (!empty($missing)) {
+                $clean[] = [
+                    'key' => 'other',
+                    'label' => 'Other fields',
+                    'field_keys' => $missing,
+                ];
+            }
+
+            return $clean;
         } catch (\Throwable $e) {
-            $this->logger->error('Parse-documents failed', ['error' => $e->getMessage(), 'candidateId' => $candidateId]);
-            return $this->json(['success' => false, 'error' => 'Document parsing failed: ' . $e->getMessage()], Response::HTTP_INTERNAL_SERVER_ERROR);
+            $this->logger->warning('Synaform: askAiToClusterFields failed', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return [];
         }
     }
 
@@ -3662,16 +4504,23 @@ class SynaformController extends AbstractController
     /**
      * Fetch a URL and return plain-text content for AI consumption.
      *
-     * Best-effort, defensive: many public profile pages (LinkedIn in particular)
-     * gate behind JavaScript or a login wall. When this is the case we still
-     * return whatever HTML we managed to pull, along with an explanatory error.
-     * The AI prompt tolerates partial / noisy input, so even a partial snippet
-     * is more useful than nothing.
+     * Best-effort, defensive: many public profile pages (LinkedIn,
+     * Instagram, Facebook, X) **always** block unauthenticated
+     * server-side fetches — this is structural, not transient. We
+     * detect those hosts up front and return an actionable error
+     * instead of misleading the user with "rate-limited" language
+     * (which implies "wait and retry"; for these hosts retry never
+     * helps without a logged-in session). Open pages (GitHub,
+     * corporate sites, XING public profiles, Wikipedia, etc.) do
+     * work — the AI prompt tolerates partial / noisy input, so
+     * even a thin snippet is useful.
      *
      * @return array{0: ?string, 1: ?string}  [plainText|null, errorMessage|null]
      */
     private function fetchUrlText(string $url): array
     {
+        $host = strtolower((string) (parse_url($url, PHP_URL_HOST) ?? ''));
+
         $ch = curl_init();
         curl_setopt_array($ch, [
             CURLOPT_URL => $url,
@@ -3694,12 +4543,7 @@ class SynaformController extends AbstractController
         curl_close($ch);
 
         if ($raw === false || $raw === '') {
-            return [null, $err ?: 'Failed to fetch URL'];
-        }
-
-        $fetchError = null;
-        if ($status >= 400) {
-            $fetchError = 'HTTP ' . $status . ($status === 999 ? ' (rate-limited or login required)' : '');
+            return [null, $this->describeUrlFetchError($host, $status, $err ?: 'Failed to fetch URL')];
         }
 
         // Strip script/style/noscript blocks, then all tags. Collapse whitespace.
@@ -3718,11 +4562,90 @@ class SynaformController extends AbstractController
             $cleaned = substr($cleaned, 0, $cap) . "\n…[truncated]…";
         }
 
-        if ($cleaned === '') {
-            return [null, $fetchError ?? 'No extractable text'];
+        // Detect login-wall responses that come back HTTP 200 with
+        // essentially a sign-in shell (LinkedIn does this on certain
+        // CDNs even when 999 is not returned). Heuristic: very short
+        // content that looks like a login prompt.
+        $isWalledHost = $this->isLoginWalledHost($host);
+        $cleanedLen = function_exists('mb_strlen') ? mb_strlen($cleaned) : strlen($cleaned);
+        $looksLikeLoginShell = $isWalledHost && $cleanedLen < 600
+            && preg_match('/\b(sign in|log in|join now|anmelden|einloggen|connectez-vous)\b/i', $cleaned) === 1;
+
+        if ($status >= 400 || $looksLikeLoginShell) {
+            return [
+                $cleaned !== '' && !$looksLikeLoginShell ? $cleaned : null,
+                $this->describeUrlFetchError($host, $status, null),
+            ];
         }
 
-        return [$cleaned, $fetchError];
+        if ($cleaned === '') {
+            return [null, $this->describeUrlFetchError($host, $status, 'No extractable text')];
+        }
+
+        return [$cleaned, null];
+    }
+
+    /**
+     * Translate a (host, http_code, transport_error) tuple into a
+     * user-facing message that tells the user what to do next instead
+     * of just dumping a raw HTTP code. Honesty matters: calling a
+     * structural block "rate-limited" sends users into a retry loop
+     * that can never succeed.
+     */
+    private function describeUrlFetchError(string $host, int $status, ?string $transportError): string
+    {
+        $isLinkedIn = str_contains($host, 'linkedin.com');
+        $isInstagram = str_contains($host, 'instagram.com');
+        $isFacebook = str_contains($host, 'facebook.com') || str_contains($host, 'fb.com');
+        $isTwitter = $host === 'x.com' || str_ends_with($host, '.x.com')
+            || str_contains($host, 'twitter.com');
+
+        // 429 is the only HTTP code that genuinely means "wait and retry".
+        if ($status === 429) {
+            return 'The site rate-limited the fetch (HTTP 429). Try again in a minute.';
+        }
+
+        // LinkedIn 999, login walls, or any 4xx from these hosts are
+        // structural — retry never works without a logged-in session.
+        if ($isLinkedIn) {
+            return 'LinkedIn blocks server-side fetches of profile pages. Open the profile in your browser, choose “More → Save to PDF”, and upload the PDF as a CV instead. The URL stays attached as a reference.';
+        }
+        if ($isInstagram) {
+            return 'Instagram blocks server-side fetches. Take a screenshot of the profile and upload it as an additional document instead. The URL stays attached as a reference.';
+        }
+        if ($isFacebook) {
+            return 'Facebook blocks server-side fetches of profile pages. Save the page as PDF from your browser and upload it as an additional document instead. The URL stays attached as a reference.';
+        }
+        if ($isTwitter) {
+            return 'X (Twitter) blocks server-side fetches without authentication. Copy the relevant content into the description field, or take a screenshot. The URL stays attached as a reference.';
+        }
+
+        if ($status === 0 && $transportError) {
+            return 'Could not reach the URL: ' . $transportError;
+        }
+        if ($status >= 400) {
+            return 'The site returned HTTP ' . $status . ' — the page is not publicly readable by a server.';
+        }
+        if ($transportError) {
+            return $transportError;
+        }
+        return 'No extractable text on the page.';
+    }
+
+    /**
+     * Hosts that are known to redirect or anti-bot to a login wall.
+     * Used to flag short HTTP-200 responses that are really sign-in
+     * shells (no real profile content reached us).
+     */
+    private function isLoginWalledHost(string $host): bool
+    {
+        $needles = ['linkedin.com', 'instagram.com', 'facebook.com', 'x.com', 'twitter.com'];
+        foreach ($needles as $n) {
+            if (str_contains($host, $n)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function extractTextFromDocx(string $path): ?string
@@ -4972,6 +5895,27 @@ class SynaformController extends AbstractController
             }
             if (!empty($raw['hint'])) {
                 $field['hint'] = (string) $raw['hint'];
+            }
+            // Rich extraction context (v3.7.2+). All optional, all
+            // additive: existing forms keep working unchanged. These
+            // properties feed the per-group extraction prompt with
+            // semantic disambiguation that label-only forms can't
+            // provide ("target_position is the role being applied
+            // for, NOT the candidate's current job title").
+            if (!empty($raw['description'])) {
+                $field['description'] = (string) $raw['description'];
+            }
+            if (!empty($raw['negative_hint'])) {
+                $field['negative_hint'] = (string) $raw['negative_hint'];
+            }
+            if (!empty($raw['examples']) && is_array($raw['examples'])) {
+                $field['examples'] = array_values(array_filter(
+                    array_map(static fn ($e) => is_string($e) ? trim($e) : (string) $e, $raw['examples']),
+                    static fn ($e) => $e !== ''
+                ));
+                if (count($field['examples']) > 6) {
+                    $field['examples'] = array_slice($field['examples'], 0, 6);
+                }
             }
             if ($type === 'select' && !empty($raw['options']) && is_array($raw['options'])) {
                 $field['options'] = array_values(array_filter(array_map(static fn ($o) => is_string($o) ? $o : (string) $o, $raw['options'])));

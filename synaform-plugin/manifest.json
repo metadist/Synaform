@@ -21,6 +21,7 @@
     {"path": "/forms/{formId}", "method": "GET", "description": "Get form definition"},
     {"path": "/forms/{formId}", "method": "PUT", "description": "Update form definition"},
     {"path": "/forms/{formId}", "method": "DELETE", "description": "Delete form definition"},
+    {"path": "/forms/{formId}/enhance-fields", "method": "POST", "description": "Use AI to suggest description / examples / negative_hint for form fields. Returns suggestions; caller saves via PUT /forms/{formId}."},
     {"path": "/forms/import-parse", "method": "POST", "description": "Parse pasted text or DOCX into form fields using AI"},
     {"path": "/candidates", "method": "GET", "description": "List candidates"},
     {"path": "/candidates", "method": "POST", "description": "Create candidate"},

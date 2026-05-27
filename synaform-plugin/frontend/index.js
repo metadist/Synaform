@@ -96,6 +96,15 @@ export default {
         pastedParsing: false,
         pastedError: null,
         pastedFields: null,
+        // AI-suggest-from-docx progress: phased status while the
+        // multi-stage backend pipeline (extract → classify → propose
+        // per window → refine) runs. Mirrors the dataset-extract
+        // progress pattern below so the user sees motion + an elapsed
+        // counter instead of a stalled-looking spinner.
+        aiSuggestStep: 0,
+        aiSuggestStartedAt: null,
+        aiSuggestElapsedSec: 0,
+        aiSuggestTimer: null,
         fields: [],
         saving: false,
         error: null,
@@ -154,6 +163,20 @@ export default {
       variablesImportError: null,
       variablesImportText: "",
       expandedDesignerIdx: null,
+
+      // Polish-with-AI state. Holds the diff modal contents while
+      // the admin reviews AI-suggested description / examples /
+      // negative_hint per field. Selection map keyed by field key —
+      // pre-ticked for fields that had no description/examples
+      // before, since those are pure additions; un-ticked for fields
+      // where the AI is overwriting existing content.
+      polishLoading: false,
+      polishOpen: false,
+      polishResults: null,
+      polishSelected: {},
+      polishMeta: null,
+      polishApplying: false,
+      polishError: null,
 
       // Import from Target Template state
       variablesTplImportOpen: false,
@@ -384,9 +407,13 @@ export default {
       const palette = {
         success: { bg: "#f0fdf4", color: "#166534", border: "#bbf7d0" },
         error: { bg: "#fef2f2", color: "#991b1b", border: "#fecaca" },
+        warning: { bg: "#fffbeb", color: "#92400e", border: "#fde68a" },
         info: { bg: "#eff6ff", color: "#1e40af", border: "#bfdbfe" },
       };
       const p = palette[type] || palette.success;
+      // Warning toasts get extra dwell time — they usually carry
+      // actionable guidance the user needs to read fully.
+      const dwellMs = type === "warning" ? 9000 : 4500;
       const div = document.createElement("div");
       div.style.cssText = `position:fixed;top:16px;right:16px;z-index:9999;background:${p.bg};color:${p.color};border:1px solid ${p.border};padding:10px 18px;border-radius:8px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,.15);transition:opacity .3s;max-width:520px;`;
       div.textContent = msg;
@@ -394,7 +421,7 @@ export default {
       setTimeout(() => {
         div.style.opacity = "0";
         setTimeout(() => div.remove(), 300);
-      }, 4500);
+      }, dwellMs);
     }
 
     /**
@@ -1685,6 +1712,13 @@ export default {
         fromDocApplied: 0,
         fromDocTotal: 0,
         fromDocModel: null,
+        // Progress for the multi-stage AI pipeline that runs behind
+        // wizardAiSuggestFromDocx(). See the matching block in
+        // state.wizard initial state for purpose.
+        aiSuggestStep: 0,
+        aiSuggestStartedAt: null,
+        aiSuggestElapsedSec: 0,
+        aiSuggestTimer: null,
         fields: [],
         saving: false,
         error: null,
@@ -1858,6 +1892,28 @@ export default {
       w.templateUploading = true;
       w.templateError = null;
       w.suggestionsError = null;
+      // Backend pipeline this drives: extract → classify (1 AI call) →
+      // propose-per-window (1+ AI calls) → deterministic refine. Each
+      // stage advances aiSuggestStep so the UI can label progress
+      // instead of showing a single dumb spinner.
+      w.aiSuggestStep = 0;
+      w.aiSuggestStartedAt = Date.now();
+      w.aiSuggestElapsedSec = 0;
+      if (w.aiSuggestTimer) clearInterval(w.aiSuggestTimer);
+      w.aiSuggestTimer = setInterval(() => {
+        if (!w.templateUploading || !w.aiSuggestStartedAt) return;
+        w.aiSuggestElapsedSec = Math.round(
+          (Date.now() - w.aiSuggestStartedAt) / 1000,
+        );
+        // Time-based step nudges so the label keeps moving even
+        // though a single fetch can't tell us the real backend
+        // stage. Calibrated to the typical 15–30 s pipeline runtime.
+        const e = w.aiSuggestElapsedSec;
+        if (e >= 22) w.aiSuggestStep = Math.max(w.aiSuggestStep, 3);
+        else if (e >= 8) w.aiSuggestStep = Math.max(w.aiSuggestStep, 2);
+        else if (e >= 2) w.aiSuggestStep = Math.max(w.aiSuggestStep, 1);
+        render();
+      }, 1000);
       render();
       try {
         const res = await fetch(`${BASE}/templates/ai-suggest-from-docx`, {
@@ -1876,6 +1932,7 @@ export default {
           }
           throw new Error(msg);
         }
+        w.aiSuggestStep = 4;
         const body = await res.json();
         w.templateId = body.template.id;
         w.templateName = body.template.name;
@@ -1909,7 +1966,14 @@ export default {
       } catch (err) {
         w.templateError = err.message;
       } finally {
+        if (w.aiSuggestTimer) {
+          clearInterval(w.aiSuggestTimer);
+          w.aiSuggestTimer = null;
+        }
         w.templateUploading = false;
+        w.aiSuggestStep = 0;
+        w.aiSuggestStartedAt = null;
+        w.aiSuggestElapsedSec = 0;
         render();
       }
     }
@@ -2228,6 +2292,12 @@ export default {
       const uploadingLabel = isFromDoc
         ? T("wizard.from_doc_uploading")
         : T("templates.uploading");
+      const uploadingMarkup =
+        isFromDoc && uploading
+          ? renderWizardAiSuggestProgress()
+          : uploading
+            ? `<div class="text-sm tx-secondary"><span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full align-middle"></span> ${escHtml(uploadingLabel)}</div>`
+            : "";
       const dropAction = isFromDoc
         ? "wizard-from-doc-pick"
         : "wizard-template-pick";
@@ -2254,9 +2324,62 @@ export default {
                 <input type="file" data-action="${dropAction}" data-testid="wizard-template-file" accept=".docx" class="hidden" />
               </label>`
         }
-        ${uploading ? `<div class="text-sm tx-secondary"><span class="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full align-middle"></span> ${escHtml(uploadingLabel)}</div>` : ""}
+        ${uploadingMarkup}
         ${err ? `<div class="text-sm" style="color:var(--status-error)">${escHtml(err)}</div>` : ""}
         ${!hasTemplate && !isFromDoc ? `<button data-action="wizard-skip-template" data-testid="wizard-skip-template" class="tx-btn tx-btn-sm tx-btn-ghost">${T("wizard.template_skip")}</button>` : ""}
+      </div>`;
+    }
+
+    // Phased progress UI for the AI-suggest-from-docx pipeline.
+    // Drives both the template-upload step (renderWizardStepTemplate)
+    // and the fields step (renderWizardStepFieldsFromDoc) so the user
+    // gets the same "still working" feedback regardless of where they
+    // were sitting when the long-running call kicked off.
+    function renderWizardAiSuggestProgress() {
+      const w = state.wizard;
+      const steps = [
+        T("wizard.ai_suggest_step_upload"),
+        T("wizard.ai_suggest_step_extract"),
+        T("wizard.ai_suggest_step_propose"),
+        T("wizard.ai_suggest_step_finalize"),
+      ];
+      const step = w.aiSuggestStep || 0;
+      const elapsed = w.aiSuggestElapsedSec || 0;
+      // Calibrated to typical 1–3 page draft (~20 s pipeline).
+      // Bigger docs run longer; we cap the bar at 95 % so it never
+      // hits 100 % until the actual fetch resolves.
+      const expectedSec = 22;
+      const timeBasedPct = Math.min(
+        85,
+        Math.round((elapsed / expectedSec) * 85),
+      );
+      const pct = Math.max(15 + step * 22, timeBasedPct);
+      const cappedPct = Math.min(95, pct);
+      const statusLine =
+        step >= 3
+          ? T("wizard.ai_suggest_status_finalizing")
+          : step >= 2
+            ? T("wizard.ai_suggest_status_proposing")
+            : step >= 1
+              ? T("wizard.ai_suggest_status_extracting")
+              : T("wizard.ai_suggest_status_uploading");
+      return `<div class="mt-3 space-y-2" data-testid="wizard-ai-suggest-progress">
+        <div class="flex items-center justify-between gap-2 text-sm font-medium" style="color:var(--brand)">
+          <div class="flex items-center gap-2">
+            <div class="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent"></div>
+            ${T("wizard.ai_suggest_running")}
+          </div>
+          <span class="text-xs font-mono tx-secondary" aria-live="polite">${Tf("wizard.ai_suggest_elapsed", { seconds: elapsed })}</span>
+        </div>
+        <div class="w-full rounded-full h-2" style="background:var(--divider)">
+          <div class="h-2 rounded-full transition-all duration-700" style="width:${cappedPct}%;background:var(--brand)"></div>
+        </div>
+        <div class="flex justify-between text-xs tx-secondary">
+          ${steps.map((s, i) => `<span${i <= step ? ' style="color:var(--brand);font-weight:500"' : ""}>${escHtml(s)}</span>`).join("")}
+        </div>
+        <div class="text-xs tx-secondary">${escHtml(statusLine)}</div>
+        <div class="text-xs tx-secondary" style="opacity:0.85">${escHtml(T("wizard.ai_suggest_hint"))}</div>
+        <div class="text-xs" style="color:var(--status-warning,#d97706);opacity:0.9">${escHtml(T("wizard.ai_suggest_dont_close"))}</div>
       </div>`;
     }
 
@@ -2274,7 +2397,10 @@ export default {
     // by hand).
     function renderWizardStepFieldsFromDoc() {
       const w = state.wizard;
-      if (w.suggestionsLoading || w.templateUploading) {
+      if (w.templateUploading) {
+        return `<div class="py-2">${renderWizardAiSuggestProgress()}</div>`;
+      }
+      if (w.suggestionsLoading) {
         return `<div class="text-sm tx-secondary py-6 text-center">
           <span class="animate-spin inline-block w-5 h-5 border-2 border-current border-t-transparent rounded-full"></span>
           <p class="mt-2">${T("wizard.fields_detecting")}</p>
@@ -2915,6 +3041,7 @@ export default {
 
       if (state.variablesTplImportOpen) return renderVariablesTplImport(c);
       if (state.variablesImportOpen) return renderVariablesImport(c);
+      if (state.polishOpen) return renderPolishModal(c);
 
       const attachedTemplates = collectionTemplates(c);
       const hasTemplates = attachedTemplates.length > 0;
@@ -2933,6 +3060,7 @@ export default {
         <div class="flex items-center gap-2 flex-wrap">
           <button data-action="variables-import-template" class="tx-btn tx-btn-sm tx-btn-ghost" title="${escHtml(tplTitle)}"${hasTemplates ? "" : " disabled"}>${ICONS.doc} ${T("variables.import_from_template")}</button>
           <button data-action="variables-import" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("variables.import_hint")}">${ICONS.upload} ${T("variables.import_from_text")}</button>
+          <button data-action="variables-polish" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("variables.polish_hint")}"${fields.length === 0 || state.polishLoading ? " disabled" : ""}>${state.polishLoading ? `<span class="animate-spin inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full"></span>` : ICONS.sparkle} ${state.polishLoading ? T("variables.polish_running") : T("variables.polish_btn")}</button>
           <button data-action="add-variable" class="tx-btn tx-btn-sm">${ICONS.plus} ${T("variables.new_field")}</button>
         </div>
       </div>`;
@@ -2989,6 +3117,40 @@ export default {
       </span>`;
     }
 
+    /**
+     * Compact, read-only summary of the AI-extraction context attached
+     * to a field (description / examples / negative_hint). Lets the
+     * admin see at a glance which fields have rich context vs which
+     * are running on label-only. Editing happens via "Polish with AI".
+     */
+    function renderFieldAiContext(fd) {
+      const desc = (fd.description || "").trim();
+      const negHint = (fd.negative_hint || "").trim();
+      const examples = Array.isArray(fd.examples) ? fd.examples.filter(Boolean) : [];
+      if (!desc && !negHint && examples.length === 0) {
+        return "";
+      }
+      const descLine = desc
+        ? `<div class="text-xs tx-secondary"><span class="font-medium">${T("variables.polish_field_description")}:</span> ${escHtml(desc)}</div>`
+        : "";
+      const exLine = examples.length
+        ? `<div class="text-xs tx-secondary"><span class="font-medium">${T("variables.polish_field_examples")}:</span> ${examples
+            .map(
+              (e) =>
+                `<span class="tx-badge" style="background:var(--bg-chip);color:var(--txt-secondary);font-family:monospace">${escHtml(e)}</span>`,
+            )
+            .join(" ")}</div>`
+        : "";
+      const negLine = negHint
+        ? `<div class="text-xs" style="color:var(--status-warning,#d97706)"><span class="font-medium">${T("variables.polish_field_negative_hint")}:</span> ${escHtml(negHint)}</div>`
+        : "";
+      return `<div class="space-y-1 px-2 py-1.5 rounded" style="background:var(--bg-app);border-left:2px solid var(--brand-alpha-light)">
+        ${descLine}
+        ${exLine}
+        ${negLine}
+      </div>`;
+    }
+
     function renderVariableEditor(fd, idx) {
       const fields = state.variablesDraft || [];
       const total = fields.length;
@@ -3040,6 +3202,7 @@ export default {
           <input name="fh_${idx}" value="${escHtml(fd.hint || "")}" placeholder="${T("variables.field_hint")}" class="tx-input text-xs" />
           <button type="button" class="tx-help-trigger mt-1" title="${T("variables.field_hint_info")}">${ICONS.question}</button>
         </div>
+        ${renderFieldAiContext(fd)}
         ${
           showDesigner
             ? `<div style="border-top:1px dashed var(--divider);padding-top:.5rem">
@@ -3196,6 +3359,114 @@ export default {
         </div>
         <p class="text-xs tx-secondary mb-1">${T("variables.column_type_hint")}</p>
         <div class="space-y-1.5">${colRows}</div>
+      </div>`;
+    }
+
+    /**
+     * Diff modal for AI-suggested variable polish. Shows current vs
+     * proposed description / examples / negative_hint per field with
+     * per-field accept toggles. The admin selects what to apply, and
+     * the apply step PUTs the merged fields[] back to /forms/{id}.
+     */
+    function renderPolishModal(c) {
+      const r = state.polishResults || { enhancements: [] };
+      const enhancements = Array.isArray(r.enhancements) ? r.enhancements : [];
+      const sel = state.polishSelected || {};
+      const meta = state.polishMeta || {};
+
+      const groundedLine = meta.filename
+        ? `<div class="text-xs tx-secondary">${ICONS.doc} ${escHtml(Tf("variables.polish_grounded_in", { filename: meta.filename }))}</div>`
+        : `<div class="text-xs tx-secondary">${ICONS.info} ${escHtml(T("variables.polish_no_sample"))}</div>`;
+
+      const errorBlock = state.polishError
+        ? `<div class="tx-callout" style="background:color-mix(in srgb, var(--status-error) 12%, var(--bg-card));color:var(--status-error)">${escHtml(state.polishError)}</div>`
+        : "";
+
+      const renderExamples = (arr) => {
+        if (!Array.isArray(arr) || arr.length === 0) {
+          return `<span class="text-xs tx-secondary italic">${T("variables.polish_no_examples")}</span>`;
+        }
+        return arr
+          .map(
+            (e) =>
+              `<span class="tx-badge" style="background:var(--bg-chip);color:var(--txt-secondary);font-family:monospace">${escHtml(e)}</span>`,
+          )
+          .join(" ");
+      };
+
+      const fmtCell = (label, current, suggested, accent = "var(--brand)") => {
+        const same =
+          (current || "").toString().trim() ===
+          (suggested || "").toString().trim();
+        const sugLine = same
+          ? `<div class="text-xs tx-secondary italic">${T("variables.polish_no_change")}</div>`
+          : `<div class="text-xs" style="color:${accent}">${escHtml(suggested || "—")}</div>`;
+        return `<div class="space-y-1">
+          <div class="text-xs font-medium tx-secondary uppercase tracking-wide">${escHtml(label)}</div>
+          <div class="text-xs tx-secondary">${escHtml(current || "—")}</div>
+          <div style="height:1px;background:var(--divider)"></div>
+          ${sugLine}
+        </div>`;
+      };
+
+      const fmtExamplesCell = (current, suggested) => {
+        const a = JSON.stringify(Array.isArray(current) ? current : []);
+        const b = JSON.stringify(Array.isArray(suggested) ? suggested : []);
+        const same = a === b;
+        return `<div class="space-y-1">
+          <div class="text-xs font-medium tx-secondary uppercase tracking-wide">${T("variables.polish_field_examples")}</div>
+          <div>${renderExamples(current)}</div>
+          <div style="height:1px;background:var(--divider)"></div>
+          ${same ? `<div class="text-xs tx-secondary italic">${T("variables.polish_no_change")}</div>` : `<div>${renderExamples(suggested)}</div>`}
+        </div>`;
+      };
+
+      const rows = enhancements.length
+        ? enhancements
+            .map((en, i) => {
+              const checked = !!sel[en.key];
+              return `<div class="tx-row p-3 space-y-2" data-polish-key="${escHtml(en.key)}">
+                <div class="flex items-center gap-2">
+                  <input type="checkbox" data-action="polish-toggle" data-key="${escHtml(en.key)}" ${checked ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
+                  <div class="flex-1 min-w-0">
+                    <div class="font-medium text-sm">${escHtml(en.label || en.key)}</div>
+                    <div class="text-xs tx-secondary font-mono">${escHtml(en.key)} · ${escHtml(en.type || "text")}</div>
+                  </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  ${fmtCell(T("variables.polish_field_description"), en.current?.description || en.current?.hint || "", en.suggested?.description || "")}
+                  ${fmtExamplesCell(en.current?.examples || [], en.suggested?.examples || [])}
+                  ${fmtCell(T("variables.polish_field_negative_hint"), en.current?.negative_hint || "", en.suggested?.negative_hint || "", "var(--status-warning,#d97706)")}
+                </div>
+              </div>`;
+            })
+            .join("")
+        : `<div class="tx-card p-6 text-center">
+            <div class="inline-flex items-center justify-center w-10 h-10 rounded-full mb-2" style="background:var(--bg-chip);color:var(--txt-secondary)">${ICONS.info}</div>
+            <p class="text-sm tx-secondary">${T("variables.polish_empty")}</p>
+          </div>`;
+
+      const selectedCount = enhancements.filter((e) => sel[e.key]).length;
+
+      return `<div class="space-y-3" data-testid="polish-modal">
+        <div class="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <div class="flex items-center gap-2">
+              <h3 class="text-lg font-semibold">${ICONS.sparkle} ${T("variables.polish_modal_title")}</h3>
+            </div>
+            <p class="text-sm tx-secondary mt-1" style="max-width:640px">${T("variables.polish_modal_subtitle")}</p>
+            ${groundedLine}
+            ${meta.model ? `<div class="text-xs tx-secondary">${T("datasets.extract_model")}: <span class="font-mono">${escHtml(meta.model)}</span> · ${meta.elapsed_ms ?? 0} ms</div>` : ""}
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button data-action="polish-select-all" class="tx-btn tx-btn-sm tx-btn-ghost"${enhancements.length === 0 ? " disabled" : ""}>${T("variables.polish_accept_all")}</button>
+            <button data-action="polish-select-none" class="tx-btn tx-btn-sm tx-btn-ghost"${enhancements.length === 0 ? " disabled" : ""}>${T("variables.polish_select_none")}</button>
+            <button data-action="polish-cancel" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.cancel")}</button>
+            <button data-action="polish-apply" class="tx-btn tx-btn-sm"${selectedCount === 0 || state.polishApplying ? " disabled" : ""}>${state.polishApplying ? T("app.loading") : Tf("variables.polish_apply", { n: selectedCount })}</button>
+          </div>
+        </div>
+        ${errorBlock}
+        <div class="space-y-2" style="max-height:60vh;overflow-y:auto">${rows}</div>
       </div>`;
     }
 
@@ -4333,18 +4604,29 @@ export default {
           const statusIcon = ok
             ? `<span style="color:var(--status-success)" title="${T("datasets.url_fetched")}">${ICONS.check}</span>`
             : warning
-              ? `<span style="color:var(--status-error)" title="${escHtml(u.fetch_error || "")}">${ICONS.warning}</span>`
+              ? `<span style="color:var(--status-warning,#d97706)" title="${escHtml(u.fetch_error || "")}">${ICONS.warning}</span>`
               : `<span style="color:var(--status-warning,#d97706)" title="${escHtml(u.fetch_error || "")}">${ICONS.warning}</span>`;
           const kindBadge = u.kind
             ? `<span class="tx-badge" style="background:var(--bg-chip);color:var(--txt-secondary)">${escHtml(u.kind)}</span>`
             : "";
-          return `<div class="flex items-center gap-2 py-1.5 group">
-            ${statusIcon}
-            <a href="${escHtml(u.url)}" target="_blank" rel="noopener noreferrer" class="text-xs flex-1 truncate tx-link" title="${escHtml(u.url)}">${escHtml(u.label || u.host || u.url)}</a>
-            ${kindBadge}
-            ${u.text_snippet ? `<span class="text-xs tx-secondary">${u.text_snippet.length.toLocaleString()} chars</span>` : ""}
-            <button data-action="refresh-url" data-url-index="${i}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)" title="${T("datasets.url_refetch")}">${ICONS.refresh || ICONS.sparkle}</button>
-            <button data-action="delete-source-file" data-slot="urls" data-slot-index="${i}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)">${ICONS.trash}</button>
+          // Render `fetch_error` as an inline subtitle (not just a
+          // hover tooltip) so users with hosts like LinkedIn that
+          // structurally block server fetches actually see the
+          // guidance and don't sit retrying.
+          const errorRow =
+            u.fetch_error && !u.text_snippet
+              ? `<div class="text-xs pl-6 pb-1.5" style="color:var(--status-warning,#d97706);line-height:1.35">${escHtml(u.fetch_error)}</div>`
+              : "";
+          return `<div class="group">
+            <div class="flex items-center gap-2 py-1.5">
+              ${statusIcon}
+              <a href="${escHtml(u.url)}" target="_blank" rel="noopener noreferrer" class="text-xs flex-1 truncate tx-link" title="${escHtml(u.url)}">${escHtml(u.label || u.host || u.url)}</a>
+              ${kindBadge}
+              ${u.text_snippet ? `<span class="text-xs tx-secondary">${u.text_snippet.length.toLocaleString()} chars</span>` : ""}
+              <button data-action="refresh-url" data-url-index="${i}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)" title="${T("datasets.url_refetch")}">${ICONS.refresh || ICONS.sparkle}</button>
+              <button data-action="delete-source-file" data-slot="urls" data-slot-index="${i}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)">${ICONS.trash}</button>
+            </div>
+            ${errorRow}
           </div>`;
         })
         .join("");
@@ -4376,7 +4658,13 @@ export default {
         const elapsed = state.datasetParseElapsedSec || 0;
         const fileCount = state.datasetParseFileCount || 0;
         const hasImages = !!state.datasetParseHasImages;
-        const expectedSec = Math.max(8, fileCount * (hasImages ? 12 : 4));
+        // Group-aware estimate: typical CV form has 5-7 groups × ~3 s
+        // per group AI call ≈ 15-25 s. Image-heavy uploads add Vision
+        // OCR rounds on top.
+        const expectedSec = Math.max(
+          14,
+          (hasImages ? fileCount * 12 : 0) + 18,
+        );
         const timeBasedPct = Math.min(
           85,
           Math.round((elapsed / expectedSec) * 85),
@@ -5408,6 +5696,146 @@ export default {
           render();
         },
       );
+
+      // --- Polish with AI ---
+      // Calls /forms/{id}/enhance-fields, then opens the diff modal so
+      // the admin can review and accept per-field. The merged fields
+      // are saved via the existing PUT /forms/{id} on apply.
+      el.querySelector('[data-action="variables-polish"]')?.addEventListener(
+        "click",
+        async () => {
+          const draft = state.variablesDraft || c.fields || [];
+          if (draft.length === 0) return;
+          state.polishLoading = true;
+          state.polishError = null;
+          render();
+          try {
+            await refreshAccessToken();
+            const res = await api(`/forms/${c.id}/enhance-fields`, {
+              method: "POST",
+              body: JSON.stringify({}),
+            });
+            if (!res.success) {
+              throw new Error(res.error || T("variables.polish_failed_generic"));
+            }
+            const enhancements = Array.isArray(res.enhancements)
+              ? res.enhancements
+              : [];
+            state.polishResults = { enhancements };
+            state.polishMeta = {
+              model: res.model,
+              elapsed_ms: res.elapsed_ms,
+              filename: res.sample?.filename || null,
+              candidate_id: res.sample?.candidate_id || null,
+            };
+            // Pre-tick rows where the AI is purely *adding* (current
+            // had no description and no examples). Leave un-ticked
+            // when the AI would overwrite something the admin
+            // already authored.
+            state.polishSelected = {};
+            for (const en of enhancements) {
+              const cur = en.current || {};
+              const isPureAdd =
+                !cur.description &&
+                !cur.hint &&
+                (!Array.isArray(cur.examples) || cur.examples.length === 0) &&
+                !cur.negative_hint;
+              state.polishSelected[en.key] = isPureAdd;
+            }
+            state.polishOpen = true;
+          } catch (err) {
+            showToast(
+              Tf("variables.polish_failed", { error: err.message }),
+              "warning",
+            );
+          }
+          state.polishLoading = false;
+          render();
+        },
+      );
+
+      el.querySelectorAll('[data-action="polish-toggle"]').forEach((cb) => {
+        cb.addEventListener("change", () => {
+          const k = cb.dataset.key;
+          state.polishSelected[k] = cb.checked;
+          render();
+        });
+      });
+      el.querySelector('[data-action="polish-select-all"]')?.addEventListener(
+        "click",
+        () => {
+          const ens = state.polishResults?.enhancements || [];
+          state.polishSelected = Object.fromEntries(ens.map((e) => [e.key, true]));
+          render();
+        },
+      );
+      el.querySelector('[data-action="polish-select-none"]')?.addEventListener(
+        "click",
+        () => {
+          state.polishSelected = {};
+          render();
+        },
+      );
+      el.querySelector('[data-action="polish-cancel"]')?.addEventListener(
+        "click",
+        () => {
+          state.polishOpen = false;
+          state.polishResults = null;
+          state.polishSelected = {};
+          state.polishMeta = null;
+          state.polishError = null;
+          render();
+        },
+      );
+      el.querySelector('[data-action="polish-apply"]')?.addEventListener(
+        "click",
+        async () => {
+          ensureDraft();
+          const ens = state.polishResults?.enhancements || [];
+          const selected = ens.filter((e) => state.polishSelected[e.key]);
+          if (selected.length === 0) return;
+          // Merge accepted suggestions into the draft fields. Each
+          // accepted field gets its description / examples /
+          // negative_hint replaced with the AI's suggestion (we don't
+          // try to merge — admin opted in to overwrite).
+          const byKey = new Map(selected.map((e) => [e.key, e]));
+          state.variablesDraft = state.variablesDraft.map((f) => {
+            const en = byKey.get(f.key);
+            if (!en) return f;
+            const out = { ...f };
+            if (en.suggested.description) out.description = en.suggested.description;
+            if (Array.isArray(en.suggested.examples) && en.suggested.examples.length) {
+              out.examples = en.suggested.examples;
+            }
+            if (en.suggested.negative_hint) out.negative_hint = en.suggested.negative_hint;
+            return out;
+          });
+          state.variablesDirty = true;
+          state.polishApplying = true;
+          state.polishError = null;
+          render();
+          try {
+            await api(`/forms/${c.id}`, {
+              method: "PUT",
+              body: JSON.stringify({ fields: state.variablesDraft }),
+            });
+            state.variablesDraft = null;
+            state.variablesDirty = false;
+            state.polishOpen = false;
+            state.polishResults = null;
+            state.polishSelected = {};
+            state.polishMeta = null;
+            await fetchForms();
+            showToast(
+              Tf("variables.polish_done", { count: selected.length }),
+            );
+          } catch (err) {
+            state.polishError = err.message;
+          }
+          state.polishApplying = false;
+          render();
+        },
+      );
       el.querySelectorAll('[data-action="variables-import-close"]').forEach(
         (btn) =>
           btn.addEventListener("click", () => {
@@ -6311,11 +6739,16 @@ export default {
             showToast(T("datasets.url_added"));
             const hasSnippet = res.url?.text_snippet;
             if (!hasSnippet && res.url?.fetch_error) {
+              // Not a hard failure — the URL is still attached as a
+              // reference. A toast plus the inline subtitle on the
+              // row gives the user the actionable guidance (e.g.
+              // "Save the LinkedIn profile as PDF") without yelling
+              // at them with a red error toast.
               showToast(
                 Tf("datasets.url_fetch_warning", {
                   error: res.url.fetch_error,
                 }),
-                "error",
+                "warning",
               );
             }
           } catch (err) {
@@ -6435,14 +6868,96 @@ export default {
             state.datasetParseStep = 3;
             render();
             if (parseRes && parseRes.success && parseRes.suggestions) {
-              const merged = { ...(d.field_values || {}) };
-              for (const [k, v] of Object.entries(parseRes.suggestions)) {
-                if (v !== null && v !== undefined && v !== "") merged[k] = v;
+              const sug = parseRes.suggestions;
+              // Defensive guard: a malformed AI response (top-level
+              // array, primitive, etc.) used to be silently spread
+              // into field_values, producing numeric-keyed garbage
+              // that broke template generation. Treat anything that
+              // isn't a plain object as a parse failure.
+              const isPlainObject =
+                sug &&
+                typeof sug === "object" &&
+                !Array.isArray(sug) &&
+                Object.prototype.toString.call(sug) === "[object Object]";
+              const baseline =
+                d.field_values &&
+                typeof d.field_values === "object" &&
+                !Array.isArray(d.field_values)
+                  ? d.field_values
+                  : {};
+              if (!isPlainObject) {
+                showToast(
+                  T("datasets.parse_unusable_shape") ||
+                    "AI returned a response we couldn't apply to the form.",
+                  "warning",
+                );
+              } else {
+                const merged = { ...baseline };
+                for (const [k, v] of Object.entries(sug)) {
+                  if (v !== null && v !== undefined && v !== "") merged[k] = v;
+                }
+                await api(`/candidates/${d.id}`, {
+                  method: "PUT",
+                  body: JSON.stringify({ field_values: merged }),
+                });
               }
-              await api(`/candidates/${d.id}`, {
-                method: "PUT",
-                body: JSON.stringify({ field_values: merged }),
-              });
+            } else if (parseRes && !parseRes.success) {
+              // Surface the diagnostic backend hint instead of a
+              // silent "no changes" — users couldn't tell why nothing
+              // updated.
+              const msg = parseRes.error || T("datasets.parse_failed");
+              showToast(msg, "warning");
+            }
+            // Group-extraction telemetry (v3.7.1+). Backend returns a
+            // `groups` array describing which logical clusters of
+            // fields succeeded, were skipped (already filled), or
+            // failed. We surface this as a console table for power
+            // users + a richer success toast so partial extractions
+            // are visible. Older backends without grouped extraction
+            // simply won't have these fields and the block is a no-op.
+            if (parseRes && Array.isArray(parseRes.groups)) {
+              try {
+                console.table(
+                  parseRes.groups.map((g) => ({
+                    group: g.label || g.key,
+                    fields: `${g.fields_returned ?? 0}/${g.fields_in_group ?? 0}`,
+                    status: g.skipped
+                      ? `skipped (${g.reason || "filled"})`
+                      : g.succeeded
+                        ? "ok"
+                        : `failed: ${g.error || "unknown"}`,
+                    elapsed_ms: g.elapsed_ms ?? 0,
+                  })),
+                );
+              } catch (_) {
+                /* console.table missing */
+              }
+              const groupsTotal = parseRes.groups_total ?? parseRes.groups.length;
+              const groupsOk = parseRes.groups_succeeded ?? 0;
+              const groupsSkipped = parseRes.groups_skipped ?? 0;
+              const failedGroups = parseRes.groups.filter(
+                (g) => !g.skipped && !g.succeeded,
+              );
+              if (failedGroups.length > 0) {
+                showToast(
+                  Tf("datasets.parse_partial", {
+                    ok: groupsOk,
+                    total: groupsTotal,
+                    failed: failedGroups
+                      .map((g) => g.label || g.key)
+                      .join(", "),
+                  }),
+                  "warning",
+                );
+              } else if (groupsSkipped > 0) {
+                showToast(
+                  Tf("datasets.parse_summary_skipped", {
+                    ok: groupsOk,
+                    skipped: groupsSkipped,
+                    total: groupsTotal,
+                  }),
+                );
+              }
             }
             const upd = await api(`/candidates/${d.id}`);
             state.selectedDataset = upd.candidate;
