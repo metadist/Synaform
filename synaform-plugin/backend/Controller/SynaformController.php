@@ -2293,13 +2293,33 @@ class SynaformController extends AbstractController
 
         $candidateDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         $allTexts = [];
+        // OCR cache stats reported back in the response. The cache
+        // lives on each file's metadata (`files.cv.ocr_cache` or
+        // `files.additional[i].ocr_cache`) keyed by SHA-1 of the
+        // file bytes — so re-uploading the same file (different
+        // bytes → different hash) auto-invalidates, and a re-run
+        // of parse-documents on unchanged files skips Vision/Tika
+        // entirely. Image OCR is the dominant cost on phone-scan
+        // workflows; caching turns 5–15s vision calls into 0ms.
+        $cacheStats = ['hits' => 0, 'misses' => 0];
+        $candidateDirty = false;
 
         if (!empty($entry['files']['cv'])) {
             $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
             $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
             try {
-                [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+                [$text, $cMeta] = $this->extractTextWithFileCache(
+                    $entry['files']['cv'],
+                    $candidateDir,
+                    $relativePath,
+                    $ext,
+                    $userId,
+                    $cacheStats,
+                );
+                if (!empty($cMeta['cache_updated'])) {
+                    $candidateDirty = true;
+                }
                 if (!empty(trim((string) $text))) {
                     $allTexts[] = '=== Primary Document (' . ($entry['files']['cv']['filename'] ?? $storedAs) . ') ===' . "\n" . $text;
                 }
@@ -2308,7 +2328,8 @@ class SynaformController extends AbstractController
             }
         }
 
-        foreach ($entry['files']['additional'] ?? [] as $doc) {
+        $additional = $entry['files']['additional'] ?? [];
+        foreach ($additional as $idx => $doc) {
             $storedAs = $doc['stored_as'] ?? '';
             if (empty($storedAs) || !is_file($candidateDir . '/' . $storedAs)) {
                 continue;
@@ -2316,13 +2337,31 @@ class SynaformController extends AbstractController
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
             $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
             try {
-                [$text] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+                [$text, $cMeta] = $this->extractTextWithFileCache(
+                    $entry['files']['additional'][$idx],
+                    $candidateDir,
+                    $relativePath,
+                    $ext,
+                    $userId,
+                    $cacheStats,
+                );
+                if (!empty($cMeta['cache_updated'])) {
+                    $candidateDirty = true;
+                }
                 if (!empty(trim((string) $text))) {
                     $allTexts[] = '=== Document (' . ($doc['filename'] ?? $storedAs) . ') ===' . "\n" . $text;
                 }
             } catch (\Throwable $e) {
                 $this->logger->warning('Parse-documents: failed to extract doc text', ['error' => $e->getMessage(), 'file' => $storedAs]);
             }
+        }
+
+        // Persist the candidate if any file got a fresh OCR result
+        // cached. Doing it once after all files are processed keeps
+        // the write count at most O(1) per parse-documents call.
+        if ($candidateDirty) {
+            $entry['updated_at'] = date('c');
+            $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
         }
 
         foreach ($entry['files']['urls'] ?? [] as $urlEntry) {
@@ -2435,11 +2474,39 @@ class SynaformController extends AbstractController
                 $groupLabel,
             );
 
-            // Per-group max_tokens scales with group size. A 5-field
-            // group fits in ~2-3 k tokens; tables (stations) need
-            // headroom but rarely > 8 k. Cap keeps Gemini's thinking
-            // budget bounded so we can't truncate inside one group.
-            $maxTokens = max(2000, min(8000, count($subset) * 800));
+            // Per-group max_tokens, type-aware. Token consumption
+            // varies by field type so a uniform per-field budget
+            // either truncates or wastes tokens:
+            //   - text/select/date/number/checkbox: ~200 tokens each
+            //   - list (e.g. relevant_positions, other_skills):
+            //       ~1500 tokens — array of 5–10 sentence-length items
+            //   - table (e.g. stations):
+            //       ~16000 tokens flat — multi-row, multi-column,
+            //       multi-line details. Always uses the full budget.
+            // We sum the per-field allowance with a 2000-token base
+            // for prompt overhead. Higher caps cost nothing on success
+            // and prevent mid-stream truncation under Gemini's
+            // thinking budget.
+            $perFieldBudget = 200;
+            $hasTable = false;
+            $maxTokens = 2000;
+            foreach ($subset as $sf) {
+                $t = $sf['type'] ?? 'text';
+                if ($t === 'table') {
+                    $hasTable = true;
+                    continue;
+                }
+                $maxTokens += ($t === 'list') ? 1500 : $perFieldBudget;
+            }
+            if ($hasTable) {
+                // A table dominates the output budget regardless of
+                // sibling fields in the same group. Capping table
+                // groups separately keeps the prompt-control logic
+                // cleaner downstream.
+                $maxTokens = 16000;
+            } else {
+                $maxTokens = min($maxTokens, 12000);
+            }
 
             $started = microtime(true);
             try {
@@ -2477,6 +2544,8 @@ class SynaformController extends AbstractController
                         'error' => $content === '' ? 'empty AI response' : 'unparseable AI response',
                         'response_chars' => strlen($content),
                         'elapsed_ms' => $elapsedMs,
+                        'raw_preview' => mb_substr($content, 0, 400),
+                        'max_tokens' => $maxTokens,
                     ];
                     continue;
                 }
@@ -2555,7 +2624,94 @@ class SynaformController extends AbstractController
             'groups_skipped' => count($groupsSkipped),
             'total_elapsed_ms' => $totalElapsedMs,
             'only_missing' => $onlyMissing,
+            'ocr_cache' => $cacheStats,
         ]);
+    }
+
+    /**
+     * Cached wrapper around FileProcessor::extractText().
+     *
+     * Each candidate file (CV or additional) carries an `ocr_cache`
+     * dict on its metadata: `{hash: sha1, text: <extracted>, cached_at,
+     * strategy, bytes}`. On every parse-documents (or extract) call we
+     * sha1 the file bytes; if the hash matches the cache we skip the
+     * extraction entirely (saves ~5–15s for image OCR, ~1–3s for Tika).
+     * If the file gets re-uploaded, its bytes change and the hash
+     * mismatches → cache invalidates automatically.
+     *
+     * The cache is bounded at 200k chars per file to keep plugin_data
+     * rows reasonable; if extraction yields more than that we don't
+     * cache (rare, only for very long PDFs) — extraction still works,
+     * just not cached.
+     *
+     * @param array<string, mixed>  $fileMeta     Reference to the file's metadata entry
+     * @param array<string, int>    $cacheStats   Reference to ['hits' => int, 'misses' => int]
+     *
+     * @return array{0: string, 1: array<string, mixed>}  [extractedText, meta-with-cache_hit/cache_updated]
+     */
+    private function extractTextWithFileCache(
+        array &$fileMeta,
+        string $candidateDir,
+        string $relativePath,
+        string $ext,
+        int $userId,
+        array &$cacheStats,
+    ): array {
+        $storedAs = (string) ($fileMeta['stored_as'] ?? '');
+        $absolutePath = $candidateDir . '/' . $storedAs;
+        if ($storedAs === '' || !is_file($absolutePath)) {
+            // No file on disk — fall through to the underlying call so
+            // its existing error handling kicks in. Don't bump cache
+            // counters; this isn't a cache decision.
+            [$text, $meta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+            return [is_string($text) ? $text : '', is_array($meta) ? $meta : []];
+        }
+
+        $hash = @sha1_file($absolutePath);
+        if ($hash === false || $hash === '') {
+            // Hash failure — fall through, no cache state change.
+            [$text, $meta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+            return [is_string($text) ? $text : '', is_array($meta) ? $meta : []];
+        }
+
+        $cache = $fileMeta['ocr_cache'] ?? null;
+        if (
+            is_array($cache)
+            && ($cache['hash'] ?? '') === $hash
+            && isset($cache['text'])
+            && is_string($cache['text'])
+        ) {
+            $cacheStats['hits']++;
+            return [
+                $cache['text'],
+                ['strategy' => 'ocr_cache', 'cache_hit' => true, 'cache_updated' => false],
+            ];
+        }
+
+        $cacheStats['misses']++;
+        [$text, $meta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
+        $textStr = is_string($text) ? $text : '';
+        $metaArr = is_array($meta) ? $meta : [];
+
+        $cacheUpdated = false;
+        // Only cache substantive results — empty/failed extractions
+        // shouldn't be sticky, otherwise a transient Vision blip would
+        // poison the cache and stay null forever.
+        if (trim($textStr) !== '' && mb_strlen($textStr) <= 200000) {
+            $fileMeta['ocr_cache'] = [
+                'hash' => $hash,
+                'text' => $textStr,
+                'cached_at' => date('c'),
+                'strategy' => $metaArr['strategy'] ?? null,
+                'bytes' => strlen($textStr),
+            ];
+            $cacheUpdated = true;
+        }
+
+        return [
+            $textStr,
+            $metaArr + ['cache_hit' => false, 'cache_updated' => $cacheUpdated],
+        ];
     }
 
     /**
@@ -2681,6 +2837,11 @@ class SynaformController extends AbstractController
         ---
 
         Return ONLY a valid JSON object where keys are the field keys (from the list above) and values are the extracted data. Do NOT include keys that are not in the list.
+        STRICT output format:
+        - Output a single JSON object — nothing before or after it. No prose, no commentary.
+        - No markdown: no triple-backtick fences, no asterisk bullets, no leading "- ", no headings.
+        - For "list" fields, the value MUST be a JSON array of strings (e.g. ["item one","item two"]). NEVER emit "* item" or "- item" markdown — only JSON arrays.
+        - All strings use double quotes; escape internal double quotes with \\".
         PROMPT;
     }
 
