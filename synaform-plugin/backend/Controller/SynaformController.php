@@ -2265,11 +2265,22 @@ class SynaformController extends AbstractController
                 ['role' => 'user', 'content' => $prompt],
             ];
             $aiOptions = $this->resolveAiModelOptions($userId);
+            // Career histories with many positions (one row per role/period)
+            // can produce long JSON. The provider default (4096) truncates
+            // the response mid-object, which then fails to parse. Give the
+            // extraction generous headroom.
+            $aiOptions['max_tokens'] = 16000;
             $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
             $content = $result['content'] ?? '';
 
             $extracted = $this->parseJsonFromAiResponse($content);
             if ($extracted === null) {
+                $this->logger->warning('Synaform extraction: AI response did not parse as JSON', [
+                    'candidateId' => $candidateId,
+                    'content_chars' => strlen($content),
+                    'tail' => mb_substr($content, -160),
+                ]);
+
                 return $this->json(['success' => false, 'error' => 'Failed to parse AI extraction result'], Response::HTTP_UNPROCESSABLE_ENTITY);
             }
 
@@ -2993,6 +3004,7 @@ class SynaformController extends AbstractController
         - If the source uses "Label: Value" patterns (e.g. "Position: …", "Tätigkeit: …", "Rolle: …", "Aufgaben: …", "Branche: …", "Zeitraum: …", "Firma: …", "Arbeitgeber: …"), return ONLY the value. NEVER include the label itself in the field value.
         - Each fact belongs to exactly ONE field. When two fields could plausibly hold the same value (e.g. a position name appears in both `current_position` and inside a `stations` row), use the field whose description fits best and leave the other shorter / abstract / empty rather than echoing the same string verbatim.
         - For row-table fields like `stations`, the bullet entries (column with type=list) must be ACTIVITY descriptions. NEVER repeat the row's `position`, `employer`, or `time` value as a bullet; those are already in their own columns. In particular, the FIRST bullet must NOT be the position title or start with the position title (even if the source CV's job line "Interim-CTO at Vicoland - 5 team" reads naturally as a bullet — split that line: extract "Interim-CTO" into the `position` column, "Vicoland" into `employer`, "5 team" or any concrete metric into a separate bullet, and drop everything that's redundant). Each bullet stands on its own as a verb-led achievement or responsibility, e.g. "Aufbau einer cloudbasierten Sicherheits-Lösung", not "CTO bei Vicoland — Aufbau einer Sicherheits-Lösung".
+        - For `stations` specifically: create ONE row per POSITION / PERIOD, NOT per employer. If one employer had several roles or sub-periods over time, output a SEPARATE row for EACH (repeat the `employer`; set `time`, `position` and `details` for that role only). Never merge an employer's multiple roles into one row or pack several periods into a single row. EXCLUDE education from `stations` — school, Abitur / Fachabitur, university degrees, vocational training (Ausbildung / Lehre) and short school internships (Schülerpraktikum / Praktikum) belong in the `education` field, not in `stations`.
 
         Form fields:
         {$fieldsBlock}
@@ -4544,25 +4556,29 @@ class SynaformController extends AbstractController
             into {$languageName}. Proper nouns (people, company names, cities), email
             addresses, phone numbers, URLs and dates stay verbatim.
 
-            Rules for the `stations` array (career history) — these prevent
-            duplicated text in the generated Word document:
-              - One station entry per EMPLOYER, in reverse-chronological order.
-              - `time` is the OUTER time-range of that employment.
-              - `position` is the OUTER job title; if the employer had several
-                consecutive titles, join them with " / ".
-              - `details` is the body block. It MUST NOT start with the same
-                value as `time` or `position` — never repeat the outer header.
-                Begin `details` directly with the first bullet / sentence.
-              - When the employment had multiple sub-periods with different
-                titles, render each sub-period inside `details` as:
-                    <blank line>
-                    MM/YYYY – MM/YYYY
-                    Sub-period title
-                    - bullet 1
-                    - bullet 2
-                Always separate consecutive sub-periods with a blank line.
-              - For the FIRST sub-period inside a station, no leading blank
-                line is needed (since `details` itself starts there).
+            Rules for the `stations` array (career history) — these keep each
+            role clean and prevent duplicated text in the generated document:
+              - Create ONE entry per POSITION / PERIOD, in reverse-chronological
+                order. If the SAME employer had several roles or sub-periods
+                over time, output a SEPARATE entry for EACH role/period and
+                repeat the `employer` name in every one. NEVER merge multiple
+                roles of one employer into a single entry, and never pack
+                several periods into one `details` block.
+              - `time` is the date range of THAT specific role/period
+                (e.g. "10/2022 – heute"), NOT the employer's overall span.
+              - `employer` is the company name, repeated across that
+                employer's rows.
+              - `position` is the single job title held during that period.
+              - `details` contains ONLY the activities/achievements for THAT
+                role, as separate bullet lines. It MUST NOT repeat the `time`,
+                `employer`, or `position` values, and MUST NOT contain another
+                period's content. Begin `details` directly with the first
+                bullet / sentence — no date header line, no title line.
+              - EXCLUDE education from `stations`: school, Abitur / Fachabitur,
+                university degrees, vocational training (Ausbildung / Lehre),
+                and short school internships (Schülerpraktikum / Praktikum) are
+                NOT career stations. Put schooling and degrees in the
+                `education` field only and omit them from `stations` entirely.
 
             Fields to extract:
             {$fieldsBlock}
@@ -6633,6 +6649,13 @@ class SynaformController extends AbstractController
             $fallback = $field['fallback'] ?? null;
             if ($fallback !== null && $fallback !== '') {
                 $sources[$key]['fallback'] = $fallback;
+            } elseif ($primary === 'form') {
+                // Honour the documented contract ("fill what you know, let
+                // AI extract the rest"): a form-sourced field with no
+                // explicit fallback still picks up AI-extracted data. The
+                // fallback only fires when the manually entered form value
+                // is empty, so user input always wins.
+                $sources[$key]['fallback'] = 'ai';
             }
         }
 
@@ -6772,6 +6795,13 @@ class SynaformController extends AbstractController
             $scannedKeys[$key] = true;
             $primarySource = $field['source'] ?? 'form';
             $fallbackSource = $field['fallback'] ?? null;
+            // Mirror getVariableSources(): a form-sourced table/list with no
+            // explicit fallback still falls back to AI-extracted rows, so
+            // repeating groups (e.g. `stations`) fill from extraction when
+            // the user hasn't entered them by hand.
+            if (($fallbackSource === null || $fallbackSource === '') && $primarySource === 'form') {
+                $fallbackSource = 'ai';
+            }
 
             $val = $overrides[$key] ?? null;
             if ($val === null) {
