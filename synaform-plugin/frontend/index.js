@@ -2988,7 +2988,7 @@ export default {
       };
 
       return `<div class="space-y-1">
-        ${aiRow(T("dashboard.ai_chat_label"), ai.chat || {}, T("dashboard.ai_chat_role"), "CHAT")}
+        ${aiRow(T("dashboard.ai_chat_label"), ai.analyze || {}, T("dashboard.ai_chat_role"), "ANALYZE")}
         ${aiRow(T("dashboard.ai_vision_label"), ai.vision || {}, T("dashboard.ai_vision_role"), "PIC2TEXT")}
         <div class="flex items-center justify-between gap-3 px-3 py-2 mt-2 rounded-md" style="background:var(--bg-app)">
           <div class="min-w-0 flex-1">
@@ -6283,7 +6283,7 @@ export default {
 
       // "Configure model" / "Change model" buttons inside the System
       // Info card. Each one points at the synaplan AI Models settings
-      // page with the right capability highlighted (CHAT / PIC2TEXT).
+      // page with the right capability highlighted (ANALYZE / PIC2TEXT).
       // We use pushState + a synthetic popstate so the host SPA's
       // Vue Router picks up the change without a full reload.
       el.querySelectorAll('[data-action="open-ai-settings"]').forEach((btn) =>

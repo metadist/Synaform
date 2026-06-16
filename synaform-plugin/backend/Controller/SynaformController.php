@@ -218,14 +218,17 @@ class SynaformController extends AbstractController
         ];
 
         // AI configuration. Both rows resolve the user's actual saved
-        // selection: chat reads BCONFIG.DEFAULTMODEL.CHAT, vision reads
-        // BCONFIG.DEFAULTMODEL.PIC2TEXT (the row the synaplan settings UI
-        // writes when the user picks "Bilderkennung (Bild → Text)").
+        // selection: the text-analytics model reads
+        // BCONFIG.DEFAULTMODEL.ANALYZE (the "Text Analytics" entry in the
+        // synaplan model collection) with a CHAT fallback — exactly what
+        // resolveAiModelOptions() / core's FileAnalysisHandler run. Vision
+        // reads BCONFIG.DEFAULTMODEL.PIC2TEXT (the row the synaplan settings
+        // UI writes when the user picks "Bilderkennung (Bild → Text)").
         // Provider is derived from the BMODELS row of the saved model id,
-        // so what we display matches what AiFacade::analyzeImage now
-        // actually calls.
-        $chatModelId = $this->modelConfigService->getDefaultModel('CHAT', $userId);
-        $chatProvider = $chatModelId ? $this->modelConfigService->getProviderForModel((int) $chatModelId) : null;
+        // so what we display matches what synaform actually calls.
+        $analyzeModelId = $this->modelConfigService->getDefaultModel('ANALYZE', $userId)
+            ?? $this->modelConfigService->getDefaultModel('CHAT', $userId);
+        $analyzeProvider = $analyzeModelId ? $this->modelConfigService->getProviderForModel((int) $analyzeModelId) : null;
 
         $picTextModelId = $this->modelConfigService->getDefaultModel('PIC2TEXT', $userId);
         $picTextProvider = $picTextModelId
@@ -234,13 +237,13 @@ class SynaformController extends AbstractController
         $picTextModelName = $picTextModelId ? $this->modelConfigService->getModelName((int) $picTextModelId) : null;
 
         $ai = [
-            'chat' => [
-                'provider' => $chatProvider,
-                'model_id' => $chatModelId,
-                'model_name' => $chatModelId ? $this->modelConfigService->getModelName((int) $chatModelId) : null,
+            'analyze' => [
+                'provider' => $analyzeProvider,
+                'model_id' => $analyzeModelId,
+                'model_name' => $analyzeModelId ? $this->modelConfigService->getModelName((int) $analyzeModelId) : null,
                 'role' => 'information_processing',
                 'description' => 'Runs the AI prompts behind "Read files & auto-fill" and the variable-resolution extraction step. Called once per dataset, after all source documents have been turned into text.',
-                'recommended' => $this->recommendedModelsFor('chat', (int) ($chatModelId ?? 0)),
+                'recommended' => $this->recommendedModelsFor('chat', (int) ($analyzeModelId ?? 0)),
             ],
             'vision' => [
                 'provider' => $picTextProvider,
@@ -6753,15 +6756,15 @@ class SynaformController extends AbstractController
 
     private function resolveAiModelOptions(int $userId): array
     {
-        $modelId = $this->modelConfigService->getDefaultModel('CHAT', $userId);
-        if ($modelId) {
-            return [
-                'model' => $this->modelConfigService->getModelName($modelId),
-                'provider' => $this->modelConfigService->getProviderForModel($modelId),
-            ];
-        }
-
-        $modelId = $this->modelConfigService->getDefaultModel('CHAT', 0);
+        // synaform's "read files & auto-fill" extraction is a text-analytics
+        // workload, so honour synaplan's dedicated DEFAULTMODEL.ANALYZE
+        // capability (the "Text Analytics" entry in the model collection)
+        // first, then fall back to CHAT. This mirrors core's
+        // FileAnalysisHandler (ANALYZE → CHAT). getDefaultModel() already
+        // cascades user-scope → global (ownerId=0), so a single call per
+        // capability covers both.
+        $modelId = $this->modelConfigService->getDefaultModel('ANALYZE', $userId)
+            ?? $this->modelConfigService->getDefaultModel('CHAT', $userId);
         if ($modelId) {
             return [
                 'model' => $this->modelConfigService->getModelName($modelId),
