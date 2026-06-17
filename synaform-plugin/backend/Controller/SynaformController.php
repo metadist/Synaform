@@ -9322,6 +9322,21 @@ class SynaformController extends AbstractController
             }
         }
 
+        // Trailing spacer — one empty paragraph after the whole block. Each
+        // station row ends with its details block, so without this the next
+        // position's date/title line is glued directly onto the previous
+        // position's last bullet ("the next position is directly attached to
+        // the one above"). Emitting a single blank paragraph gives the
+        // "empty line after list blocks" separation the HR profile expects.
+        // We reuse $plainPPr (host pPr minus bullet numPr) so the blank
+        // line's height matches the surrounding cell, and only the structured
+        // positions/details path goes through here — flat skill lists
+        // (languages, other_skills, benefits) render via renderBulletList()
+        // and are intentionally left without a trailing blank line.
+        if ($out !== '') {
+            $out .= '<w:p>' . $plainPPr . '</w:p>';
+        }
+
         return $out;
     }
 
