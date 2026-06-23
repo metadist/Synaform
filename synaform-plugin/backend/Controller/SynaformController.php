@@ -6756,6 +6756,24 @@ class SynaformController extends AbstractController
 
     private function resolveAiModelOptions(int $userId): array
     {
+        // Per-plugin override first: when the user pins a specific model in
+        // Settings (P_synaform.extraction_model = a numeric BMODELS id), it
+        // wins over the global capability defaults. A faster, non-reasoning
+        // model here (e.g. Gemini Flash) keeps the single-call extraction
+        // path below its acceptance gate instead of dropping to the slow
+        // grouped fallback. "default"/empty/unknown id ignores the override.
+        $override = $this->configRepository->getValue($userId, self::CONFIG_GROUP, 'extraction_model');
+        if (is_string($override) && ctype_digit($override)) {
+            $overrideId = (int) $override;
+            $overrideName = $this->modelConfigService->getModelName($overrideId);
+            if ($overrideName !== null) {
+                return [
+                    'model' => $overrideName,
+                    'provider' => $this->modelConfigService->getProviderForModel($overrideId),
+                ];
+            }
+        }
+
         // synaform's "read files & auto-fill" extraction is a text-analytics
         // workload, so honour synaplan's dedicated DEFAULTMODEL.ANALYZE
         // capability (the "Text Analytics" entry in the model collection)
