@@ -125,6 +125,8 @@ export default {
       datasetParseFileCount: 0,
       datasetParseHasImages: false,
       datasetParseTimer: null,
+      datasetParseStatusMsgs: [],
+      datasetParseStatusIdx: 0,
       datasetVariables: null,
       datasetVariablesLoading: false,
       selectedGenerateTemplate: null,
@@ -1941,7 +1943,8 @@ export default {
           body.template.placeholders?.length ??
           0;
         w.fromDocApplied = body.applied_count || 0;
-        w.fromDocTotal = body.suggestion_count || (body.suggestions || []).length;
+        w.fromDocTotal =
+          body.suggestion_count || (body.suggestions || []).length;
         w.fromDocModel = body.model || null;
         // Reshape into the same envelope renderWizardStepFields*()
         // expects, so existing save/select code keeps working unchanged.
@@ -2031,10 +2034,7 @@ export default {
       // same `suggestions` envelope; the only difference is fromDoc never
       // marks duplicates (each AI suggestion gets a fresh slot) and carries
       // a `source_text`/`applied`/`applied_reason` we strip before saving.
-      if (
-        (w.mode === "template" || w.mode === "fromDoc") &&
-        w.suggestions
-      ) {
+      if ((w.mode === "template" || w.mode === "fromDoc") && w.suggestions) {
         chosen = (w.suggestions.suggestions || [])
           .map((s, i) => ({ s, i }))
           .filter(
@@ -3126,7 +3126,9 @@ export default {
     function renderFieldAiContext(fd) {
       const desc = (fd.description || "").trim();
       const negHint = (fd.negative_hint || "").trim();
-      const examples = Array.isArray(fd.examples) ? fd.examples.filter(Boolean) : [];
+      const examples = Array.isArray(fd.examples)
+        ? fd.examples.filter(Boolean)
+        : [];
       if (!desc && !negHint && examples.length === 0) {
         return "";
       }
@@ -4661,18 +4663,20 @@ export default {
         // Group-aware estimate: typical CV form has 5-7 groups × ~3 s
         // per group AI call ≈ 15-25 s. Image-heavy uploads add Vision
         // OCR rounds on top.
-        const expectedSec = Math.max(
-          14,
-          (hasImages ? fileCount * 12 : 0) + 18,
-        );
+        const expectedSec = Math.max(14, (hasImages ? fileCount * 12 : 0) + 18);
         const timeBasedPct = Math.min(
           85,
           Math.round((elapsed / expectedSec) * 85),
         );
         const pct = Math.max(15 + step * 25, timeBasedPct);
         const cappedPct = Math.min(95, pct);
-        const statusLine =
-          step >= 2
+        // Live, single-line feedback: walk the actual field labels while the
+        // request is in flight (built in the parse-documents handler). Falls
+        // back to the generic stage text on older state / empty forms.
+        const msgs = state.datasetParseStatusMsgs || [];
+        const dynamicLine = msgs.length
+          ? msgs[Math.min(state.datasetParseStatusIdx || 0, msgs.length - 1)]
+          : step >= 2
             ? T("datasets.analyze_status_running_ai")
             : Tf("datasets.analyze_status_reading_files", { count: fileCount });
         const hintLine = hasImages
@@ -4689,10 +4693,13 @@ export default {
           <div class="w-full rounded-full h-2" style="background:var(--divider)">
             <div class="h-2 rounded-full transition-all duration-700" style="width:${cappedPct}%;background:var(--brand)"></div>
           </div>
+          <div class="flex items-center gap-2 text-sm font-medium" style="color:var(--brand)" aria-live="polite">
+            <span class="inline-block w-1.5 h-1.5 rounded-full animate-pulse" style="background:var(--brand)"></span>
+            <span class="truncate">${escHtml(dynamicLine)}</span>
+          </div>
           <div class="flex justify-between text-xs tx-secondary">
             ${steps.map((s, i) => `<span${i <= step ? ' style="color:var(--brand);font-weight:500"' : ""}>${s}</span>`).join("")}
           </div>
-          <div class="text-xs tx-secondary">${escHtml(statusLine)}</div>
           <div class="text-xs tx-secondary" style="opacity:0.85">${escHtml(hintLine)}</div>
           <div class="text-xs" style="color:var(--status-warning,#d97706);opacity:0.9">${escHtml(T("datasets.analyze_dont_close"))}</div>
         </div>`;
@@ -5716,7 +5723,9 @@ export default {
               body: JSON.stringify({}),
             });
             if (!res.success) {
-              throw new Error(res.error || T("variables.polish_failed_generic"));
+              throw new Error(
+                res.error || T("variables.polish_failed_generic"),
+              );
             }
             const enhancements = Array.isArray(res.enhancements)
               ? res.enhancements
@@ -5765,7 +5774,9 @@ export default {
         "click",
         () => {
           const ens = state.polishResults?.enhancements || [];
-          state.polishSelected = Object.fromEntries(ens.map((e) => [e.key, true]));
+          state.polishSelected = Object.fromEntries(
+            ens.map((e) => [e.key, true]),
+          );
           render();
         },
       );
@@ -5803,11 +5814,16 @@ export default {
             const en = byKey.get(f.key);
             if (!en) return f;
             const out = { ...f };
-            if (en.suggested.description) out.description = en.suggested.description;
-            if (Array.isArray(en.suggested.examples) && en.suggested.examples.length) {
+            if (en.suggested.description)
+              out.description = en.suggested.description;
+            if (
+              Array.isArray(en.suggested.examples) &&
+              en.suggested.examples.length
+            ) {
               out.examples = en.suggested.examples;
             }
-            if (en.suggested.negative_hint) out.negative_hint = en.suggested.negative_hint;
+            if (en.suggested.negative_hint)
+              out.negative_hint = en.suggested.negative_hint;
             return out;
           });
           state.variablesDirty = true;
@@ -5826,9 +5842,7 @@ export default {
             state.polishSelected = {};
             state.polishMeta = null;
             await fetchForms();
-            showToast(
-              Tf("variables.polish_done", { count: selected.length }),
-            );
+            showToast(Tf("variables.polish_done", { count: selected.length }));
           } catch (err) {
             state.polishError = err.message;
           }
@@ -6825,18 +6839,50 @@ export default {
             if (dot < 0) return false;
             return imageExts.includes(name.slice(dot + 1).toLowerCase());
           });
+          // Build a live, per-variable status line from the collection's
+          // own field labels so the user sees concrete progress ("Looking
+          // for «Vorname»…", "Sorting table entries: «Stations»…") rather
+          // than a single static spinner. The backend POST is opaque (no
+          // streaming), so we drive the line on the elapsed-time timer.
+          const parseColl = collectionById(d.form_id);
+          const parseFields = (parseColl && parseColl.fields) || [];
+          const statusMsgs = [T("datasets.analyze_status_reading")];
+          for (const f of parseFields) {
+            const name = (f && (f.label || f.key)) || "";
+            if (!name) continue;
+            statusMsgs.push(
+              f && f.type === "table"
+                ? Tf("datasets.analyze_status_table", { name })
+                : Tf("datasets.analyze_status_field", { name }),
+            );
+          }
+          statusMsgs.push(T("datasets.analyze_status_finalizing"));
+
           state.datasetParsing = true;
           state.datasetParseStep = 0;
           state.datasetParseStartedAt = Date.now();
           state.datasetParseElapsedSec = 0;
           state.datasetParseFileCount = fileCount;
           state.datasetParseHasImages = hasImages;
+          state.datasetParseStatusMsgs = statusMsgs;
+          state.datasetParseStatusIdx = 0;
           if (state.datasetParseTimer) clearInterval(state.datasetParseTimer);
           state.datasetParseTimer = setInterval(() => {
             if (!state.datasetParsing || !state.datasetParseStartedAt) return;
             state.datasetParseElapsedSec = Math.round(
               (Date.now() - state.datasetParseStartedAt) / 1000,
             );
+            // Walk the live status line through the field list while we wait,
+            // but hold on the last field message (one before "finalizing")
+            // until the request actually returns — at which point step 3
+            // pins it to the closing "finalizing/matching" message.
+            const msgs = state.datasetParseStatusMsgs || [];
+            if (
+              msgs.length > 2 &&
+              state.datasetParseStatusIdx < msgs.length - 2
+            ) {
+              state.datasetParseStatusIdx += 1;
+            }
             render();
           }, 1000);
           render();
@@ -6866,6 +6912,12 @@ export default {
               console.warn("[synaform] extract endpoint failed", eRes.__error);
             }
             state.datasetParseStep = 3;
+            // Pin the live status line to the closing "matching variables"
+            // message now that both AI round-trips have returned.
+            if ((state.datasetParseStatusMsgs || []).length) {
+              state.datasetParseStatusIdx =
+                state.datasetParseStatusMsgs.length - 1;
+            }
             render();
             if (parseRes && parseRes.success && parseRes.suggestions) {
               const sug = parseRes.suggestions;
@@ -6932,7 +6984,8 @@ export default {
               } catch (_) {
                 /* console.table missing */
               }
-              const groupsTotal = parseRes.groups_total ?? parseRes.groups.length;
+              const groupsTotal =
+                parseRes.groups_total ?? parseRes.groups.length;
               const groupsOk = parseRes.groups_succeeded ?? 0;
               const groupsSkipped = parseRes.groups_skipped ?? 0;
               const failedGroups = parseRes.groups.filter(
@@ -6976,6 +7029,8 @@ export default {
           state.datasetParseElapsedSec = 0;
           state.datasetParseFileCount = 0;
           state.datasetParseHasImages = false;
+          state.datasetParseStatusMsgs = [];
+          state.datasetParseStatusIdx = 0;
           render();
         },
       );
