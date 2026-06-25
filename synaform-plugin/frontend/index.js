@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.5.0";
+const TX_VERSION = "v3.7.1";
 // Combined with TX_VERSION when fetching plugin assets (i18n bundles, etc.)
 // to defeat stale browser caches whenever a new build of index.js is loaded.
 // The host (PluginView.vue) already cache-busts index.js itself with
@@ -4403,7 +4403,7 @@ export default {
       } else {
         inner = `<form id="tx-entry-data-form" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           ${fields.map((f) => renderFormFieldWithValue(f, formData[f.key])).join("")}
-          <div class="sm:col-span-2"><button type="submit" class="tx-btn tx-btn-sm">${T("app.save")}</button></div>
+          <div style="grid-column:1 / -1"><button type="submit" class="tx-btn tx-btn-sm">${T("app.save")}</button></div>
         </form>`;
       }
       return `<div class="tx-card p-5">
@@ -4429,11 +4429,19 @@ export default {
       const hint = field.hint
         ? `<p class="tx-hint">${escHtml(field.hint)}</p>`
         : "";
+      // Wide fields span the FULL grid width. We use an inline grid-column
+      // style instead of Tailwind's `sm:col-span-2`: the host purges utility
+      // classes it doesn't use itself, and the plugin's runtime-injected markup
+      // isn't scanned — so `sm:col-span-2` silently no-ops and tables get
+      // squeezed into a single column. `grid-column:1 / -1` always spans every
+      // column at any breakpoint (including the 1-column mobile layout).
       const wideTypes = ["textarea", "list", "table", "image"];
-      const span = wideTypes.includes(field.type) ? "sm:col-span-2" : "";
+      const spanAttr = wideTypes.includes(field.type)
+        ? ' style="grid-column:1 / -1"'
+        : "";
 
       if (field.type === "checkbox") {
-        return `<div class="${span}">
+        return `<div${spanAttr}>
           <label class="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" id="${fid}" name="${escHtml(field.key)}" ${value === true || value === "true" || value === "Ja" ? "checked" : ""} class="rounded h-4 w-4" style="accent-color:var(--brand)" />
             <span class="text-sm font-medium">${escHtml(field.label || field.key)}${reqMark}</span>
@@ -4449,7 +4457,7 @@ export default {
             ? `${BASE}/candidates/${d.id}/image/${encodeURIComponent(field.key)}?v=${encodeURIComponent(meta.uploaded_at || "")}`
             : null;
         const hasImage = !!thumbUrl;
-        return `<div class="${span}">
+        return `<div${spanAttr}>
           ${label}
           <div class="flex items-start gap-3 p-3 rounded" style="background:var(--bg-app);border:1px dashed var(--divider)">
             <div style="width:96px;height:120px;flex:none;background:var(--bg-card);border-radius:.375rem;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--txt-secondary)">
@@ -4587,7 +4595,7 @@ export default {
         default:
           input = `<input type="text" id="${fid}" name="${escHtml(field.key)}" value="${escHtml(String(value ?? ""))}" class="tx-input" ${req} />`;
       }
-      return `<div class="${span}">${label}${input}${hint}</div>`;
+      return `<div${spanAttr}>${label}${input}${hint}</div>`;
     }
 
     function renderDatasetFilesSection(d) {
