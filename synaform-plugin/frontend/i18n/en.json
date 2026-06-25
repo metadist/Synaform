@@ -298,6 +298,7 @@
     "sort_newest": "Newest first",
     "sort_oldest": "Oldest first",
     "no_results": "No datasets match your search.",
+    "no_files": "No files uploaded yet.",
     "doc_uploaded": "Document uploaded",
     "doc_missing": "No document",
     "confirm_delete": "Delete this dataset and all of its data?",

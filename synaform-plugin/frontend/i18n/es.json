@@ -298,6 +298,7 @@
     "sort_newest": "M\u00e1s recientes",
     "sort_oldest": "M\u00e1s antiguos",
     "no_results": "No hay datasets que coincidan.",
+    "no_files": "A\u00fan no se han subido archivos.",
     "doc_uploaded": "Documento subido",
     "doc_missing": "Sin documento",
     "confirm_delete": "\u00bfEliminar este dataset y todos sus datos?",

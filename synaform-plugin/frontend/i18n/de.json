@@ -298,6 +298,7 @@
     "sort_newest": "Neueste zuerst",
     "sort_oldest": "\u00c4lteste zuerst",
     "no_results": "Keine Datens\u00e4tze gefunden.",
+    "no_files": "Noch keine Dateien hochgeladen.",
     "doc_uploaded": "Dokument hochgeladen",
     "doc_missing": "Kein Dokument",
     "confirm_delete": "Diesen Datensatz und alle zugeh\u00f6rigen Daten l\u00f6schen?",

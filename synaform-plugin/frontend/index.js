@@ -4724,7 +4724,7 @@ export default {
           </div>`
         : "";
 
-      return `<div class="tx-card p-5">
+      return `<div class="tx-card p-5" id="tx-source-card">
         <div class="flex items-center gap-2 mb-3">
           <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2">${ICONS.file} ${T("datasets.section_files")}</h4>
           <span class="text-xs tx-secondary">— ${T("datasets.section_files_hint")}</span>
@@ -4733,7 +4733,7 @@ export default {
         <div class="mt-3 flex items-center gap-2 flex-wrap">
           <label class="tx-btn tx-btn-sm tx-btn-ghost cursor-pointer">
             ${ICONS.upload} ${all.length ? T("datasets.upload_more") : T("datasets.upload_doc")}
-            <input type="file" id="tx-doc-upload" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.tiff,.tif,.bmp,.txt,.rtf,.odt,.xls,.xlsx,.pptx" multiple class="hidden" />
+            <input type="file" id="tx-doc-upload" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.tiff,.tif,.bmp,.txt,.rtf,.odt,.xls,.xlsx,.pptx,.eml,.msg" multiple class="hidden" />
           </label>
           <button data-action="toggle-url-form" class="tx-btn tx-btn-sm tx-btn-ghost">
             ${ICONS.link || ICONS.sparkle} ${T("datasets.url_add_btn")}
@@ -6666,27 +6666,54 @@ export default {
         }),
       );
 
-      // File upload
+      // File upload — via the button AND by dropping files anywhere on the
+      // Source Documents card (beta feedback: a drop target was expected here).
+      async function uploadSourceFiles(fileList) {
+        const files = Array.from(fileList || []);
+        if (!files.length) return;
+        const hasCv = !!d.files?.cv;
+        try {
+          for (let i = 0; i < files.length; i++) {
+            const f = files[i];
+            if (i === 0 && !hasCv)
+              await apiUpload(`/candidates/${d.id}/upload-cv`, f);
+            else await apiUpload(`/candidates/${d.id}/upload-doc`, f);
+          }
+          showToast(T("datasets.doc_uploaded"));
+          const upd = await api(`/candidates/${d.id}`);
+          state.selectedDataset = upd.candidate;
+          render();
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      }
       const uploader = el.querySelector("#tx-doc-upload");
       if (uploader) {
-        uploader.addEventListener("change", async () => {
-          const files = Array.from(uploader.files || []);
-          if (!files.length) return;
-          const hasCv = !!d.files?.cv;
-          try {
-            for (let i = 0; i < files.length; i++) {
-              const f = files[i];
-              if (i === 0 && !hasCv)
-                await apiUpload(`/candidates/${d.id}/upload-cv`, f);
-              else await apiUpload(`/candidates/${d.id}/upload-doc`, f);
-            }
-            showToast(T("datasets.doc_uploaded"));
-            const upd = await api(`/candidates/${d.id}`);
-            state.selectedDataset = upd.candidate;
-            render();
-          } catch (err) {
-            showToast(err.message, "error");
-          }
+        uploader.addEventListener("change", () =>
+          uploadSourceFiles(uploader.files),
+        );
+      }
+      const sourceCard = el.querySelector("#tx-source-card");
+      if (sourceCard) {
+        const clearDropHint = () => {
+          sourceCard.style.outline = "";
+          sourceCard.style.outlineOffset = "";
+        };
+        sourceCard.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          sourceCard.style.outline = "2px dashed var(--brand)";
+          sourceCard.style.outlineOffset = "2px";
+        });
+        sourceCard.addEventListener("dragleave", (e) => {
+          // Only clear when the pointer actually leaves the card, not when it
+          // moves over a child element.
+          if (!sourceCard.contains(e.relatedTarget)) clearDropHint();
+        });
+        sourceCard.addEventListener("drop", (e) => {
+          e.preventDefault();
+          clearDropHint();
+          const files = e.dataTransfer?.files;
+          if (files && files.length) uploadSourceFiles(files);
         });
       }
 
@@ -7092,13 +7119,23 @@ export default {
           render();
           await refreshAccessToken();
           try {
-            await api(
+            const gen = await api(
               `/candidates/${d.id}/generate/${state.selectedGenerateTemplate}`,
               { method: "POST" },
             );
             const upd = await api(`/candidates/${d.id}`);
             state.selectedDataset = upd.candidate;
             showToast(T("datasets.generate_done"));
+            // Auto-download (and open) the freshly generated document so the
+            // user doesn't have to hunt for it in the list — requested in beta
+            // feedback. Silent no-op if the id is missing.
+            const newDocId = gen?.document?.id;
+            if (newDocId) {
+              window.open(
+                `${BASE}/candidates/${d.id}/documents/${newDocId}/download`,
+                "_blank",
+              );
+            }
           } catch (err) {
             showToast(err.message, "error");
           }
@@ -7588,6 +7625,47 @@ export default {
             }
           }
           wizardAiSuggestFromDocx();
+        });
+      }
+      // Drag & drop onto the wizard dropzone. The dropzone is a <label> whose
+      // text already invites a drop ("Drop a .docx here"), but a label alone
+      // only forwards a CLICK to the hidden <input>, never a drop — so dropping
+      // a file did nothing (beta feedback). We forward the dropped file into the
+      // matching picker and dispatch its change event, reusing all existing
+      // upload / AI-suggest logic and validation unchanged.
+      const wizDrop = el.querySelector(
+        '[data-testid="wizard-template-dropzone"]',
+      );
+      const wizPicker = tplPicker || draftPicker;
+      if (wizDrop && wizPicker) {
+        wizDrop.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          wizDrop.style.borderColor = "var(--brand)";
+        });
+        wizDrop.addEventListener(
+          "dragleave",
+          () => (wizDrop.style.borderColor = ""),
+        );
+        wizDrop.addEventListener("drop", (e) => {
+          e.preventDefault();
+          wizDrop.style.borderColor = "";
+          const file = e.dataTransfer?.files?.[0];
+          if (!file) return;
+          try {
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            wizPicker.files = dt.files;
+            wizPicker.dispatchEvent(new Event("change", { bubbles: true }));
+          } catch (_) {
+            // Older browsers may forbid assigning input.files — drive the flow
+            // directly as a fallback.
+            state.wizard.templateFile = file;
+            if (draftPicker && !tplPicker) {
+              wizardAiSuggestFromDocx();
+            } else {
+              wizardUploadTemplate();
+            }
+          }
         });
       }
       el.querySelector(

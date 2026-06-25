@@ -298,6 +298,7 @@
     "sort_newest": "En yeniler \u00f6nce",
     "sort_oldest": "En eskiler \u00f6nce",
     "no_results": "Kriterlere uygun veri k\u00fcmesi yok.",
+    "no_files": "Hen\u00fcz dosya y\u00fcklenmedi.",
     "doc_uploaded": "Belge y\u00fcklendi",
     "doc_missing": "Belge yok",
     "confirm_delete": "Bu veri k\u00fcmesi ve t\u00fcm verisi silinsin mi?",

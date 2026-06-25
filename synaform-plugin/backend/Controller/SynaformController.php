@@ -38,7 +38,11 @@ class SynaformController extends AbstractController
     private const DATA_TYPE_CANDIDATE = 'synaform_candidate';
     private const DATA_TYPE_TEMPLATE = 'synaform_template';
     private const DATA_TYPE_VALIDATION = 'synaform_validation';
-    private const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'txt', 'rtf', 'odt', 'xls', 'xlsx', 'pptx'];
+    // `eml` / `msg` let users drop an e-mail straight in as a source — core's
+    // FileProcessor routes non-image/-media files to Apache Tika, which reads
+    // RFC822 (.eml) and Outlook (.msg) natively. Extension-based allowlist, so
+    // a .msg arriving as application/octet-stream still passes.
+    private const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'txt', 'rtf', 'odt', 'xls', 'xlsx', 'pptx', 'eml', 'msg'];
 
     /**
      * Row-group sub-fields whose string value is too rich for a single Word run
@@ -3007,7 +3011,10 @@ class SynaformController extends AbstractController
         - If the source uses "Label: Value" patterns (e.g. "Position: …", "Tätigkeit: …", "Rolle: …", "Aufgaben: …", "Branche: …", "Zeitraum: …", "Firma: …", "Arbeitgeber: …"), return ONLY the value. NEVER include the label itself in the field value.
         - Each fact belongs to exactly ONE field. When two fields could plausibly hold the same value (e.g. a position name appears in both `current_position` and inside a `stations` row), use the field whose description fits best and leave the other shorter / abstract / empty rather than echoing the same string verbatim.
         - For row-table fields like `stations`, the bullet entries (column with type=list) must be ACTIVITY descriptions. NEVER repeat the row's `position`, `employer`, or `time` value as a bullet; those are already in their own columns. In particular, the FIRST bullet must NOT be the position title or start with the position title (even if the source CV's job line "Interim-CTO at Vicoland - 5 team" reads naturally as a bullet — split that line: extract "Interim-CTO" into the `position` column, "Vicoland" into `employer`, "5 team" or any concrete metric into a separate bullet, and drop everything that's redundant). Each bullet stands on its own as a verb-led achievement or responsibility, e.g. "Aufbau einer cloudbasierten Sicherheits-Lösung", not "CTO bei Vicoland — Aufbau einer Sicherheits-Lösung".
-        - For `stations` specifically: create ONE row per POSITION / PERIOD, NOT per employer. If one employer had several roles or sub-periods over time, output a SEPARATE row for EACH (repeat the `employer`; set `time`, `position` and `details` for that role only). Never merge an employer's multiple roles into one row or pack several periods into a single row. EXCLUDE education from `stations` — school, Abitur / Fachabitur, university degrees, vocational training (Ausbildung / Lehre) and short school internships (Schülerpraktikum / Praktikum) belong in the `education` field, not in `stations`.
+        - For `stations` specifically: create ONE row per POSITION / PERIOD, NOT per employer. If one employer had several roles or sub-periods over time, output a SEPARATE row for EACH (repeat the `employer`; set `time`, `position` and `details` for that role only). Never merge an employer's multiple roles into one row or pack several periods into a single row.
+        - `stations` is the full chronological Werdegang. INCLUDE, besides regular jobs: completed vocational training (Berufsausbildung / Lehre) AND professionally relevant internships (substantial, field-related Praktika) as their own rows — set `employer` to the training company / institution, `position` to e.g. "Ausbildung zur/zum …" or "Praktikum – …", and fill `time` and `details` for that period. EXCLUDE only general schooling (Schule, Abitur / Fachabitur), academic degree programmes (Studium / university degrees) and short school internships (Schülerpraktikum) — those stay in the `education` field. A Berufsausbildung or relevant internship MAY appear in BOTH `education` (as a summary) and `stations` (as a chronological entry); this is the only allowed cross-field duplication.
+        - For the `time` column of every `stations` row use the format MM/YYYY – MM/YYYY (two-digit month, four-digit year, an en dash "–" with one space on each side). Use MM/YYYY – heute for an ongoing role. If only the year is known, YYYY – YYYY is acceptable; keep the format consistent across all rows.
+        - If a `current_position` field exists, fill it with the candidate's present role as "Job title – Employer, Location" — include the current employer and its city/location when the documents provide them, not just the bare job title.
 
         Form fields:
         {$fieldsBlock}
@@ -4567,8 +4574,11 @@ class SynaformController extends AbstractController
                 repeat the `employer` name in every one. NEVER merge multiple
                 roles of one employer into a single entry, and never pack
                 several periods into one `details` block.
-              - `time` is the date range of THAT specific role/period
-                (e.g. "10/2022 – heute"), NOT the employer's overall span.
+              - `time` is the date range of THAT specific role/period, in the
+                format MM/YYYY – MM/YYYY (two-digit month, four-digit year, an
+                en dash "–" with one space on each side); use MM/YYYY – heute
+                for an ongoing role, and YYYY – YYYY only when no month is known.
+                It is the role's own span, NOT the employer's overall span.
               - `employer` is the company name, repeated across that
                 employer's rows.
               - `position` is the single job title held during that period.
@@ -4577,11 +4587,20 @@ class SynaformController extends AbstractController
                 `employer`, or `position` values, and MUST NOT contain another
                 period's content. Begin `details` directly with the first
                 bullet / sentence — no date header line, no title line.
-              - EXCLUDE education from `stations`: school, Abitur / Fachabitur,
-                university degrees, vocational training (Ausbildung / Lehre),
-                and short school internships (Schülerpraktikum / Praktikum) are
-                NOT career stations. Put schooling and degrees in the
-                `education` field only and omit them from `stations` entirely.
+              - `stations` is the full chronological Werdegang. INCLUDE, besides
+                regular jobs, completed vocational training (Berufsausbildung /
+                Lehre) AND professionally relevant internships (substantial,
+                field-related Praktika) as their own rows (`employer` = training
+                company / institution, `position` = e.g. "Ausbildung zur/zum …"
+                or "Praktikum – …"). EXCLUDE only general schooling (Schule,
+                Abitur / Fachabitur), academic degree programmes (Studium /
+                university degrees) and short school internships
+                (Schülerpraktikum) — those stay in the `education` field. A
+                Berufsausbildung or relevant internship MAY appear in BOTH
+                `education` (summary) and `stations` (chronological entry).
+              - If a `current_position` field exists, fill it with the present
+                role as "Job title – Employer, Location" (include the current
+                employer and its city/location when known), not the bare title.
 
             Fields to extract:
             {$fieldsBlock}
@@ -6434,7 +6453,13 @@ class SynaformController extends AbstractController
                 'required' => false,
                 'source' => 'form',
                 'columns' => $columns,
-                'designer' => ['repeat_header' => true, 'prevent_row_break' => true],
+                // Auto-detected row-group tables come from a single clone-row
+                // template, i.e. they are data-first with NO header row. Forcing
+                // a repeating header would stamp <w:tblHeader/> onto the first
+                // entry (it then reappears atop every page, undeletable) and
+                // forcing cantSplit wastes page space. Both default OFF; an author
+                // with a real header row can opt in via the designer.
+                'designer' => ['repeat_header' => false, 'prevent_row_break' => false],
                 '_status' => isset($existingKeys[$group]) ? 'duplicate' : 'new',
             ];
             $summary['tables']++;
@@ -6534,9 +6559,117 @@ class SynaformController extends AbstractController
                 $details = $this->ensureBlankLinesBeforeSubPeriods($details);
                 $row['details'] = $details;
             }
+            if ($time !== '') {
+                $row['time'] = $this->normalizeStationTime($time);
+            }
             $out[] = $row;
         }
         return $out;
+    }
+
+    /**
+     * Normalize a station's `time` range to the requested house format
+     * "MM/YYYY – MM/YYYY" (two-digit month, four-digit year, an en dash with a
+     * single space either side) and "MM/YYYY – heute" for ongoing roles.
+     *
+     * Year-only ranges (when no month is known) are kept as "YYYY – YYYY".
+     * Anything we can't confidently parse is returned unchanged so we never
+     * mangle an unusual but deliberate label. Idempotent — running it again on
+     * already-formatted input is a no-op.
+     */
+    private function normalizeStationTime(string $time): string
+    {
+        $raw = trim($time);
+        if ($raw === '') {
+            return '';
+        }
+
+        $ongoing = (bool) preg_match(
+            '/\b(heute|today|present|gegenw[aä]rtig|aktuell|laufend|ongoing|current|now|jetzt)\b/iu',
+            $raw
+        );
+        $tokens = $this->extractMonthYearTokens($raw);
+
+        if (count($tokens) >= 2) {
+            return $tokens[0] . ' – ' . $tokens[count($tokens) - 1];
+        }
+        if (count($tokens) === 1) {
+            if ($ongoing || preg_match('/^\s*(seit|since|ab)\b/iu', $raw)) {
+                return $tokens[0] . ' – heute';
+            }
+            return $tokens[0];
+        }
+
+        return $raw;
+    }
+
+    /**
+     * Pull month/year (or bare-year) tokens out of a free-text date string, in
+     * document order, each normalized to "MM/YYYY" (or "YYYY" when no month is
+     * present). Recognizes MM/YYYY, MM.YYYY, MM-YYYY, YYYY/MM, YYYY-MM,
+     * "Mon YYYY" / "Month YYYY" (German + English) and bare 19xx/20xx years.
+     *
+     * @return list<string>
+     */
+    private function extractMonthYearTokens(string $s): array
+    {
+        $months = [
+            'jan' => 1, 'januar' => 1, 'january' => 1,
+            'feb' => 2, 'februar' => 2, 'february' => 2,
+            'mar' => 3, 'mär' => 3, 'maer' => 3, 'märz' => 3, 'maerz' => 3, 'march' => 3,
+            'apr' => 4, 'april' => 4,
+            'mai' => 5, 'may' => 5,
+            'jun' => 6, 'juni' => 6, 'june' => 6,
+            'jul' => 7, 'juli' => 7, 'july' => 7,
+            'aug' => 8, 'august' => 8,
+            'sep' => 9, 'sept' => 9, 'september' => 9,
+            'oct' => 10, 'okt' => 10, 'oktober' => 10, 'october' => 10,
+            'nov' => 11, 'november' => 11,
+            'dec' => 12, 'dez' => 12, 'dezember' => 12, 'december' => 12,
+        ];
+
+        $found = [];
+        $consume = function (string $pattern, callable $fmt) use (&$s, &$found): void {
+            if (preg_match_all($pattern, $s, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
+                foreach ($matches as $m) {
+                    $whole = $m[0][0];
+                    $offset = $m[0][1];
+                    $found[$offset] = $fmt($m);
+                    // Blank the matched span (same length) so later, broader
+                    // patterns (e.g. the bare-year pass) don't re-match it.
+                    $s = substr_replace($s, str_repeat(' ', strlen($whole)), $offset, strlen($whole));
+                }
+            }
+        };
+
+        // MM<sep>YYYY (month first)
+        $consume(
+            '#\b(0?[1-9]|1[0-2])\s*[./\-]\s*((?:19|20)\d{2})\b#u',
+            fn (array $m): string => sprintf('%02d/%s', (int) $m[1][0], $m[2][0])
+        );
+        // YYYY<sep>MM (year first)
+        $consume(
+            '#\b((?:19|20)\d{2})\s*[./\-]\s*(0?[1-9]|1[0-2])\b#u',
+            fn (array $m): string => sprintf('%02d/%s', (int) $m[2][0], $m[1][0])
+        );
+        // Month name + YYYY
+        $monthAlt = implode('|', array_map('preg_quote', array_keys($months)));
+        $consume(
+            '#\b(' . $monthAlt . ')\.?\s+((?:19|20)\d{2})\b#iu',
+            function (array $m) use ($months): string {
+                $mon = $months[mb_strtolower($m[1][0])] ?? 0;
+                return $mon > 0 ? sprintf('%02d/%s', $mon, $m[2][0]) : $m[2][0];
+            }
+        );
+        // Bare year
+        $consume(
+            '#\b((?:19|20)\d{2})\b#u',
+            fn (array $m): string => $m[1][0]
+        );
+
+        ksort($found);
+
+        return array_values($found);
     }
 
     /**
@@ -8555,12 +8688,19 @@ class SynaformController extends AbstractController
         // at the bottom — making the previous page look short. Each
         // bullet is its own paragraph with no keepNext, so successive
         // bullets always break freely between each other.
+        // The bullet GLYPH (• or the numbering symbol) takes its size and font
+        // from the paragraph-MARK run properties, not the text run. If we leave
+        // them unset, the dot renders at the Normal-style default while the text
+        // uses the host's size — exactly the "bullets in different sizes"
+        // complaint. Re-using the host run's rPr as the paragraph-mark rPr (the
+        // last child of pPr, per the OOXML schema) keeps glyph and text in sync.
+        $markRPr = $baseRPr;
         $bulletPPr = $bulletNumId !== null
             ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
                 . '<w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>'
+                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>'
             : '<w:pPr><w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
+                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>';
 
         $out = '';
         foreach ($items as $item) {
@@ -8881,17 +9021,10 @@ class SynaformController extends AbstractController
             return;
         }
 
-        // Any designer entry with at least one non-default key triggers a rewrite.
-        $hasAnyConfig = false;
-        foreach ($tableDesigners as $cfg) {
-            if (!empty($cfg)) {
-                $hasAnyConfig = true;
-                break;
-            }
-        }
-        if (!$hasAnyConfig) {
-            return;
-        }
+        // We proceed even when every flag is false: header-less clone-row
+        // tables (career history) must still be normalised so that any
+        // <w:cantSplit/> baked into the template row is stripped and no header
+        // is invented on the first data row.
 
         $zip = new \ZipArchive();
         if ($zip->open($docxPath) !== true) {
@@ -8922,22 +9055,35 @@ class SynaformController extends AbstractController
                 $merged[$k] = $merged[$k] ?? $v;
             }
         }
-        if (empty($merged)) {
-            $zip->close();
-            return;
+        // Largest iterated data set among the configured table fields. A table
+        // whose body-row count is GREATER than this has a genuine static header
+        // row (header + N data rows); a table with exactly this many rows is
+        // purely cloned data with no header — the common HR "career history"
+        // case. This lets us tell a real header apart from a first DATA row, so
+        // we never stamp a repeating header onto an entry.
+        $maxDataRows = 0;
+        foreach (array_keys($tableDesigners) as $key) {
+            if (is_array($arrays[$key] ?? null)) {
+                $maxDataRows = max($maxDataRows, count($arrays[$key]));
+            }
         }
 
         $pattern = '#<w:tbl>(?:(?!</w:tbl>).)*?</w:tbl>#s';
         $newXml = preg_replace_callback(
             $pattern,
-            function (array $m) use ($merged): string {
+            function (array $m) use ($merged, $maxDataRows): string {
                 $tbl = $m[0];
                 $rowCount = substr_count($tbl, '</w:tr>');
                 if ($rowCount < 2) {
                     // Don't rewrite single-row tables (e.g. the scalar-in-cell style).
                     return $tbl;
                 }
-                return $this->applyHelpersToTableXml($tbl, $merged);
+                // A real header row exists only when the table has MORE rows
+                // than the data set that filled it. Otherwise every row is
+                // cloned data and the table is header-less.
+                $hasRealHeader = $maxDataRows > 0 && $rowCount > $maxDataRows;
+
+                return $this->applyHelpersToTableXml($tbl, $merged, $hasRealHeader);
             },
             $xml
         );
@@ -8953,11 +9099,33 @@ class SynaformController extends AbstractController
      *
      * @param array<string, mixed> $cfg  Merged designer directives
      */
-    private function applyHelpersToTableXml(string $tblXml, array $cfg): string
+    private function applyHelpersToTableXml(string $tblXml, array $cfg, bool $hasRealHeader = true): string
     {
         $preventSplit = !empty($cfg['prevent_row_break']);
         $repeatHeader = !empty($cfg['repeat_header']);
         $keepWithPrev = !empty($cfg['keep_with_prev']);
+
+        // Header-less clone-row tables (the common HR "career history" layout)
+        // must never carry a repeating header: stamping <w:tblHeader/> on the
+        // first DATA row makes Word repeat that entry at the top of every page,
+        // where it can't be deleted like a normal row and reappears on edit.
+        // They must also be free to break across a page boundary, otherwise a
+        // long entry jumps to the next page and leaves the rest blank. So we
+        // strip every <w:cantSplit/> (including one baked into the template row)
+        // and skip the header — overriding stale auto-defaults that older forms
+        // saved before this behaviour was fixed.
+        if (!$hasRealHeader) {
+            $tblXml = preg_replace('#<w:cantSplit\b[^>]*/>#', '', $tblXml) ?? $tblXml;
+            if ($keepWithPrev) {
+                $tblXml = preg_replace_callback(
+                    '#<w:p\b[^>]*>(?:(?!</w:p>).)*?</w:p>#s',
+                    fn (array $pm): string => $this->addKeepNext($pm[0]),
+                    $tblXml
+                ) ?? $tblXml;
+            }
+
+            return $tblXml;
+        }
 
         if (!$preventSplit && !$repeatHeader && !$keepWithPrev) {
             return $tblXml;
@@ -9291,12 +9459,19 @@ class SynaformController extends AbstractController
         // wrapped bullet would jump entirely to the next page and leave the
         // previous one looking short. Successive bullets always break freely
         // from each other (no keepNext anywhere).
+        // The bullet GLYPH (• or the numbering symbol) takes its size and font
+        // from the paragraph-MARK run properties, not the text run. If we leave
+        // them unset, the dot renders at the Normal-style default while the text
+        // uses the host's size — exactly the "bullets in different sizes"
+        // complaint. Re-using the host run's rPr as the paragraph-mark rPr (the
+        // last child of pPr, per the OOXML schema) keeps glyph and text in sync.
+        $markRPr = $baseRPr;
         $bulletPPr = $bulletNumId !== null
             ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
                 . '<w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>'
+                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>'
             : '<w:pPr><w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/></w:pPr>';
+                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>';
 
         // Non-bullet paragraphs (date/title/spacer) inherit the host paragraph
         // pPr but with any list-bullet numPr stripped — otherwise the title
