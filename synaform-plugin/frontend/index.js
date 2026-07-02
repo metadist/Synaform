@@ -5127,7 +5127,7 @@ export default {
       return `<div class="mt-4 space-y-4">
         <div class="tx-card p-6">
           <h3 class="text-lg font-semibold mb-4">${T("settings.title")}</h3>
-          <form id="tx-settings-form" class="space-y-4 max-w-md">
+          <form id="tx-settings-form" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label class="tx-label">${T("settings.company_name")}</label>
               <input name="company_name" value="${escHtml(cfg.company_name || "")}" class="tx-input" />
@@ -5152,7 +5152,7 @@ export default {
               <input name="validation_model" value="${escHtml(cfg.validation_model || "default")}" class="tx-input" />
               <p class="tx-hint">${T("settings.validation_model_hint")}</p>
             </div>
-            <div class="flex items-center gap-3">
+            <div class="flex items-center gap-3" style="grid-column:1 / -1">
               <button type="submit" class="tx-btn">${T("app.save")}</button>
               <span id="tx-settings-msg" class="text-sm hidden" style="color:var(--status-success)">${ICONS.check} ${T("app.saved")}</span>
             </div>
