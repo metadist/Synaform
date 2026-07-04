@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.7.1";
+const TX_VERSION = "v3.8.0";
 // Combined with TX_VERSION when fetching plugin assets (i18n bundles, etc.)
 // to defeat stale browser caches whenever a new build of index.js is loaded.
 // The host (PluginView.vue) already cache-busts index.js itself with
@@ -29,6 +29,16 @@ export default {
       forms: [],
       templates: [],
       datasets: [],
+
+      // Prompts tab: prompt sections from GET /prompts plus per-key
+      // editing drafts and in-flight save flags.
+      prompts: null,
+      promptDrafts: {},
+      promptSaving: null,
+
+      // Optional free-text command passed along with Generate ("Mach das
+      // auf Italienisch", "Formatiere die Zahlen englisch", …).
+      generateInstruction: "",
 
       // Route
       view: "collections",
@@ -354,6 +364,14 @@ export default {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+    }
+
+    // Small "?" affordance that reveals its help text in a CSS tooltip on
+    // hover/focus (customer feedback: help texts should open as a tooltip
+    // on mouseover instead of taking up permanent space under the field).
+    function tooltipIcon(text) {
+      if (!text) return "";
+      return `<span class="tx-tooltip" tabindex="0" role="img" aria-label="${escHtml(text)}">${ICONS.question}<span class="tx-tooltip-bubble">${escHtml(text)}</span></span>`;
     }
 
     function formatDate(d) {
@@ -936,6 +954,7 @@ export default {
       if (!raw) return { view: "collections" };
       const parts = raw.split("/");
       if (parts[0] === "settings") return { view: "settings" };
+      if (parts[0] === "prompts") return { view: "prompts" };
       if (parts[0] === "c" && parts[1]) {
         const res = { view: "collection", collectionId: parts[1] };
         if (parts[2] && VALID_TABS.includes(parts[2])) res.tab = parts[2];
@@ -976,6 +995,7 @@ export default {
     function writeHash() {
       let h = "#tx-";
       if (state.view === "settings") h += "settings";
+      else if (state.view === "prompts") h += "prompts";
       else if (state.view === "collection" && state.collectionId) {
         h += `c/${state.collectionId}/${state.tab || "overview"}`;
         if (state.tab === "datasets" && state.datasetId)
@@ -1012,6 +1032,7 @@ export default {
         state.editingVarKey = null;
         state.reorderingFields = false;
         state.selectedGenerateTemplate = null;
+        state.generateInstruction = "";
         state.variablesDraft = null;
         state.variablesDirty = false;
         state.variablesImportOpen = false;
@@ -1152,6 +1173,10 @@ export default {
       .tx-drop:hover { border-color: var(--brand); background: var(--brand-alpha-light); }
       .tx-help-trigger { display: inline-flex; align-items: center; justify-content: center; width: 1.1rem; height: 1.1rem; border-radius: 9999px; color: var(--txt-secondary); cursor: pointer; border: none; background: transparent; padding: 0; }
       .tx-help-trigger:hover { color: var(--brand); background: var(--brand-alpha-light); }
+      .tx-tooltip { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 1.1rem; height: 1.1rem; border-radius: 9999px; color: var(--txt-secondary); cursor: help; vertical-align: middle; flex: none; }
+      .tx-tooltip:hover, .tx-tooltip:focus-visible { color: var(--brand); }
+      .tx-tooltip-bubble { position: absolute; bottom: calc(100% + .4rem); left: 50%; transform: translateX(-50%); background: var(--bg-card); color: var(--txt-primary); border: 1px solid var(--divider); box-shadow: 0 6px 16px rgba(0,0,0,.18); border-radius: .5rem; padding: .5rem .625rem; font-size: .75rem; font-weight: 400; line-height: 1.45; width: max-content; max-width: 300px; white-space: pre-line; z-index: 9999; opacity: 0; visibility: hidden; transition: opacity .12s; pointer-events: none; text-align: left; }
+      .tx-tooltip:hover .tx-tooltip-bubble, .tx-tooltip:focus-within .tx-tooltip-bubble { opacity: 1; visibility: visible; }
       .tx-modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9998; display: flex; align-items: center; justify-content: center; padding: 1rem; }
       .tx-modal { background: var(--bg-card); border-radius: .75rem; box-shadow: 0 20px 40px rgba(0,0,0,.2); max-width: 560px; width: 100%; max-height: 90vh; overflow-y: auto; }
       .tx-tab { display: inline-flex; align-items: center; gap: .5rem; padding: .625rem 1rem; font-size: .875rem; font-weight: 500; white-space: nowrap; transition: color .15s, border-color .15s; border-bottom: 2px solid transparent; color: var(--txt-secondary); cursor: pointer; background: transparent; border-left: none; border-right: none; border-top: none; }
@@ -1302,6 +1327,7 @@ export default {
     function renderNav() {
       const items = [
         { id: "collections", icon: ICONS.folder, label: T("nav.collections") },
+        { id: "prompts", icon: ICONS.sparkle, label: T("nav.prompts") },
         { id: "settings", icon: ICONS.gear, label: T("nav.settings") },
       ];
       const activeId = state.view === "collection" ? "collections" : state.view;
@@ -1324,6 +1350,8 @@ export default {
       switch (state.view) {
         case "settings":
           return renderSettings();
+        case "prompts":
+          return renderPrompts();
         case "collection":
           return renderCollection();
         case "collections":
@@ -2734,9 +2762,9 @@ export default {
             <p class="text-xs tx-secondary mt-0.5">${T("collection.tab_setup_subtitle")}</p>
           </div>
         </div>
-        <section data-testid="setup-section-variables">${renderVariablesTab(c)}</section>
-        <div style="height:1px;background:var(--divider)"></div>
         <section data-testid="setup-section-templates">${renderTemplatesTab(c)}</section>
+        <div style="height:1px;background:var(--divider)"></div>
+        <section data-testid="setup-section-variables">${renderVariablesTab(c)}</section>
       </div>`;
     }
 
@@ -3202,7 +3230,7 @@ export default {
         ${fd.type === "table" ? renderVariableColumnEditor(idx, fd.columns || []) : ""}
         <div class="flex items-start gap-2">
           <input name="fh_${idx}" value="${escHtml(fd.hint || "")}" placeholder="${T("variables.field_hint")}" class="tx-input text-xs" />
-          <button type="button" class="tx-help-trigger mt-1" title="${T("variables.field_hint_info")}">${ICONS.question}</button>
+          <span class="mt-1">${tooltipIcon(T("variables.field_hint_info"))}</span>
         </div>
         ${renderFieldAiContext(fd)}
         ${
@@ -3346,11 +3374,35 @@ export default {
                 `<option value="${ct}"${ct === curType ? " selected" : ""}>${T(`variables.col_type_${ct}`, ct)}</option>`,
             )
             .join("");
-          return `<div class="flex items-center gap-2" data-col-idx="${ci}">
-            <input name="fc_${fieldIdx}_ck_${ci}" value="${escHtml(col.key || "")}" placeholder="${T("variables.column_key")}" class="tx-input text-xs" style="flex:1" />
-            <input name="fc_${fieldIdx}_cl_${ci}" value="${escHtml(col.label || "")}" placeholder="${T("variables.column_label")}" class="tx-input text-xs" style="flex:1" />
-            <select name="fc_${fieldIdx}_ct_${ci}" class="tx-select text-xs" style="width:7.5rem">${typeOpts}</select>
-            <button type="button" data-action="var-col-remove" data-field-idx="${fieldIdx}" data-col-idx="${ci}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button>
+          // List columns pick a document rendering mode: "flat" = every
+          // item becomes a bullet; "structured" = date-range headers and
+          // position titles are detected and rendered without bullets
+          // (the classic HR-profile layout). Matching the backend, a
+          // column keyed `details` defaults to structured, all others to
+          // flat — unless `structured` is explicitly set.
+          let formatRow = "";
+          if (curType === "list") {
+            const structured =
+              col.structured !== undefined
+                ? !!col.structured
+                : (col.key || "").toLowerCase() === "details";
+            formatRow = `<div class="flex items-center gap-2 pl-1" style="margin-top:.125rem">
+              <span class="text-xs tx-secondary" style="white-space:nowrap">${T("variables.col_list_format")}</span>
+              <select name="fc_${fieldIdx}_cs_${ci}" class="tx-select text-xs" style="width:auto;min-width:14rem">
+                <option value="flat"${!structured ? " selected" : ""}>${T("variables.col_list_format_flat")}</option>
+                <option value="structured"${structured ? " selected" : ""}>${T("variables.col_list_format_structured")}</option>
+              </select>
+              ${tooltipIcon(T("variables.col_list_format_hint"))}
+            </div>`;
+          }
+          return `<div class="space-y-1" data-col-idx="${ci}">
+            <div class="flex items-center gap-2">
+              <input name="fc_${fieldIdx}_ck_${ci}" value="${escHtml(col.key || "")}" placeholder="${T("variables.column_key")}" class="tx-input text-xs" style="flex:1" />
+              <input name="fc_${fieldIdx}_cl_${ci}" value="${escHtml(col.label || "")}" placeholder="${T("variables.column_label")}" class="tx-input text-xs" style="flex:1" />
+              <select name="fc_${fieldIdx}_ct_${ci}" class="tx-select text-xs" style="width:7.5rem">${typeOpts}</select>
+              <button type="button" data-action="var-col-remove" data-field-idx="${fieldIdx}" data-col-idx="${ci}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button>
+            </div>
+            ${formatRow}
           </div>`;
         })
         .join("");
@@ -4426,9 +4478,10 @@ export default {
       const reqMark = field.required
         ? ' <span class="text-red-500">*</span>'
         : "";
-      const hint = field.hint
-        ? `<p class="tx-hint">${escHtml(field.hint)}</p>`
-        : "";
+      // Help text shows as a mouseover tooltip on a "?" icon next to the
+      // label (customer feedback) instead of a permanently visible line.
+      const hint = field.hint ? ` ${tooltipIcon(field.hint)}` : "";
+      const label = `<label for="${fid}" class="tx-label">${escHtml(field.label || field.key)}${reqMark}${hint}</label>`;
       // Wide fields span the FULL grid width. We use an inline grid-column
       // style instead of Tailwind's `sm:col-span-2`: the host purges utility
       // classes it doesn't use itself, and the plugin's runtime-injected markup
@@ -4444,8 +4497,8 @@ export default {
         return `<div${spanAttr}>
           <label class="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" id="${fid}" name="${escHtml(field.key)}" ${value === true || value === "true" || value === "Ja" ? "checked" : ""} class="rounded h-4 w-4" style="accent-color:var(--brand)" />
-            <span class="text-sm font-medium">${escHtml(field.label || field.key)}${reqMark}</span>
-          </label>${hint}
+            <span class="text-sm font-medium">${escHtml(field.label || field.key)}${reqMark}</span>${hint}
+          </label>
         </div>`;
       }
 
@@ -4473,13 +4526,11 @@ export default {
                 </label>
                 ${hasImage ? `<button type="button" data-action="image-remove" data-key="${escHtml(field.key)}" class="tx-btn tx-btn-sm tx-btn-ghost" style="color:var(--status-error)">${ICONS.trash} ${T("app.delete")}</button>` : ""}
               </div>
-              ${hint}
             </div>
           </div>
         </div>`;
       }
 
-      const label = `<label for="${fid}" class="tx-label">${escHtml(field.label || field.key)}${reqMark}</label>`;
       let input;
       switch (field.type) {
         case "textarea":
@@ -4533,7 +4584,7 @@ export default {
           );
           const colgroup = `<colgroup>${colWidths
             .map((w) => `<col style="width:${w}">`)
-            .join("")}<col style="width:2.5rem"></colgroup>`;
+            .join("")}<col style="width:4.75rem"></colgroup>`;
 
           const hc = cols
             .map(
@@ -4571,7 +4622,15 @@ export default {
                   return `<td class="py-1.5 px-1.5" style="vertical-align:top"><input type="${inputType}" name="${escHtml(field.key)}__${ri}__${escHtml(c.key)}" value="${escHtml(String(rawVal ?? ""))}" class="tx-input text-sm" style="width:100%;display:block;box-sizing:border-box;padding:.4rem .55rem" /></td>`;
                 })
                 .join("");
-              return `<tr class="tx-divider border-t">${cells}<td class="py-1.5 px-1 text-center" style="vertical-align:top"><button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-1" style="color:var(--txt-secondary)">${ICONS.trash}</button></td></tr>`;
+              // Row actions: move up / move down (customer feedback —
+              // extracted table rows, e.g. career stations, must be
+              // re-orderable by hand) plus remove.
+              const rowActions = `<div class="flex items-center justify-center gap-0.5" style="padding-top:.55rem">
+                <button type="button" data-action="move-table-row" data-dir="-1" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary);${ri === 0 ? "opacity:.25;pointer-events:none" : ""}" title="${T("datasets.row_move_up")}">${ICONS.arrowUp}</button>
+                <button type="button" data-action="move-table-row" data-dir="1" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary);${ri === rows.length - 1 ? "opacity:.25;pointer-events:none" : ""}" title="${T("datasets.row_move_down")}">${ICONS.arrowDown}</button>
+                <button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button>
+              </div>`;
+              return `<tr class="tx-divider border-t">${cells}<td class="py-1.5 px-1 text-center" style="vertical-align:top">${rowActions}</td></tr>`;
             })
             .join("");
           const empty =
@@ -4595,7 +4654,7 @@ export default {
         default:
           input = `<input type="text" id="${fid}" name="${escHtml(field.key)}" value="${escHtml(String(value ?? ""))}" class="tx-input" ${req} />`;
       }
-      return `<div${spanAttr}>${label}${input}${hint}</div>`;
+      return `<div${spanAttr}>${label}${input}</div>`;
     }
 
     function renderDatasetFilesSection(d) {
@@ -4957,14 +5016,20 @@ export default {
         </div>
         ${
           tpls.length
-            ? `<div class="flex items-center gap-2 mb-4">
-                <select id="tx-generate-template" class="tx-select flex-1">
-                  <option value="">— ${T("datasets.generate_select_tpl")} —</option>
-                  ${opts}
-                </select>
-                <button data-action="generate" class="tx-btn tx-btn-sm" ${!state.selectedGenerateTemplate || state.datasetGenerating ? "disabled" : ""}>
-                  ${state.datasetGenerating ? `<div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div> ${T("datasets.generate_running")}` : `${ICONS.doc} ${T("datasets.generate_btn")}`}
-                </button>
+            ? `<div class="space-y-2 mb-4">
+                <div class="flex items-center gap-2">
+                  <select id="tx-generate-template" class="tx-select flex-1">
+                    <option value="">— ${T("datasets.generate_select_tpl")} —</option>
+                    ${opts}
+                  </select>
+                  <button data-action="generate" class="tx-btn tx-btn-sm" ${!state.selectedGenerateTemplate || state.datasetGenerating ? "disabled" : ""}>
+                    ${state.datasetGenerating ? `<div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div> ${T("datasets.generate_running")}` : `${ICONS.doc} ${T("datasets.generate_btn")}`}
+                  </button>
+                </div>
+                <div class="flex items-center gap-2">
+                  <input id="tx-generate-instruction" class="tx-input flex-1 text-sm" maxlength="1000" placeholder="${T("datasets.generate_instruction_placeholder")}" value="${escHtml(state.generateInstruction || "")}" ${state.datasetGenerating ? "disabled" : ""} />
+                  ${tooltipIcon(T("datasets.generate_instruction_hint"))}
+                </div>
               </div>`
             : `<div class="tx-callout mb-4">${T("templates.empty_hint")} <button data-tab="setup" class="tx-link ml-2">${T("collection.goto_templates")} →</button></div>`
         }
@@ -5162,6 +5227,133 @@ export default {
       </div>`;
     }
 
+    // --- Prompts tab -------------------------------------------------------
+    //
+    // Every AI prompt section registered in the backend (extraction rules,
+    // processing-context defaults, generation instruction transform) is shown
+    // with a plain-language explanation in the UI language, an editable
+    // textarea, and per-prompt Save / Reset-to-default actions.
+
+    function renderPrompts() {
+      const prompts = state.prompts;
+      if (!prompts) {
+        return renderLoading();
+      }
+      const cards = prompts
+        .map((p) => {
+          const draft = state.promptDrafts[p.key] ?? p.text;
+          const dirty = draft.trim() !== p.text.trim();
+          const rows = Math.min(22, Math.max(6, draft.split("\n").length + 1));
+          const badge = p.customized
+            ? `<span class="tx-badge" style="background:color-mix(in srgb, var(--status-warning, #f59e0b) 14%, transparent);color:var(--status-warning, #f59e0b)">${T("prompts.badge_customized")}</span>`
+            : `<span class="tx-badge tx-badge-plain">${T("prompts.badge_default")}</span>`;
+          const saving = state.promptSaving === p.key;
+          return `<div class="tx-card p-5 space-y-3">
+            <div class="flex items-center justify-between gap-3 flex-wrap">
+              <div class="flex items-center gap-2">
+                <h4 class="text-sm font-semibold">${T(`prompts.${p.key}_title`, p.key)}</h4>
+                ${badge}
+              </div>
+              <div class="flex items-center gap-2">
+                <button data-action="prompt-reset" data-prompt-key="${p.key}" class="tx-btn tx-btn-sm tx-btn-ghost" ${!p.customized && !dirty ? "disabled" : ""}>${T("prompts.reset_btn")}</button>
+                <button data-action="prompt-save" data-prompt-key="${p.key}" class="tx-btn tx-btn-sm" ${!dirty || saving ? "disabled" : ""}>
+                  ${saving ? `<div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>` : ""} ${T("app.save")}
+                </button>
+              </div>
+            </div>
+            <p class="text-xs tx-secondary" style="white-space:pre-line">${T(`prompts.${p.key}_explain`, "")}</p>
+            <textarea data-prompt-key="${p.key}" class="tx-textarea" rows="${rows}" spellcheck="false" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.78rem;line-height:1.45">${escHtml(draft)}</textarea>
+          </div>`;
+        })
+        .join("");
+      return `<div class="mt-4 space-y-4">
+        <div class="tx-callout flex items-start gap-2">
+          ${ICONS.info}
+          <div>
+            <div class="text-sm font-medium">${T("prompts.title")}</div>
+            <p class="text-xs tx-secondary mt-0.5" style="white-space:pre-line">${T("prompts.subtitle")}</p>
+          </div>
+        </div>
+        ${cards}
+      </div>`;
+    }
+
+    function bindPromptsEvents() {
+      el.querySelectorAll("textarea[data-prompt-key]").forEach((ta) =>
+        ta.addEventListener("input", () => {
+          state.promptDrafts[ta.dataset.promptKey] = ta.value;
+          // Re-toggle the buttons without a full re-render (which would
+          // steal focus from the textarea mid-typing).
+          const key = ta.dataset.promptKey;
+          const p = (state.prompts || []).find((x) => x.key === key);
+          if (!p) return;
+          const dirty = ta.value.trim() !== p.text.trim();
+          const saveBtn = el.querySelector(
+            `[data-action="prompt-save"][data-prompt-key="${key}"]`,
+          );
+          if (saveBtn) saveBtn.disabled = !dirty;
+          const resetBtn = el.querySelector(
+            `[data-action="prompt-reset"][data-prompt-key="${key}"]`,
+          );
+          if (resetBtn) resetBtn.disabled = !p.customized && !dirty;
+        }),
+      );
+
+      el.querySelectorAll('[data-action="prompt-save"]').forEach((btn) =>
+        btn.addEventListener("click", async () => {
+          const key = btn.dataset.promptKey;
+          state.promptSaving = key;
+          render();
+          try {
+            const res = await api("/prompts", {
+              method: "PUT",
+              body: JSON.stringify({ [key]: state.promptDrafts[key] ?? "" }),
+            });
+            state.prompts = res.prompts || [];
+            state.promptDrafts = {};
+            for (const p of state.prompts) state.promptDrafts[p.key] = p.text;
+            showToast(T("prompts.saved"));
+          } catch (err) {
+            showToast(err.message, "error");
+          }
+          state.promptSaving = null;
+          render();
+        }),
+      );
+
+      el.querySelectorAll('[data-action="prompt-reset"]').forEach((btn) =>
+        btn.addEventListener("click", async () => {
+          const key = btn.dataset.promptKey;
+          const p = (state.prompts || []).find((x) => x.key === key);
+          if (!p) return;
+          // Customized on the server → confirm + reset server-side.
+          // Only a local draft → just restore the textarea.
+          if (p.customized) {
+            if (!confirm(T("prompts.reset_confirm"))) return;
+            state.promptSaving = key;
+            render();
+            try {
+              const res = await api("/prompts", {
+                method: "PUT",
+                body: JSON.stringify({ [key]: "" }),
+              });
+              state.prompts = res.prompts || [];
+              state.promptDrafts = {};
+              for (const pp of state.prompts)
+                state.promptDrafts[pp.key] = pp.text;
+              showToast(T("prompts.reset_done"));
+            } catch (err) {
+              showToast(err.message, "error");
+            }
+            state.promptSaving = null;
+          } else {
+            state.promptDrafts[key] = p.text;
+          }
+          render();
+        }),
+      );
+    }
+
     // =========================================================================
     // Event binding
     // =========================================================================
@@ -5174,6 +5366,7 @@ export default {
           const v = btn.dataset.nav;
           if (v === "collections") navigate({ view: "collections" });
           else if (v === "settings") navigate({ view: "settings" });
+          else if (v === "prompts") navigate({ view: "prompts" });
         }),
       );
 
@@ -5419,6 +5612,9 @@ export default {
       // Plugin dashboard (system status card on the overview tab)
       bindDashboardEvents();
 
+      // Prompts tab
+      bindPromptsEvents();
+
       // Variables tab
       bindVariablesEvents();
 
@@ -5522,10 +5718,31 @@ export default {
                 cols[ci].type = validColTypes.includes(ct)
                   ? ct
                   : cols[ci].type || "text";
+                // List rendering mode (flat bullets vs structured HR
+                // layout). Only present in the DOM for list columns.
+                const cs = fd.get(`fc_${idx}_cs_${ci}`)?.toString();
+                if (
+                  cols[ci].type === "list" &&
+                  (cs === "flat" || cs === "structured")
+                ) {
+                  cols[ci].structured = cs === "structured";
+                } else if (cols[ci].type !== "list") {
+                  delete cols[ci].structured;
+                }
               }
             }
           }
           // Designer config (collapsible per-field block).
+          //
+          // IMPORTANT: only harvest when the designer panel is actually in
+          // the DOM for this field. The panel is collapsible and only ONE
+          // can be open at a time — `fd.has()` on a checkbox that isn't
+          // rendered returns false, so harvesting blindly used to silently
+          // flip every collapsed field's boolean designer options
+          // (clickable_checkbox, repeat_header, prevent_orphans, …) to
+          // false on every save. That's the "design options don't work"
+          // bug from the customer session.
+          if (!form.querySelector(`[name^="fd_${idx}_"]`)) continue;
           const designer = fields[idx].designer || {};
           if (fields[idx].type === "list") {
             const style = fd.get(`fd_${idx}_style`)?.toString();
@@ -5659,8 +5876,13 @@ export default {
           }
         });
         vForm.addEventListener("change", (ev) => {
-          // Type changes swap the markup (e.g. select→table), so full render.
-          if (ev.target.name && ev.target.name.startsWith("ft_")) {
+          // Type changes swap the markup (e.g. select→table, text→list in a
+          // table column), so full render.
+          if (
+            ev.target.name &&
+            (ev.target.name.startsWith("ft_") ||
+              /^fc_\d+_ct_\d+$/.test(ev.target.name))
+          ) {
             state.variablesDirty = true;
             ensureDraft();
             collectForm();
@@ -6621,9 +6843,47 @@ export default {
         });
       }
 
+      // Pull the CURRENT table cell values out of the DOM into
+      // d.field_values before any row mutation (add / remove / move).
+      // Row actions trigger a full re-render, which would otherwise
+      // silently discard every unsaved cell edit in the table.
+      function harvestTableRowsFromDom(fieldKey) {
+        const form = el.querySelector("#tx-entry-data-form");
+        const f = (c.fields || []).find((x) => x.key === fieldKey);
+        if (!form || !f) return;
+        const cols = f.columns || [];
+        if (!cols.length) return;
+        const rows = [];
+        let ri = 0;
+        while (
+          form.querySelector(`[name="${fieldKey}__${ri}__${cols[0].key}"]`)
+        ) {
+          const row = {};
+          for (const col of cols) {
+            const cell = form.querySelector(
+              `[name="${fieldKey}__${ri}__${col.key}"]`,
+            );
+            const raw = cell?.value ?? "";
+            if ((col.type || "text") === "list") {
+              row[col.key] = raw
+                .split(/\r?\n/)
+                .map((s) => s.trim())
+                .filter(Boolean);
+            } else {
+              row[col.key] = raw;
+            }
+          }
+          rows.push(row);
+          ri++;
+        }
+        if (!d.field_values) d.field_values = {};
+        d.field_values[fieldKey] = rows;
+      }
+
       el.querySelectorAll('[data-action="add-table-row"]').forEach((btn) =>
         btn.addEventListener("click", () => {
           const key = btn.dataset.fieldKey;
+          harvestTableRowsFromDom(key);
           if (!d.field_values) d.field_values = {};
           if (!Array.isArray(d.field_values[key])) d.field_values[key] = [];
           d.field_values[key].push({});
@@ -6634,8 +6894,23 @@ export default {
         btn.addEventListener("click", () => {
           const key = btn.dataset.fieldKey;
           const ri = parseInt(btn.dataset.rowIdx);
+          harvestTableRowsFromDom(key);
           if (!d.field_values?.[key]) return;
           d.field_values[key].splice(ri, 1);
+          render();
+        }),
+      );
+      el.querySelectorAll('[data-action="move-table-row"]').forEach((btn) =>
+        btn.addEventListener("click", () => {
+          const key = btn.dataset.fieldKey;
+          const ri = parseInt(btn.dataset.rowIdx);
+          const dir = parseInt(btn.dataset.dir);
+          harvestTableRowsFromDom(key);
+          const rows = d.field_values?.[key];
+          if (!Array.isArray(rows)) return;
+          const ni = ri + dir;
+          if (ni < 0 || ni >= rows.length) return;
+          [rows[ri], rows[ni]] = [rows[ni], rows[ri]];
           render();
         }),
       );
@@ -7119,17 +7394,32 @@ export default {
           render();
         });
       }
+      // Optional free-text instruction ("Mach das auf Italienisch", …) —
+      // mirrored into state so the value survives the re-renders that the
+      // template picker and the generating spinner trigger.
+      const genInstr = el.querySelector("#tx-generate-instruction");
+      if (genInstr) {
+        genInstr.addEventListener("input", () => {
+          state.generateInstruction = genInstr.value;
+        });
+      }
       el.querySelector('[data-action="generate"]')?.addEventListener(
         "click",
         async () => {
           if (!state.selectedGenerateTemplate) return;
+          const instruction = (state.generateInstruction || "").trim();
           state.datasetGenerating = true;
           render();
           await refreshAccessToken();
           try {
             const gen = await api(
               `/candidates/${d.id}/generate/${state.selectedGenerateTemplate}`,
-              { method: "POST" },
+              {
+                method: "POST",
+                ...(instruction
+                  ? { body: JSON.stringify({ instruction }) }
+                  : {}),
+              },
             );
             const upd = await api(`/candidates/${d.id}`);
             state.selectedDataset = upd.candidate;
@@ -7768,11 +8058,26 @@ export default {
       const jobs = [];
       if (state.view === "settings") {
         // config already loaded on init
+      } else if (state.view === "prompts") {
+        jobs.push(fetchPrompts());
       } else {
         jobs.push(fetchForms(), fetchTemplates(), fetchDatasets());
       }
       await Promise.all(jobs);
       render();
+    }
+
+    async function fetchPrompts() {
+      try {
+        const res = await api("/prompts");
+        state.prompts = res.prompts || [];
+        // Editing drafts keyed by prompt key; reset on (re)load.
+        state.promptDrafts = {};
+        for (const p of state.prompts) state.promptDrafts[p.key] = p.text;
+      } catch (err) {
+        state.prompts = [];
+        showToast(err.message, "error");
+      }
     }
 
     async function selectDataset(id) {
@@ -7867,7 +8172,11 @@ export default {
           return;
         }
         state.config = data.config || {};
-        await Promise.all([fetchForms(), fetchTemplates(), fetchDatasets()]);
+        const initJobs = [fetchForms(), fetchTemplates(), fetchDatasets()];
+        // Deep link straight into the Prompts tab (#tx-prompts) — the
+        // per-navigation loader only runs on navigate(), not on init.
+        if (state.view === "prompts") initJobs.push(fetchPrompts());
+        await Promise.all(initJobs);
         state.loading = false;
         render();
         if (

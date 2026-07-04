@@ -38,6 +38,21 @@ class SynaformController extends AbstractController
     private const DATA_TYPE_CANDIDATE = 'synaform_candidate';
     private const DATA_TYPE_TEMPLATE = 'synaform_template';
     private const DATA_TYPE_VALIDATION = 'synaform_validation';
+    private const DATA_TYPE_PROMPTS = 'synaform_prompts';
+
+    /**
+     * The AI prompt sections a user may customise from the "Prompts" tab.
+     * Each key maps to a default text returned by defaultPromptText();
+     * per-user overrides live in plugin_data (DATA_TYPE_PROMPTS, id
+     * 'prompts'). Keys never leak into prompts themselves — they are only
+     * the registry handle shared between backend and frontend.
+     */
+    private const EDITABLE_PROMPT_KEYS = [
+        'extraction_rules',
+        'extraction_context',
+        'generation_transform',
+    ];
+
     // `eml` / `msg` let users drop an e-mail straight in as a source — core's
     // FileProcessor routes non-image/-media files to Apache Tika, which reads
     // RFC822 (.eml) and Outlook (.msg) natively. Extension-based allowlist, so
@@ -449,6 +464,78 @@ class SynaformController extends AbstractController
             'updated' => $updated,
             'config' => $this->getPluginConfig($userId),
         ]);
+    }
+
+    #[Route('/prompts', name: 'prompts_get', methods: ['GET'])]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/synaform/prompts',
+        summary: 'List editable AI prompt sections with defaults and per-user overrides',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Prompt sections')]
+    public function promptsGet(int $userId, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $overrides = $this->getPromptOverrides($userId);
+        $prompts = [];
+        foreach (self::EDITABLE_PROMPT_KEYS as $key) {
+            $default = $this->defaultPromptText($key);
+            $prompts[] = [
+                'key' => $key,
+                'default' => $default,
+                'text' => $overrides[$key] ?? $default,
+                'customized' => isset($overrides[$key]),
+            ];
+        }
+
+        return $this->json(['success' => true, 'prompts' => $prompts]);
+    }
+
+    #[Route('/prompts', name: 'prompts_update', methods: ['PUT'])]
+    #[OA\Put(
+        path: '/api/v1/user/{userId}/plugins/synaform/prompts',
+        summary: 'Save prompt overrides. Empty/null value (or text equal to the default) resets a prompt to its default.',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'Updated prompt sections')]
+    public function promptsUpdate(int $userId, Request $request, #[CurrentUser] ?User $user): JsonResponse
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $data = json_decode($request->getContent(), true);
+        if (!is_array($data)) {
+            return $this->json(['success' => false, 'error' => 'Invalid JSON body'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $stored = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_PROMPTS, 'prompts') ?? [];
+        foreach (self::EDITABLE_PROMPT_KEYS as $key) {
+            if (!array_key_exists($key, $data)) {
+                continue;
+            }
+            $value = $data[$key];
+            $text = is_string($value) ? trim($value) : '';
+            // Empty text or text identical to the default means "no override".
+            if ($text === '' || $text === trim($this->defaultPromptText($key))) {
+                unset($stored[$key]);
+                continue;
+            }
+            // Sanity cap so a runaway paste can't blow up every extraction call.
+            $stored[$key] = mb_substr($text, 0, 20000);
+        }
+
+        // Keep only known keys in storage.
+        $stored = array_intersect_key($stored, array_flip(self::EDITABLE_PROMPT_KEYS));
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_PROMPTS, 'prompts', $stored);
+        unset($this->promptOverridesCache[$userId]);
+
+        return $this->promptsGet($userId, $user);
     }
 
     // =========================================================================
@@ -2266,7 +2353,7 @@ class SynaformController extends AbstractController
             $formFields = $form['fields'] ?? [];
             $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
 
-            $prompt = $this->buildExtractionPrompt($rawText, $formFields, $extractionLanguage);
+            $prompt = $this->buildExtractionPrompt($userId, $rawText, $formFields, $extractionLanguage);
             $messages = [
                 ['role' => 'system', 'content' => 'You are a precise CV data extraction assistant. Return only valid JSON.'],
                 ['role' => 'user', 'content' => $prompt],
@@ -2486,6 +2573,7 @@ class SynaformController extends AbstractController
             ));
 
             $prompt = $this->buildGroupedExtractionPrompt(
+                $userId,
                 $allFieldsSubset,
                 $combinedText,
                 $extractionLanguageName,
@@ -2641,6 +2729,7 @@ class SynaformController extends AbstractController
                 static fn ($f) => in_array((string) ($f['key'] ?? ''), $groupFieldKeys, true)
             ));
             $prompt = $this->buildGroupedExtractionPrompt(
+                $userId,
                 $subset,
                 $combinedText,
                 $extractionLanguageName,
@@ -2904,6 +2993,7 @@ class SynaformController extends AbstractController
      * the chat-message extraction path (different signature/purpose).
      */
     private function buildGroupedExtractionPrompt(
+        int $userId,
         array $fieldsSubset,
         string $combinedText,
         string $extractionLanguageName,
@@ -2919,13 +3009,19 @@ class SynaformController extends AbstractController
 
             // Rich semantic context (v3.7.2+). `description` is the
             // primary disambiguator. `examples` anchor expected format.
-            // `negative_hint` rules out common confusions. Legacy
-            // `hint` continues to work as a short fallback when no
-            // description is present.
+            // `negative_hint` rules out common confusions.
+            //
+            // The user-visible "Help text / AI hint" (`hint`) is emitted as
+            // an "Instructions:" line — the extraction_rules prompt section
+            // declares those BINDING, so a hint like "Formattiere die Nummer
+            // in der Form 0049 (0) 175 234 567 89" actually changes the
+            // returned value instead of being treated as a loose description
+            // (customer feedback: field annotations were ignored).
             if (!empty($field['description'])) {
                 $lines[] = '  Description: ' . trim((string) $field['description']);
-            } elseif (!empty($field['hint'])) {
-                $lines[] = '  Description: ' . trim((string) $field['hint']);
+            }
+            if (!empty($field['hint'])) {
+                $lines[] = '  Instructions: ' . trim((string) $field['hint']);
             }
             if (!empty($field['examples']) && is_array($field['examples'])) {
                 $exQuoted = array_map(static fn ($e) => '"' . trim((string) $e) . '"', $field['examples']);
@@ -2985,6 +3081,15 @@ class SynaformController extends AbstractController
             ? "Field group: {$groupContext}\n\n"
             : '';
 
+        // Editable prompt sections (Prompts tab). `extraction_rules` carries
+        // the extraction + anti-duplication rule set; `extraction_context`
+        // injects "today" so recording-context fields (e.g. "Monat der
+        // Erfassung") default to the current date instead of a date scraped
+        // from the documents. Tokens: {today}, {month}, {year}, {language}.
+        $tokens = $this->promptTokens($extractionLanguageName);
+        $rulesBlock = strtr($this->getPromptText($userId, 'extraction_rules'), $tokens);
+        $contextBlock = strtr($this->getPromptText($userId, 'extraction_context'), $tokens);
+
         return <<<PROMPT
         You are an assistant that extracts form field values from documents.
         Below are the form fields that need to be filled, followed by the document text.
@@ -2996,25 +3101,9 @@ class SynaformController extends AbstractController
         Proper nouns (people, company names, cities), email addresses, phone numbers,
         URLs, and dates stay verbatim.
 
-        For each field, extract the most appropriate value from the documents. Rules:
-        - For "select" fields, ONLY return one of the allowed values listed in brackets, or null if not found.
-        - For "list" fields, return a JSON array of strings (one entry per item).
-        - For "table" fields, return a JSON array of objects where each object has the column keys listed in the field description. Most recent entries first.
-        - Table columns with type=list return a JSON array of short strings inside the row (one bullet per achievement/item). Do NOT include dashes, bullets, or numbering characters in the strings; the template generator adds proper bullets automatically. Do NOT embed multiple bullets in a single string separated by newlines.
-        - For "text" fields, return a plain string value.
-        - For "checkbox" fields, return true or false.
-        - For "date" fields, return in YYYY-MM-DD format.
-        - Return null for any field where no matching information is found. Do NOT guess or invent data.
-        - If a document is an interview transcript, extract answers to questions that match the field descriptions.
+        {$rulesBlock}
 
-        Anti-duplication rules (applied to every field):
-        - If the source uses "Label: Value" patterns (e.g. "Position: …", "Tätigkeit: …", "Rolle: …", "Aufgaben: …", "Branche: …", "Zeitraum: …", "Firma: …", "Arbeitgeber: …"), return ONLY the value. NEVER include the label itself in the field value.
-        - Each fact belongs to exactly ONE field. When two fields could plausibly hold the same value (e.g. a position name appears in both `current_position` and inside a `stations` row), use the field whose description fits best and leave the other shorter / abstract / empty rather than echoing the same string verbatim.
-        - For row-table fields like `stations`, the bullet entries (column with type=list) must be ACTIVITY descriptions. NEVER repeat the row's `position`, `employer`, or `time` value as a bullet; those are already in their own columns. In particular, the FIRST bullet must NOT be the position title or start with the position title (even if the source CV's job line "Interim-CTO at Vicoland - 5 team" reads naturally as a bullet — split that line: extract "Interim-CTO" into the `position` column, "Vicoland" into `employer`, "5 team" or any concrete metric into a separate bullet, and drop everything that's redundant). Each bullet stands on its own as a verb-led achievement or responsibility, e.g. "Aufbau einer cloudbasierten Sicherheits-Lösung", not "CTO bei Vicoland — Aufbau einer Sicherheits-Lösung".
-        - For `stations` specifically: create ONE row per POSITION / PERIOD, NOT per employer. If one employer had several roles or sub-periods over time, output a SEPARATE row for EACH (repeat the `employer`; set `time`, `position` and `details` for that role only). Never merge an employer's multiple roles into one row or pack several periods into a single row.
-        - `stations` is the full chronological Werdegang. INCLUDE, besides regular jobs: completed vocational training (Berufsausbildung / Lehre) AND professionally relevant internships (substantial, field-related Praktika) as their own rows — set `employer` to the training company / institution, `position` to e.g. "Ausbildung zur/zum …" or "Praktikum – …", and fill `time` and `details` for that period. EXCLUDE only general schooling (Schule, Abitur / Fachabitur), academic degree programmes (Studium / university degrees) and short school internships (Schülerpraktikum) — those stay in the `education` field. A Berufsausbildung or relevant internship MAY appear in BOTH `education` (as a summary) and `stations` (as a chronological entry); this is the only allowed cross-field duplication.
-        - For the `time` column of every `stations` row use the format MM/YYYY – MM/YYYY (two-digit month, four-digit year, an en dash "–" with one space on each side). Use MM/YYYY – heute for an ongoing role. If only the year is known, YYYY – YYYY is acceptable; keep the format consistent across all rows.
-        - If a `current_position` field exists, fill it with the candidate's present role as "Job title – Employer, Location" — include the current employer and its city/location when the documents provide them, not just the bare job title.
+        {$contextBlock}
 
         Form fields:
         {$fieldsBlock}
@@ -3362,15 +3451,25 @@ class SynaformController extends AbstractController
     #[Route('/candidates/{candidateId}/generate/{templateId}', name: 'candidates_generate', methods: ['POST'])]
     #[OA\Post(
         path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/generate/{templateId}',
-        summary: 'Generate a DOCX document from template and resolved variables',
+        summary: 'Generate a DOCX document from template and resolved variables. Optional JSON body {"instruction": "..."} runs an AI transform over the resolved values first (e.g. "translate everything into Italian").',
         security: [['ApiKey' => []]],
         tags: ['Synaform Plugin']
     )]
     #[OA\Response(response: 200, description: 'Generated document metadata')]
-    public function candidatesGenerate(int $userId, string $candidateId, string $templateId, #[CurrentUser] ?User $user): JsonResponse
+    public function candidatesGenerate(int $userId, string $candidateId, string $templateId, Request $request, #[CurrentUser] ?User $user): JsonResponse
     {
         if (!$this->canAccessPlugin($user, $userId)) {
             return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        // Optional free-text generation instruction ("Mach das auf
+        // Italienisch", "Formatiere die Zahlen englisch", …). Applied as an
+        // AI transform over the resolved variables just before the template
+        // is filled — the stored dataset values are NOT modified.
+        $instruction = '';
+        $body = json_decode($request->getContent(), true);
+        if (is_array($body) && is_string($body['instruction'] ?? null)) {
+            $instruction = mb_substr(trim($body['instruction']), 0, 1000);
         }
 
         $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
@@ -3453,6 +3552,15 @@ class SynaformController extends AbstractController
             }
 
             $arrays = $this->collectArrayData($entry, $formFields);
+
+            // Optional AI instruction pass: rewrite the resolved values
+            // according to the user's free-text command. Throws on failure
+            // so the user gets a clear error instead of a silently
+            // untransformed document.
+            if ($instruction !== '') {
+                [$variables, $arrays] = $this->applyGenerationInstruction($userId, $instruction, $variables, $arrays);
+            }
+
             $designerMap = $this->getDesignerConfigMap($formFields);
             $richSubfields = $this->getRichRowSubfields($formFields);
 
@@ -3599,6 +3707,9 @@ class SynaformController extends AbstractController
                 'generated_at' => date('c'),
                 'variable_snapshot' => $variables,
             ];
+            if ($instruction !== '') {
+                $docMeta['instruction'] = $instruction;
+            }
 
             if (!isset($entry['documents'])) {
                 $entry['documents'] = [];
@@ -3623,6 +3734,89 @@ class SynaformController extends AbstractController
                 'error' => 'Generation failed: ' . $e->getMessage(),
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
+    }
+
+    /**
+     * Apply a free-text generation instruction ("translate everything into
+     * Italian", "format numbers the English way", "be funny") to the fully
+     * resolved variable set via one AI round-trip. Returns the transformed
+     * [$variables, $arrays] pair; the stored dataset is never touched.
+     *
+     * Fails loudly (RuntimeException) when the AI response is unusable —
+     * silently generating an untransformed document would look like the
+     * instruction was honoured when it wasn't.
+     *
+     * @param array<string, mixed>                            $variables
+     * @param array<string, array<int, array<string, mixed>>> $arrays
+     * @return array{0: array<string, mixed>, 1: array<string, mixed>}
+     */
+    private function applyGenerationInstruction(int $userId, string $instruction, array $variables, array $arrays): array
+    {
+        $payload = json_encode(
+            ['variables' => $variables, 'tables' => $arrays],
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
+        );
+        if ($payload === false) {
+            throw new \RuntimeException('Could not encode variables for the generation instruction');
+        }
+
+        $prompt = $this->getPromptText($userId, 'generation_transform')
+            . "\n\nUser instruction:\n" . $instruction
+            . "\n\nJSON to transform:\n" . $payload;
+
+        $messages = [
+            ['role' => 'system', 'content' => 'You are a precise JSON transformation assistant. Return only valid JSON.'],
+            ['role' => 'user', 'content' => $prompt],
+        ];
+        $aiOptions = $this->resolveAiModelOptions($userId);
+        $aiOptions['max_tokens'] = 16000;
+        $aiOptions['thinking_budget'] = 0;
+        $aiOptions['reasoning_effort'] = 'low';
+        $aiOptions['temperature'] = 0;
+
+        $started = microtime(true);
+        $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+        $parsed = $this->parseJsonFromAiResponse((string) ($result['content'] ?? ''));
+        if (!is_array($parsed) || array_is_list($parsed)) {
+            throw new \RuntimeException('The AI could not apply the instruction — please rephrase it or try again');
+        }
+
+        $newVars = is_array($parsed['variables'] ?? null) ? $parsed['variables'] : [];
+        $newTables = is_array($parsed['tables'] ?? null) ? $parsed['tables'] : [];
+
+        // Merge conservatively: only keys that already exist may change, and
+        // value kinds must stay compatible (bool stays bool, arrays stay
+        // arrays). Anything the AI dropped keeps its original value.
+        foreach ($variables as $k => $orig) {
+            if (!array_key_exists($k, $newVars)) {
+                continue;
+            }
+            $nv = $newVars[$k];
+            if (is_bool($orig)) {
+                if (is_bool($nv)) {
+                    $variables[$k] = $nv;
+                }
+            } elseif (is_array($orig)) {
+                if (is_array($nv)) {
+                    $variables[$k] = $nv;
+                }
+            } elseif ($nv === null || is_scalar($nv)) {
+                $variables[$k] = $nv;
+            }
+        }
+        foreach ($arrays as $k => $rows) {
+            if (isset($newTables[$k]) && is_array($newTables[$k])) {
+                $arrays[$k] = array_values($newTables[$k]);
+            }
+        }
+
+        $this->logger->info('Synaform: generation instruction applied', [
+            'instruction' => $instruction,
+            'model' => (string) ($result['model'] ?? 'unknown'),
+            'elapsed_ms' => (int) ((microtime(true) - $started) * 1000),
+        ]);
+
+        return [$variables, $arrays];
     }
 
     #[Route('/candidates/{candidateId}/documents', name: 'candidates_documents_list', methods: ['GET'])]
@@ -4001,6 +4195,117 @@ class SynaformController extends AbstractController
         }
 
         return $config;
+    }
+
+    /** @var array<int, array<string, string>> per-request cache of prompt overrides */
+    private array $promptOverridesCache = [];
+
+    /**
+     * Per-user prompt overrides (only keys from EDITABLE_PROMPT_KEYS, only
+     * non-empty strings). Cached per request — extraction reads these once
+     * per AI call.
+     *
+     * @return array<string, string>
+     */
+    private function getPromptOverrides(int $userId): array
+    {
+        if (!isset($this->promptOverridesCache[$userId])) {
+            $stored = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_PROMPTS, 'prompts') ?? [];
+            $overrides = [];
+            foreach (self::EDITABLE_PROMPT_KEYS as $key) {
+                if (!empty($stored[$key]) && is_string($stored[$key])) {
+                    $overrides[$key] = $stored[$key];
+                }
+            }
+            $this->promptOverridesCache[$userId] = $overrides;
+        }
+
+        return $this->promptOverridesCache[$userId];
+    }
+
+    /**
+     * Resolve a prompt section: the user's override if present, else the
+     * shipped default. Supported placeholder tokens ({today}, {month},
+     * {year}, {language}) are substituted by the caller via promptTokens().
+     */
+    private function getPromptText(int $userId, string $key): string
+    {
+        $overrides = $this->getPromptOverrides($userId);
+
+        return $overrides[$key] ?? $this->defaultPromptText($key);
+    }
+
+    /**
+     * Token map for prompt sections. `{language}` is the human-readable
+     * extraction/output language name (e.g. "German"), the date tokens
+     * reflect the server's "now" — the moment the dataset is processed.
+     *
+     * @return array<string, string>
+     */
+    private function promptTokens(string $languageName): array
+    {
+        return [
+            '{today}' => date('Y-m-d'),
+            '{month}' => date('m'),
+            '{year}' => date('Y'),
+            '{language}' => $languageName,
+        ];
+    }
+
+    private function defaultPromptText(string $key): string
+    {
+        switch ($key) {
+            case 'extraction_rules':
+                return <<<'TXT'
+                For each field, extract the most appropriate value from the documents. Rules:
+                - For "select" fields, ONLY return one of the allowed values listed in brackets, or null if not found.
+                - For "list" fields, return a JSON array of strings (one entry per item).
+                - For "table" fields, return a JSON array of objects where each object has the column keys listed in the field description. Most recent entries first.
+                - Table columns with type=list return a JSON array of short strings inside the row (one bullet per achievement/item). Do NOT include dashes, bullets, or numbering characters in the strings; the template generator adds proper bullets automatically. Do NOT embed multiple bullets in a single string separated by newlines.
+                - For "text" fields, return a plain string value.
+                - For "checkbox" fields, return true or false.
+                - For "date" fields, return in YYYY-MM-DD format.
+                - Return null for any field where no matching information is found. Do NOT guess or invent data.
+                - If a document is an interview transcript, extract answers to questions that match the field descriptions.
+
+                Per-field instructions are BINDING:
+                - Every "Instructions:" line under a field in the field list below was written by the form designer and is a mandatory rule, not a suggestion. It may dictate an exact output format (e.g. a phone number pattern like "0049 (0) 175 234 567 89"), a transformation, a default, or something to exclude.
+                - ALWAYS apply these instructions to the value you return. A formatting instruction takes precedence over how the value is written in the source documents (reformat the extracted value accordingly).
+
+                Anti-duplication rules (applied to every field):
+                - If the source uses "Label: Value" patterns (e.g. "Position: …", "Tätigkeit: …", "Rolle: …", "Aufgaben: …", "Branche: …", "Zeitraum: …", "Firma: …", "Arbeitgeber: …"), return ONLY the value. NEVER include the label itself in the field value.
+                - Each fact belongs to exactly ONE field. When two fields could plausibly hold the same value (e.g. a position name appears in both `current_position` and inside a `stations` row), use the field whose description fits best and leave the other shorter / abstract / empty rather than echoing the same string verbatim.
+                - For row-table fields like `stations`, the bullet entries (column with type=list) must be ACTIVITY descriptions. NEVER repeat the row's `position`, `employer`, or `time` value as a bullet; those are already in their own columns. In particular, the FIRST bullet must NOT be the position title or start with the position title (even if the source CV's job line "Interim-CTO at Vicoland - 5 team" reads naturally as a bullet — split that line: extract "Interim-CTO" into the `position` column, "Vicoland" into `employer`, "5 team" or any concrete metric into a separate bullet, and drop everything that's redundant). Each bullet stands on its own as a verb-led achievement or responsibility, e.g. "Aufbau einer cloudbasierten Sicherheits-Lösung", not "CTO bei Vicoland — Aufbau einer Sicherheits-Lösung".
+                - For `stations` specifically: create ONE row per POSITION / PERIOD, NOT per employer. If one employer had several roles or sub-periods over time, output a SEPARATE row for EACH (repeat the `employer`; set `time`, `position` and `details` for that role only). Never merge an employer's multiple roles into one row or pack several periods into a single row.
+                - `stations` is the full chronological Werdegang. INCLUDE, besides regular jobs: completed vocational training (Berufsausbildung / Lehre) AND professionally relevant internships (substantial, field-related Praktika) as their own rows — set `employer` to the training company / institution, `position` to e.g. "Ausbildung zur/zum …" or "Praktikum – …", and fill `time` and `details` for that period. EXCLUDE only general schooling (Schule, Abitur / Fachabitur), academic degree programmes (Studium / university degrees) and short school internships (Schülerpraktikum) — those stay in the `education` field. A Berufsausbildung or relevant internship MAY appear in BOTH `education` (as a summary) and `stations` (as a chronological entry); this is the only allowed cross-field duplication.
+                - An education-style field (e.g. `education`, "Ausbildung/Studium") must contain EVERY education entry found in the documents — schooling, university / degree programmes, vocational training, professional certifications. Return one entry per line (separate entries with a newline character, most recent first), each with its period and institution when the documents provide them. NEVER silently drop an education entry — completeness matters more than brevity here.
+                - For the `time` column of every `stations` row use the format MM/YYYY – MM/YYYY (two-digit month, four-digit year, an en dash "–" with one space on each side). Use MM/YYYY – heute for an ongoing role. If only the year is known, YYYY – YYYY is acceptable; keep the format consistent across all rows.
+                - If a `current_position` field exists, fill it with the candidate's present role as "Job title – Employer, Location" — include the current employer and its city/location when the documents provide them, not just the bare job title.
+                TXT;
+
+            case 'extraction_context':
+                return <<<'TXT'
+                Processing context and default values:
+                - Today's date is {today} (month {month} of year {year}). The dataset is being recorded right now.
+                - If a field asks for the date, month, or year OF THE RECORDING itself (e.g. "Monat der Erfassung", "generated_month", "generated_year", "Erstellungsdatum", "date of entry"), return the value derived from today's date — NOT a date found in the documents. Write month names as words in {language} (e.g. month 07 → "Juli" in German).
+                - If a field asks for the working / output language and the documents don't state one, default to {language}.
+                - Apply the same reasoning to other processing-context defaults the field description implies (e.g. a fixed office location named in the field's instructions). Content fields always win from the documents; only recording-context fields use these defaults.
+                TXT;
+
+            case 'generation_transform':
+                return <<<'TXT'
+                You are post-processing the final variable values of a dataset just before a Word document is generated from them.
+                You receive (1) a free-text instruction from the user and (2) a JSON object with all variable values ("variables" for single values, "tables" for row arrays).
+                Apply the instruction to the values — e.g. translate them into another language, reformat numbers or dates, adjust the tone — while obeying these rules:
+                - Return the SAME JSON structure: identical keys, identical nesting, identical array lengths (unless the instruction explicitly requires otherwise).
+                - Do not invent new facts and do not drop values. Only transform what is there.
+                - Proper nouns, e-mail addresses, phone numbers and URLs stay verbatim unless the instruction says otherwise.
+                - Booleans stay booleans, null stays null, arrays stay arrays.
+                - Return ONLY the transformed JSON object — no prose, no explanations, no markdown fences.
+                TXT;
+        }
+
+        return '';
     }
 
     /**
@@ -4499,9 +4804,15 @@ class SynaformController extends AbstractController
         $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_FORM, 'default', $defaultForm);
     }
 
-    private function buildExtractionPrompt(string $rawText, array $formFields = [], string $language = 'de'): string
+    private function buildExtractionPrompt(int $userId, string $rawText, array $formFields = [], string $language = 'de'): string
     {
         $languageName = $this->languageName($language);
+        // Same processing-context defaults as the grouped prompt (today's
+        // date → "Monat der Erfassung"-style fields, language default).
+        $contextBlock = strtr(
+            $this->getPromptText($userId, 'extraction_context'),
+            $this->promptTokens($languageName)
+        );
         $fieldLines = [];
 
         $defaultScalars = [
@@ -4601,6 +4912,8 @@ class SynaformController extends AbstractController
               - If a `current_position` field exists, fill it with the present
                 role as "Job title – Employer, Location" (include the current
                 employer and its city/location when known), not the bare title.
+
+            {$contextBlock}
 
             Fields to extract:
             {$fieldsBlock}
@@ -5422,7 +5735,9 @@ class SynaformController extends AbstractController
                 foreach ($parsed['sections'] as $s) {
                     if (is_string($s) && trim($s) !== '') {
                         $sections[] = trim($s);
-                        if (count($sections) >= 10) break;
+                        if (count($sections) >= 10) {
+                            break;
+                        }
                     }
                 }
             }
@@ -5726,7 +6041,9 @@ class SynaformController extends AbstractController
     private function findVerbatimMatch(string $sourceText, string $snippetCollapsed, bool $caseInsensitive): ?string
     {
         $snippetCollapsed = trim($snippetCollapsed);
-        if ($snippetCollapsed === '') return null;
+        if ($snippetCollapsed === '') {
+            return null;
+        }
 
         // Build a regex where every internal space in the snippet
         // matches any whitespace run in the source.
@@ -5736,7 +6053,9 @@ class SynaformController extends AbstractController
             preg_quote($snippetCollapsed, '#'),
         ) ?? preg_quote($snippetCollapsed, '#');
         $flags = 'u';
-        if ($caseInsensitive) $flags .= 'i';
+        if ($caseInsensitive) {
+            $flags .= 'i';
+        }
         $regex = '#' . $pattern . '#' . $flags;
 
         if (preg_match($regex, $sourceText, $m) === 1) {
@@ -6298,11 +6617,20 @@ class SynaformController extends AbstractController
                     if (!in_array($colType, $validColumnTypes, true)) {
                         $colType = 'text';
                     }
-                    $cols[] = [
+                    $colOut = [
                         'key' => (string) $col['key'],
                         'label' => (string) ($col['label'] ?? $col['key']),
                         'type' => $colType,
                     ];
+                    // List columns carry an explicit rendering mode:
+                    // structured (date header + title + task bullets) vs
+                    // flat (every item is a bullet). An explicit false must
+                    // survive normalization — it's how the user opts a
+                    // `details` column OUT of the legacy structured default.
+                    if ($colType === 'list' && array_key_exists('structured', $col)) {
+                        $colOut['structured'] = (bool) $col['structured'];
+                    }
+                    $cols[] = $colOut;
                 }
                 if (!empty($cols)) {
                     $field['columns'] = $cols;
@@ -6681,7 +7009,9 @@ class SynaformController extends AbstractController
     private function stripStationDetailsDuplicatePrefix(string $details, string $time, string $position): string
     {
         $needles = [];
-        if ($time !== '')     $needles[] = $time;
+        if ($time !== '') {
+            $needles[] = $time;
+        }
         if ($position !== '') {
             $needles[] = $position;
             // Peel chunks so we catch partial echoes like
@@ -9562,12 +9892,18 @@ class SynaformController extends AbstractController
         if (($col['type'] ?? '') !== 'list') {
             return false;
         }
-        if (!empty($col['structured'])) {
-            return true;
+        // Explicit setting wins in BOTH directions: `structured: false` on a
+        // `details` column opts out of the legacy structured default so every
+        // item renders as a bullet (customer feedback: "sometimes bullets,
+        // sometimes not" — the structured classifier demotes the first item
+        // to a bullet-less title line, which surprises users who expect a
+        // plain bullet list).
+        if (array_key_exists('structured', $col)) {
+            return (bool) $col['structured'];
         }
         $designer = $col['designer'] ?? null;
-        if (is_array($designer) && !empty($designer['structured'])) {
-            return true;
+        if (is_array($designer) && array_key_exists('structured', $designer)) {
+            return (bool) $designer['structured'];
         }
         return strtolower((string) ($col['key'] ?? '')) === 'details';
     }
