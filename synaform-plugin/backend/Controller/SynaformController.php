@@ -2528,8 +2528,15 @@ class SynaformController extends AbstractController
         $onlyMissing = $request->query->getBoolean('onlyMissing', false);
 
         $fields = $form['fields'] ?? [];
+        // Image-typed fields are excluded from the text-extraction AI: it
+        // cannot produce a photo, and a stray string suggestion would
+        // overwrite the stored image metadata. Photos are handled by
+        // autoExtractProfileImages() below instead.
         $allowedKeys = array_values(array_filter(
-            array_map(static fn ($f) => (string) ($f['key'] ?? ''), $fields),
+            array_map(
+                static fn ($f) => ($f['type'] ?? '') === 'image' ? '' : (string) ($f['key'] ?? ''),
+                $fields
+            ),
             static fn ($k) => $k !== ''
         ));
         $fieldsByKey = [];
@@ -2538,6 +2545,22 @@ class SynaformController extends AbstractController
             if ($key !== '') {
                 $fieldsByKey[$key] = $f;
             }
+        }
+
+        // Auto-fill empty image-typed variables with a portrait photo found
+        // in the uploaded PDFs (profile photo embedded in a CV). Runs before
+        // the AI text extraction so both strategy paths benefit; failures
+        // are non-fatal — text extraction proceeds regardless.
+        try {
+            if ($this->autoExtractProfileImages($userId, $candidateId, $entry, $fields)) {
+                $entry['updated_at'] = date('c');
+                $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+            }
+        } catch (\Throwable $e) {
+            $this->logger->warning('Synaform: profile photo auto-extraction failed', [
+                'candidateId' => $candidateId,
+                'error' => $e->getMessage(),
+            ]);
         }
 
         $extractionLanguage = $this->resolveExtractionLanguage($userId, $form);
@@ -3665,7 +3688,7 @@ class SynaformController extends AbstractController
             $this->processBlockGroups($tp, $classified['blockGroups'], $arrays);
             $this->processCheckboxes($tp, $classified['checkboxes'], $variables, $designerMap);
             $this->processLists($tp, $classified['lists'], $variables, $designerMap);
-            $this->processImages($tp, $formFields, $entry);
+            $floatingImages = $this->processImages($tp, $formFields, $entry);
             $this->processScalars($tp, $classified['scalars'], $variables);
 
             $docId = 'doc_' . bin2hex(random_bytes(6));
@@ -3694,6 +3717,11 @@ class SynaformController extends AbstractController
             // toggle the checkboxes in the generated DOCX while still keeping
             // the pre-resolved state visible.
             $this->convertCheckboxMarkersToContentControls($outputPath);
+
+            // Phase F post-pass: replace [[SYNIMG|…]] markers with floating
+            // (absolutely positioned, text-wrapping) picture shapes for image
+            // variables whose designer config uses placement=float.
+            $this->embedFloatingImages($outputPath, $floatingImages);
 
             if (is_file($cleanedPath)) {
                 unlink($cleanedPath);
@@ -4127,6 +4155,200 @@ class SynaformController extends AbstractController
             'image/bmp'  => 'bmp',
             default      => 'bin',
         };
+    }
+
+    /**
+     * Auto-fill empty image-typed variables with a portrait photo embedded
+     * in one of the uploaded PDF source documents — the classic "profile
+     * photo in the CV" case. Only fields WITHOUT a stored image are touched,
+     * so a manual upload always wins and a re-run only fills what is still
+     * empty. Returns true when the candidate entry was modified.
+     *
+     * @param array<int, array<string, mixed>> $fields the form's field definitions
+     */
+    private function autoExtractProfileImages(int $userId, string $candidateId, array &$entry, array $fields): bool
+    {
+        $emptyImageFields = [];
+        foreach ($fields as $field) {
+            if (($field['type'] ?? '') !== 'image' || empty($field['key'])) {
+                continue;
+            }
+            $meta = $entry['field_values'][(string) $field['key']] ?? null;
+            if (is_array($meta) && !empty($meta['path']) && is_file($meta['path'])) {
+                continue;
+            }
+            $emptyImageFields[] = $field;
+        }
+        if ($emptyImageFields === []) {
+            return false;
+        }
+
+        $candidateDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
+        $pdfPaths = [];
+        $cvStored = $entry['files']['cv']['stored_as'] ?? null;
+        if (is_string($cvStored) && str_ends_with(strtolower($cvStored), '.pdf') && is_file($candidateDir . '/' . $cvStored)) {
+            $pdfPaths[] = $candidateDir . '/' . $cvStored;
+        }
+        foreach ($entry['files']['additional'] ?? [] as $doc) {
+            $storedAs = $doc['stored_as'] ?? null;
+            if (is_string($storedAs) && str_ends_with(strtolower($storedAs), '.pdf') && is_file($candidateDir . '/' . $storedAs)) {
+                $pdfPaths[] = $candidateDir . '/' . $storedAs;
+            }
+        }
+        if ($pdfPaths === []) {
+            return false;
+        }
+
+        $photoPath = null;
+        $sourcePdf = null;
+        foreach ($pdfPaths as $pdfPath) {
+            $photoPath = $this->findProfilePhotoInPdf($pdfPath);
+            if ($photoPath !== null) {
+                $sourcePdf = $pdfPath;
+                break;
+            }
+        }
+        if ($photoPath === null) {
+            return false;
+        }
+
+        // Prefer the field whose key/label sounds like a photo; otherwise
+        // the first empty image field gets the portrait.
+        $target = null;
+        foreach ($emptyImageFields as $field) {
+            $haystack = strtolower(($field['key'] ?? '') . ' ' . ($field['label'] ?? ''));
+            if (preg_match('/photo|foto|portrait|portr\x{00e4}t|bild|picture|profil|headshot/u', $haystack) === 1) {
+                $target = $field;
+                break;
+            }
+        }
+        $target ??= $emptyImageFields[0];
+        $key = (string) $target['key'];
+
+        $dir = $candidateDir . '/images';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0o755, true);
+        }
+        foreach (glob($dir . '/' . $key . '.*') ?: [] as $old) {
+            @unlink($old);
+        }
+        $storedPath = $dir . '/' . $key . '.png';
+        if (!@rename($photoPath, $storedPath)) {
+            if (!@copy($photoPath, $storedPath)) {
+                @unlink($photoPath);
+
+                return false;
+            }
+            @unlink($photoPath);
+        }
+
+        if (!isset($entry['field_values']) || !is_array($entry['field_values'])) {
+            $entry['field_values'] = [];
+        }
+        $entry['field_values'][$key] = [
+            'path' => $storedPath,
+            'mime' => 'image/png',
+            'original_name' => basename((string) $sourcePdf) . ' (auto-extracted)',
+            'size' => filesize($storedPath) ?: 0,
+            'uploaded_at' => date('c'),
+            'auto_extracted' => true,
+        ];
+        $this->logger->info('Synaform: auto-extracted profile photo from PDF', [
+            'candidateId' => $candidateId,
+            'field' => $key,
+            'source' => basename((string) $sourcePdf),
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Locate the most likely profile photo embedded in a PDF using Poppler's
+     * pdfimages. Heuristic: a real `image` object on one of the first two
+     * pages, at least 100x100 px, portrait-to-square aspect ratio (width /
+     * height between 0.5 and 1.15). CV layouts embed the portrait as its own
+     * image object; full-page scans and decorative banners fall outside the
+     * ratio/size window. Returns the path of an extracted PNG in a temp
+     * location (caller moves/deletes it), or null when nothing matches or
+     * pdfimages is unavailable.
+     */
+    private function findProfilePhotoInPdf(string $pdfPath): ?string
+    {
+        $bin = trim((string) @shell_exec('command -v pdfimages 2>/dev/null'));
+        if ($bin === '') {
+            return null;
+        }
+
+        $lines = [];
+        exec(sprintf('%s -list %s 2>/dev/null', escapeshellarg($bin), escapeshellarg($pdfPath)), $lines, $code);
+        if ($code !== 0) {
+            return null;
+        }
+
+        $best = null;
+        foreach ($lines as $line) {
+            if (!preg_match('/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(\d+)/', $line, $m)) {
+                continue;
+            }
+            $page = (int) $m[1];
+            $type = $m[3];
+            $w = (int) $m[4];
+            $h = (int) $m[5];
+            if ($type !== 'image' || $page > 2) {
+                continue;
+            }
+            if ($w < 100 || $h < 100 || $w > 2500 || $h > 2500) {
+                continue;
+            }
+            $ratio = $w / $h;
+            if ($ratio < 0.5 || $ratio > 1.15) {
+                continue;
+            }
+            if ($best === null || $w * $h > $best['w'] * $best['h']) {
+                $best = ['page' => $page, 'w' => $w, 'h' => $h];
+            }
+        }
+        if ($best === null) {
+            return null;
+        }
+
+        $tmpDir = sys_get_temp_dir() . '/synaform-img-' . bin2hex(random_bytes(4));
+        if (!@mkdir($tmpDir, 0o700, true)) {
+            return null;
+        }
+        exec(sprintf(
+            '%s -png -f %d -l %d %s %s 2>/dev/null',
+            escapeshellarg($bin),
+            $best['page'],
+            $best['page'],
+            escapeshellarg($pdfPath),
+            escapeshellarg($tmpDir . '/img')
+        ), $out, $code);
+
+        $match = null;
+        foreach (glob($tmpDir . '/img-*.png') ?: [] as $png) {
+            $size = @getimagesize($png);
+            if (is_array($size) && (int) $size[0] === $best['w'] && (int) $size[1] === $best['h']) {
+                $match = $png;
+                break;
+            }
+        }
+        if ($match === null) {
+            $this->removeDirectory($tmpDir);
+
+            return null;
+        }
+
+        // Move the hit out of the temp dir so the cleanup below can't kill it.
+        $finalTmp = sys_get_temp_dir() . '/synaform-photo-' . bin2hex(random_bytes(4)) . '.png';
+        if (!@rename($match, $finalTmp)) {
+            $this->removeDirectory($tmpDir);
+
+            return null;
+        }
+        $this->removeDirectory($tmpDir);
+
+        return $finalTmp;
     }
 
     // =========================================================================
@@ -6547,6 +6769,25 @@ class SynaformController extends AbstractController
             if (array_key_exists('preserve_ratio', $raw)) {
                 $out['preserve_ratio'] = (bool) $raw['preserve_ratio'];
             }
+            // Positioning: "inline" (default — image replaces the placeholder
+            // in the text flow) or "float" (anchored to the page margin, text
+            // wraps around it — e.g. profile photo in the upper right corner).
+            $placement = isset($raw['placement']) ? strtolower((string) $raw['placement']) : '';
+            if (in_array($placement, ['inline', 'float'], true)) {
+                $out['placement'] = $placement;
+            }
+            $floatH = isset($raw['float_h']) ? strtolower((string) $raw['float_h']) : '';
+            if (in_array($floatH, ['left', 'center', 'right'], true)) {
+                $out['float_h'] = $floatH;
+            }
+            $floatV = isset($raw['float_v']) ? strtolower((string) $raw['float_v']) : '';
+            if (in_array($floatV, ['top', 'middle', 'bottom'], true)) {
+                $out['float_v'] = $floatV;
+            }
+            $wrap = isset($raw['wrap']) ? (string) $raw['wrap'] : '';
+            if (in_array($wrap, ['square', 'topAndBottom', 'none'], true)) {
+                $out['wrap'] = $wrap;
+            }
         }
 
         return $out;
@@ -7160,11 +7401,18 @@ class SynaformController extends AbstractController
                 $value = $formData[$key] ?? null;
             }
 
-            if ($value === null && $fallbackSource !== null) {
+            // An empty primary value ('' or []) must not block the fallback
+            // source — a form field left blank should still pick up the
+            // AI-extracted value (and vice versa), also on later re-runs.
+            if (!$this->fieldValueIsFilled($value) && $fallbackSource !== null) {
+                $fallbackValue = null;
                 if ($fallbackSource === 'ai') {
-                    $value = $aiData[$key] ?? null;
+                    $fallbackValue = $aiData[$key] ?? null;
                 } elseif ($fallbackSource === 'form') {
-                    $value = $formData[$key] ?? null;
+                    $fallbackValue = $formData[$key] ?? null;
+                }
+                if ($this->fieldValueIsFilled($fallbackValue)) {
+                    $value = $fallbackValue;
                 }
             }
 
@@ -7594,6 +7842,12 @@ class SynaformController extends AbstractController
         foreach ($listKeys as $key) {
             $val = $variables[$key] ?? null;
             $items = is_array($val) ? array_map('strval', $val) : ((string) ($val ?? '') === '' ? [] : [(string) $val]);
+            if ($items === []) {
+                // Keep the placeholder visible (yellow) instead of wiping it —
+                // same contract as processScalars for empty variables.
+                $tp->setValue($key, $this->buildEmptyPlaceholderXml($key));
+                continue;
+            }
             $designer = $designerMap[$key] ?? [];
             if (!empty($designer['top_blank_line'])) {
                 array_unshift($items, '');
@@ -7617,14 +7871,22 @@ class SynaformController extends AbstractController
      * in the template via the `{{key:width=W:height=H}}` suffix (PhpWord
      * understands this natively) or in the variable's designer config
      * (`designer.width`, `designer.height`). Missing images leave the
-     * placeholder untouched; the scalar pass then replaces it with an empty
-     * string so it doesn't show up as literal text in the output.
+     * placeholder untouched; the scalar pass then keeps it visible with a
+     * yellow highlight so the customer can spot the missing image.
+     *
+     * Fields whose designer config sets `placement=float` are NOT embedded
+     * inline. Their placeholder is replaced with a `[[SYNIMG|key]]` marker
+     * and the actual floating (absolutely positioned, text-wrapping) shape
+     * is inserted by embedFloatingImages() after saveAs() — PhpWord's
+     * setImageValue can only produce inline shapes.
      *
      * @param array<int, array<string, mixed>> $formFields
      * @param array<string, mixed>             $entry
+     * @return array<string, array{path: string, mime: string, designer: array<string, mixed>}> float-configured images keyed by variable key
      */
-    private function processImages(TemplateProcessor $tp, array $formFields, array $entry): void
+    private function processImages(TemplateProcessor $tp, array $formFields, array $entry): array
     {
+        $floating = [];
         foreach ($formFields as $field) {
             if (($field['type'] ?? '') !== 'image' || empty($field['key'])) {
                 continue;
@@ -7636,6 +7898,16 @@ class SynaformController extends AbstractController
             }
 
             $designer = $field['designer'] ?? [];
+            if (($designer['placement'] ?? 'inline') === 'float') {
+                $tp->setValue($key, '[[SYNIMG|' . $key . ']]');
+                $floating[$key] = [
+                    'path' => (string) $meta['path'],
+                    'mime' => (string) ($meta['mime'] ?? 'image/png'),
+                    'designer' => $designer,
+                ];
+                continue;
+            }
+
             $width = (int) ($designer['width'] ?? 140);
             $height = (int) ($designer['height'] ?? 180);
 
@@ -7653,18 +7925,199 @@ class SynaformController extends AbstractController
                 ]);
             }
         }
+
+        return $floating;
+    }
+
+    /**
+     * Phase F post-pass: replace every `[[SYNIMG|key]]` marker emitted by
+     * processImages() with a floating VML picture shape — absolutely
+     * positioned relative to the page margins (e.g. profile photo in the
+     * upper right corner) with configurable text wrapping. Handles the main
+     * body plus headers/footers, and registers the image binary, its
+     * content-type override, and the relationship entry per part.
+     *
+     * @param array<string, array{path: string, mime: string, designer: array<string, mixed>}> $floatingImages
+     */
+    private function embedFloatingImages(string $docxPath, array $floatingImages): void
+    {
+        if ($floatingImages === [] || !is_file($docxPath)) {
+            return;
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            $this->logger->warning('Failed to open DOCX for floating-image post-pass', ['path' => $docxPath]);
+
+            return;
+        }
+
+        $contentTypes = $zip->getFromName('[Content_Types].xml');
+        $imgIdx = 0;
+
+        foreach ($this->collectDocumentPartNames($zip) as $partName) {
+            $xml = $zip->getFromName($partName);
+            if ($xml === false) {
+                continue;
+            }
+            $partDirty = false;
+
+            foreach ($floatingImages as $key => $img) {
+                $marker = '[[SYNIMG|' . $key . ']]';
+                if (!str_contains($xml, $marker)) {
+                    continue;
+                }
+
+                ++$imgIdx;
+                $ext = $this->mimeToExtension($img['mime']);
+                $mediaName = 'synimg' . $imgIdx . '.' . $ext;
+                $zip->addFile($img['path'], 'word/media/' . $mediaName);
+
+                if (is_string($contentTypes) && !str_contains($contentTypes, '"/word/media/' . $mediaName . '"')) {
+                    $override = '<Override PartName="/word/media/' . $mediaName . '" ContentType="' . htmlspecialchars($img['mime'], ENT_XML1 | ENT_QUOTES, 'UTF-8') . '"/>';
+                    $contentTypes = str_replace('</Types>', $override . '</Types>', $contentTypes);
+                }
+
+                $relsName = 'word/_rels/' . basename($partName) . '.rels';
+                $relsXml = $zip->getFromName($relsName);
+                if ($relsXml === false) {
+                    $relsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+                }
+                $rid = 'rIdSynImg' . $imgIdx;
+                $relation = '<Relationship Id="' . $rid . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/' . $mediaName . '"/>';
+                $zip->addFromString($relsName, str_replace('</Relationships>', $relation . '</Relationships>', $relsXml));
+
+                // The marker sits inside a <w:t> of a <w:r>: close that run,
+                // emit a run carrying the pict, reopen a run for any tail text.
+                $pict = $this->buildFloatingImagePict($rid, $img['designer'], $img['path']);
+                $xml = str_replace(
+                    $marker,
+                    '</w:t></w:r><w:r>' . $pict . '</w:r><w:r><w:t xml:space="preserve">',
+                    $xml
+                );
+                $partDirty = true;
+            }
+
+            if ($partDirty) {
+                $zip->addFromString($partName, $this->ensureVmlNamespaces($xml));
+            }
+        }
+
+        if (is_string($contentTypes)) {
+            $zip->addFromString('[Content_Types].xml', $contentTypes);
+        }
+        $zip->close();
+    }
+
+    /**
+     * Build the floating `<w:pict>` for one image. Position and wrap come
+     * from the variable's designer config:
+     *   float_h: left|center|right   (relative to the page margins)
+     *   float_v: top|middle|bottom   (relative to the page margins)
+     *   wrap:    square|topAndBottom|none
+     */
+    private function buildFloatingImagePict(string $rid, array $designer, string $imagePath): string
+    {
+        $width = max(16, min(1600, (int) ($designer['width'] ?? 140)));
+        $height = max(16, min(2000, (int) ($designer['height'] ?? 180)));
+        if (!empty($designer['preserve_ratio'])) {
+            $size = @getimagesize($imagePath);
+            if (is_array($size) && (int) $size[0] > 0 && (int) $size[1] > 0) {
+                $scale = min($width / (int) $size[0], $height / (int) $size[1]);
+                $width = max(16, (int) round((int) $size[0] * $scale));
+                $height = max(16, (int) round((int) $size[1] * $scale));
+            }
+        }
+
+        $h = in_array($designer['float_h'] ?? '', ['left', 'center', 'right'], true) ? $designer['float_h'] : 'right';
+        $v = $designer['float_v'] ?? 'top';
+        $v = match ($v) {
+            'middle' => 'center',
+            'bottom' => 'bottom',
+            default => 'top',
+        };
+        $wrap = in_array($designer['wrap'] ?? '', ['square', 'topAndBottom', 'none'], true) ? $designer['wrap'] : 'square';
+
+        $style = sprintf(
+            'position:absolute;mso-position-horizontal:%s;mso-position-horizontal-relative:margin;'
+            . 'mso-position-vertical:%s;mso-position-vertical-relative:margin;width:%dpx;height:%dpx;z-index:251658240',
+            $h,
+            $v,
+            $width,
+            $height
+        );
+        $wrapXml = $wrap === 'none' ? '' : '<w10:wrap type="' . $wrap . '"/>';
+
+        return '<w:pict><v:shape type="#_x0000_t75" style="' . $style . '" stroked="f" filled="f">'
+            . '<v:imagedata r:id="' . $rid . '" o:title=""/>' . $wrapXml . '</v:shape></w:pict>';
+    }
+
+    /**
+     * Make sure the part's root element declares the VML namespaces the
+     * floating shape uses. Word-authored documents usually carry them, but a
+     * minimal template (e.g. generated programmatically) may not — and a
+     * missing xmlns makes Word refuse to open the file.
+     */
+    private function ensureVmlNamespaces(string $xml): string
+    {
+        $needed = [
+            'xmlns:v' => 'urn:schemas-microsoft-com:vml',
+            'xmlns:o' => 'urn:schemas-microsoft-com:office:office',
+            'xmlns:w10' => 'urn:schemas-microsoft-com:office:word',
+        ];
+        $missing = '';
+        foreach ($needed as $attr => $uri) {
+            if (!str_contains($xml, $attr . '=')) {
+                $missing .= ' ' . $attr . '="' . $uri . '"';
+            }
+        }
+        if ($missing === '') {
+            return $xml;
+        }
+
+        $patched = preg_replace('#<w:(document|hdr|ftr)\b([^>]*)>#', '<w:$1$2' . $missing . '>', $xml, 1);
+
+        return is_string($patched) ? $patched : $xml;
     }
 
     /**
      * Scalar mode: simple text replacement for all remaining placeholders.
+     *
+     * Empty variables are NOT blanked out: the literal placeholder stays in
+     * the document with a yellow highlight, so the customer sees exactly
+     * which values are still missing and can re-run extraction / fill them
+     * and generate again.
      */
     private function processScalars(TemplateProcessor $tp, array $scalarKeys, array $variables): void
     {
         foreach ($scalarKeys as $key) {
             $value = $variables[$key] ?? null;
-            $value = htmlspecialchars((string) ($value ?? ''), ENT_XML1 | ENT_QUOTES, 'UTF-8');
+            if ($value === null || (string) $value === '') {
+                $tp->setValue($key, $this->buildEmptyPlaceholderXml($key));
+                continue;
+            }
+            $value = htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
             $tp->setValue($key, $value);
         }
+    }
+
+    /**
+     * OOXML fragment that keeps an unresolved `{{key}}` visible in the
+     * generated document, rendered on a yellow highlight. Assumes the
+     * replacement happens inside a `<w:t>` of a `<w:r>` (which is what
+     * PhpWord's setValue guarantees): the host run is closed, a dedicated
+     * highlighted run carries the placeholder text, and a fresh run reopens
+     * for whatever text followed the placeholder.
+     */
+    private function buildEmptyPlaceholderXml(string $key): string
+    {
+        $label = htmlspecialchars('{{' . $key . '}}', ENT_XML1 | ENT_QUOTES, 'UTF-8');
+
+        return '</w:t></w:r>'
+            . '<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr>'
+            . '<w:t xml:space="preserve">' . $label . '</w:t></w:r>'
+            . '<w:r><w:t xml:space="preserve">';
     }
 
     private function cleanTemplateMacros(string $docxPath): string
@@ -8092,7 +8545,8 @@ class SynaformController extends AbstractController
      *  - Not expanded (placeholder missing, inline, or the regex could not match):
      *    key is left in place and processLists() handles it via the <w:br/> fallback.
      *
-     * Empty lists cause the host paragraph to be dropped entirely.
+     * Empty lists are skipped here and fall through to processLists(), which
+     * keeps the placeholder visible with a yellow highlight.
      *
      * @param list<string>                           $listKeys
      * @param array<string, mixed>                   $variables
@@ -8129,6 +8583,14 @@ class SynaformController extends AbstractController
             $raw = array_key_exists($key, $variables) ? $variables[$key] : ($arrays[$key] ?? null);
             $items = $this->normalizeListValue($raw);
 
+            // Empty lists are left for processLists(), which keeps the
+            // placeholder visible with a yellow highlight instead of
+            // dropping the host paragraph. (Empty variables must survive
+            // generation so the customer can spot and fill them later.)
+            if ($items === [] || $items === null) {
+                continue;
+            }
+
             $placeholder = '{{' . $key . '}}';
             if (!str_contains($xml, $placeholder)) {
                 continue;
@@ -8150,10 +8612,6 @@ class SynaformController extends AbstractController
                 function (array $match) use ($placeholder, $items, $wantsOrdered, $preventOrphans, $topBlankLine, $bottomBlankLine, $orderedNumId, $bulletNumId, &$replacementCount): string {
                     $replacementCount++;
                     $paragraph = $match[0];
-
-                    if ($items === [] || $items === null) {
-                        return '';
-                    }
 
                     // If the designer wants an ordered (OL) list and the template
                     // paragraph has bullet numPr, rewrite numPr to point at the

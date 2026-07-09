@@ -140,15 +140,14 @@ export default {
       datasetVariables: null,
       datasetVariablesLoading: false,
       selectedGenerateTemplate: null,
-      editingVarKey: null,
       reorderingFields: false,
       urlFormOpen: false,
       urlAdding: false,
       urlAddError: null,
 
-      // Tabbed dataset detail view: "sources" | "details" | "variables"
-      // | "generate". The old single-page layout was extremely long; the
-      // tabs scope the user to one phase of the flow at a time.
+      // Tabbed dataset detail view: "sources" | "details" | "generate".
+      // The old single-page layout was extremely long; the tabs scope the
+      // user to one phase of the flow at a time.
       datasetTab: "sources",
 
       // Live preview — shown as a modal overlay so the dataset form can use
@@ -1029,7 +1028,6 @@ export default {
         state.datasetGenerating = false;
         state.datasetParsing = false;
         state.datasetParseStep = 0;
-        state.editingVarKey = null;
         state.reorderingFields = false;
         state.selectedGenerateTemplate = null;
         state.generateInstruction = "";
@@ -1212,7 +1210,7 @@ export default {
       .tx-preview .tx-u { text-decoration: underline; }
       .tx-preview .tx-ph { background: rgba(255, 221, 89, .45); padding: 0 .1em; border-radius: 2px; transition: background .15s; }
       .tx-preview .tx-ph.tx-filled { background: rgba(77, 200, 142, .18); }
-      .tx-preview .tx-ph.tx-empty-val { background: rgba(220, 53, 69, .12); color: #a22; font-style: italic; }
+      .tx-preview .tx-ph.tx-empty-val { background: rgba(255, 221, 89, .65); color: #6b5300; font-style: italic; }
       .tx-preview .tx-ph.tx-cb-on { background: transparent; color: #1a1a1a; font-weight: 700; }
       .tx-preview .tx-ph.tx-cb-off { background: transparent; color: #777; }
       .tx-preview ul.tx-preview-bullets { list-style: disc; margin: 0; padding-left: 1.1em; }
@@ -3342,7 +3340,17 @@ export default {
         </div>`;
       }
       if (fd.type === "image") {
-        return `<div class="mt-2 p-3 rounded space-y-2" style="background:var(--bg-app)">
+        const placement = d.placement === "float" ? "float" : "inline";
+        const floatH = ["left", "center", "right"].includes(d.float_h)
+          ? d.float_h
+          : "right";
+        const floatV = ["top", "middle", "bottom"].includes(d.float_v)
+          ? d.float_v
+          : "top";
+        const wrap = ["square", "topAndBottom", "none"].includes(d.wrap)
+          ? d.wrap
+          : "square";
+        return `<div class="mt-2 p-3 rounded space-y-3" style="background:var(--bg-app)">
           <p class="text-xs tx-secondary">${T("variables.designer_image_hint")}</p>
           <div class="grid grid-cols-3 gap-2 items-center">
             <div>
@@ -3357,6 +3365,40 @@ export default {
               <input type="checkbox" name="fd_${idx}_preserve_ratio" ${d.preserve_ratio ? "checked" : ""} class="h-4 w-4" style="accent-color:var(--brand)" />
               <span>${T("variables.designer_image_preserve_ratio")}</span>
             </label>
+          </div>
+          <div>
+            <label class="tx-label">${T("variables.designer_image_placement")}</label>
+            <select name="fd_${idx}_placement" class="tx-select">
+              <option value="inline"${placement === "inline" ? " selected" : ""}>${T("variables.designer_image_placement_inline")}</option>
+              <option value="float"${placement === "float" ? " selected" : ""}>${T("variables.designer_image_placement_float")}</option>
+            </select>
+          </div>
+          <p class="text-xs tx-secondary" style="margin-top:-.125rem">${T("variables.designer_image_float_hint")}</p>
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <label class="text-xs tx-secondary">${T("variables.designer_image_float_h")}</label>
+              <select name="fd_${idx}_float_h" class="tx-select text-xs">
+                <option value="left"${floatH === "left" ? " selected" : ""}>${T("variables.designer_image_pos_left")}</option>
+                <option value="center"${floatH === "center" ? " selected" : ""}>${T("variables.designer_image_pos_center")}</option>
+                <option value="right"${floatH === "right" ? " selected" : ""}>${T("variables.designer_image_pos_right")}</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs tx-secondary">${T("variables.designer_image_float_v")}</label>
+              <select name="fd_${idx}_float_v" class="tx-select text-xs">
+                <option value="top"${floatV === "top" ? " selected" : ""}>${T("variables.designer_image_pos_top")}</option>
+                <option value="middle"${floatV === "middle" ? " selected" : ""}>${T("variables.designer_image_pos_middle")}</option>
+                <option value="bottom"${floatV === "bottom" ? " selected" : ""}>${T("variables.designer_image_pos_bottom")}</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs tx-secondary">${T("variables.designer_image_wrap")}</label>
+              <select name="fd_${idx}_wrap" class="tx-select text-xs">
+                <option value="square"${wrap === "square" ? " selected" : ""}>${T("variables.designer_image_wrap_square")}</option>
+                <option value="topAndBottom"${wrap === "topAndBottom" ? " selected" : ""}>${T("variables.designer_image_wrap_topbottom")}</option>
+                <option value="none"${wrap === "none" ? " selected" : ""}>${T("variables.designer_image_wrap_none")}</option>
+              </select>
+            </div>
           </div>
         </div>`;
       }
@@ -4317,7 +4359,7 @@ export default {
         </div>
       </div>`;
 
-      // Four explicit tabs, in user-flow order. We use `data-dataset-tab`
+      // Explicit tabs, in user-flow order. We use `data-dataset-tab`
       // (NOT `data-tab`) so clicks don't bubble up to the global
       // collection-level tab handler, which would otherwise hijack the
       // navigation away from the dataset detail page.
@@ -4328,8 +4370,7 @@ export default {
       const tabs = [
         { id: "sources", label: `1. ${T("datasets.tab_sources")}` },
         { id: "details", label: `2. ${T("datasets.tab_details")}` },
-        { id: "variables", label: `3. ${T("datasets.tab_variables")}` },
-        { id: "generate", label: `4. ${T("datasets.tab_generate")}` },
+        { id: "generate", label: `3. ${T("datasets.tab_generate")}` },
       ];
       const tabNav = `<nav class="flex gap-1 overflow-x-auto" style="border-bottom:1px solid var(--divider)">
         ${tabs
@@ -4344,13 +4385,6 @@ export default {
       switch (currentTab) {
         case "details":
           tabBody = renderDatasetDataSection(c, d);
-          break;
-        case "variables":
-          tabBody = `<div class="tx-card p-5">
-            <h4 class="text-sm font-semibold flex items-center gap-2 mb-1">${ICONS.sparkle} ${T("datasets.section_variables")}</h4>
-            <p class="text-xs tx-secondary mb-3">${T("datasets.section_variables_hint")}</p>
-            ${renderDatasetVariablesSection(d)}
-          </div>`;
           break;
         case "generate":
           tabBody = renderDatasetGenerateSection(c, d);
@@ -4853,125 +4887,6 @@ export default {
           <span class="text-xs tx-secondary">— ${T("datasets.section_extraction_hint")}</span>
         </div>
         ${line}
-      </div>`;
-    }
-
-    /**
-     * Renders the "Resolved Variables" table without an outer card wrapper.
-     * Caller is responsible for placing it inside whatever container makes
-     * sense in the surrounding layout (the new Variables tab wraps it in
-     * a collapsible card; older callers wrapped it in their own tx-card).
-     */
-    function renderDatasetVariablesSection(d) {
-      if (state.datasetVariablesLoading) {
-        return `<div class="flex items-center gap-2 py-4">
-          <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-          <span class="text-sm tx-secondary">${T("app.loading")}</span>
-        </div>`;
-      }
-      const vars = state.datasetVariables;
-      if (!vars || vars.length === 0) {
-        return `<p class="text-sm tx-secondary">${T("app.no_data")}</p>`;
-      }
-      const regular = vars.filter((v) => v.type !== "table");
-      const tables = vars.filter((v) => v.type === "table");
-      const rows = regular.map((v) => renderVarRow(v, d.id)).join("");
-      const tblGroups = tables.map((v) => renderTableGroup(v)).join("");
-      return `<div>
-        <div class="overflow-x-auto">
-          <table class="w-full text-left">
-            <thead>
-              <tr class="tx-divider border-b text-xs tx-secondary uppercase tracking-wider">
-                <th class="py-2 px-3">${T("datasets.var_key")}</th>
-                <th class="py-2 px-3">${T("datasets.var_value")}</th>
-                <th class="py-2 px-3">${T("datasets.var_source")}</th>
-                <th class="py-2 px-3 text-right"></th>
-              </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-        ${tblGroups}
-      </div>`;
-    }
-
-    function renderVarRow(v, datasetId) {
-      const isEditing = state.editingVarKey === v.key;
-      const src =
-        v.source === "ai"
-          ? T("datasets.source_ai")
-          : v.source === "override"
-            ? T("datasets.source_override")
-            : T("datasets.source_form");
-      const srcCls =
-        v.source === "ai"
-          ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-          : v.source === "override"
-            ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
-            : "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300";
-      let disp;
-      if (Array.isArray(v.value)) {
-        disp = v.value.map((i) => escHtml(String(i))).join("<br>");
-      } else {
-        disp =
-          v.value != null && v.value !== ""
-            ? escHtml(String(v.value))
-            : `<span class="text-gray-400 italic">${T("datasets.var_not_set")}</span>`;
-      }
-      if (isEditing) {
-        const ev = escHtml(
-          Array.isArray(v.value) ? v.value.join("\n") : String(v.value ?? ""),
-        );
-        return `<tr class="tx-divider border-t bg-blue-50/50 dark:bg-blue-900/10">
-          <td class="py-2 px-3 font-mono text-sm align-top">${escHtml(v.key)}</td>
-          <td class="py-2 px-3" colspan="2">
-            <textarea id="tx-override-input" class="tx-textarea" rows="2">${ev}</textarea>
-          </td>
-          <td class="py-2 px-3 text-right align-top">
-            <div class="flex items-center gap-1 justify-end">
-              <button data-action="save-override" data-var-key="${escHtml(v.key)}" class="p-1 rounded" style="color:var(--status-success)" title="${T("app.save")}">${ICONS.check}</button>
-              <button data-action="cancel-override" class="p-1 rounded" style="color:var(--txt-secondary)">${ICONS.close}</button>
-            </div>
-          </td>
-        </tr>`;
-      }
-      return `<tr class="tx-divider border-t">
-        <td class="py-2 px-3 font-mono text-sm">${escHtml(v.key)}</td>
-        <td class="py-2 px-3 text-sm">${disp}</td>
-        <td class="py-2 px-3"><span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${srcCls}">${src}</span></td>
-        <td class="py-2 px-3 text-right">
-          <button data-action="override-var" data-var-key="${escHtml(v.key)}" class="text-xs tx-link flex items-center gap-1 ml-auto">${ICONS.edit} ${T("datasets.override")}</button>
-        </td>
-      </tr>`;
-    }
-
-    function renderTableGroup(v) {
-      const rows = Array.isArray(v.value) ? v.value : [];
-      if (rows.length === 0) return "";
-      const cols =
-        v.columns && v.columns.length > 0
-          ? v.columns
-          : Object.keys(rows[0] || {}).map((k) => ({ key: k, label: k }));
-      const h = cols
-        .map(
-          (c) =>
-            `<th class="py-1.5 px-2 text-xs tx-secondary font-medium">${escHtml(c.label || c.key)}</th>`,
-        )
-        .join("");
-      const b = rows
-        .map(
-          (row) =>
-            `<tr class="tx-divider border-t">${cols.map((c) => `<td class="py-1.5 px-2 text-xs">${escHtml(String(row[c.key] ?? ""))}</td>`).join("")}</tr>`,
-        )
-        .join("");
-      return `<div class="mt-4">
-        <h5 class="text-sm font-medium mb-2">${escHtml(v.label || v.key)} (${rows.length})</h5>
-        <div class="overflow-x-auto">
-          <table class="w-full text-left" style="border:1px solid var(--divider);border-radius:.375rem">
-            <thead><tr class="tx-divider border-b">${h}</tr></thead>
-            <tbody>${b}</tbody>
-          </table>
-        </div>
       </div>`;
     }
 
@@ -5772,6 +5687,16 @@ export default {
             if (w > 0) designer.width = w;
             if (h > 0) designer.height = h;
             designer.preserve_ratio = fd.has(`fd_${idx}_preserve_ratio`);
+            const placement = fd.get(`fd_${idx}_placement`)?.toString();
+            if (placement === "inline" || placement === "float")
+              designer.placement = placement;
+            const fh = fd.get(`fd_${idx}_float_h`)?.toString();
+            if (["left", "center", "right"].includes(fh)) designer.float_h = fh;
+            const fv = fd.get(`fd_${idx}_float_v`)?.toString();
+            if (["top", "middle", "bottom"].includes(fv)) designer.float_v = fv;
+            const wr = fd.get(`fd_${idx}_wrap`)?.toString();
+            if (["square", "topAndBottom", "none"].includes(wr))
+              designer.wrap = wr;
           }
           if (Object.keys(designer).length > 0) fields[idx].designer = designer;
         }
@@ -7345,47 +7270,6 @@ export default {
         },
       );
 
-      // Override variable
-      el.querySelectorAll('[data-action="override-var"]').forEach((btn) =>
-        btn.addEventListener("click", () => {
-          state.editingVarKey = btn.dataset.varKey;
-          render();
-        }),
-      );
-      el.querySelector('[data-action="save-override"]')?.addEventListener(
-        "click",
-        async () => {
-          const input = el.querySelector("#tx-override-input");
-          const btn = el.querySelector('[data-action="save-override"]');
-          if (!input || !btn) return;
-          try {
-            const existing = d.variable_overrides || {};
-            const overrides = {
-              ...existing,
-              [btn.dataset.varKey]: input.value,
-            };
-            await api(`/candidates/${d.id}/variables`, {
-              method: "PUT",
-              body: JSON.stringify({ overrides }),
-            });
-            d.variable_overrides = overrides;
-            await loadDatasetVariables(d.id);
-            state.editingVarKey = null;
-            showToast(T("app.saved"));
-            render();
-          } catch (err) {
-            showToast(err.message, "error");
-          }
-        },
-      );
-      el.querySelector('[data-action="cancel-override"]')?.addEventListener(
-        "click",
-        () => {
-          state.editingVarKey = null;
-          render();
-        },
-      );
-
       // Generate
       const genSel = el.querySelector("#tx-generate-template");
       if (genSel) {
@@ -8086,7 +7970,6 @@ export default {
         state.selectedDataset = d.candidate;
         state.datasetId = id;
         state.datasetVariables = null;
-        state.editingVarKey = null;
         state.selectedGenerateTemplate = null;
         // Always land on the upload tab so the user knows where files
         // are managed; the other tabs are one click away.

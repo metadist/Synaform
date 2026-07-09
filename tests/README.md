@@ -123,9 +123,9 @@ Suggested flow, ~2 minutes per stop:
    (`fullname`, `target-position`, salaries in EUR) and the multi-entry
    `stations` table (3 career stations with multi-line `details`).
 
-4. **Switch to the Variables tab** on the candidate — show the resolved
-   variables and their source (`form`, `ai`, `override`). Explain how AI
-   extraction would override scalars once a CV PDF is uploaded.
+4. **Switch to the Edit Details tab** on the candidate — show the filled
+   fields with type-aware editors. Explain how AI extraction fills these
+   values once a CV PDF is uploaded.
 
 5. **Documents tab** on the candidate — download the pre-generated DOCX
    (`--generate` produced it during install). Open it in Word / LibreOffice

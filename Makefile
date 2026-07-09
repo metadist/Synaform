@@ -29,18 +29,7 @@ validate-i18n: ## Validate i18n JSON files parse and keys match
 	@for f in $(PLUGIN_SRC)/frontend/i18n/*.json; do \
 		python3 -m json.tool "$$f" > /dev/null 2>&1 || { echo "FAIL: $$f is not valid JSON"; exit 1; }; \
 	done
-	@python3 -c "\
-	import json, os, sys; \
-	d='$(PLUGIN_SRC)/frontend/i18n'; \
-	ref=set(); \
-	def ck(o,p=''): \
-	    s=set(); \
-	    [s.update(ck(v,f'{p}.{k}' if p else k)) if isinstance(v,dict) else s.add(f'{p}.{k}' if p else k) for k,v in o.items()]; \
-	    return s; \
-	ref=ck(json.load(open(f'{d}/en.json'))); \
-	ok=True; \
-	[exec('lk=ck(json.load(open(f\\'\\'{d}/{fn}\\'\\'))); m=ref-lk; print(f\\'FAIL {fn}: missing {sorted(m)[:5]}\\') if m else print(f\\'OK {fn}\\'); ok=ok and not m') for fn in sorted(os.listdir(d)) if fn.endswith('.json') and fn!='en.json']; \
-	sys.exit(0 if ok else 1)" 2>/dev/null && echo "i18n keys OK" || echo "i18n key mismatch (run CI for details)"
+	@python3 -c "import json, os, sys; d = '$(PLUGIN_SRC)/frontend/i18n'; fl = lambda o: {(s + '.' + k) for s, v in o.items() for k in (v.keys() if isinstance(v, dict) else [''])} | {s for s, v in o.items() if not isinstance(v, dict)}; ref = fl(json.load(open(d + '/en.json'))); bad = [(fn, sorted(ref - fl(json.load(open(d + '/' + fn))))) for fn in sorted(os.listdir(d)) if fn.endswith('.json') and fn != 'en.json']; bad = [(f, m) for f, m in bad if m]; [print('FAIL ' + f + ': missing ' + ', '.join(m[:8])) for f, m in bad]; sys.exit(1 if bad else 0)" && echo "i18n keys OK"
 
 ## Testing
 

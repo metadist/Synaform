@@ -26,9 +26,22 @@ look in Word.
 | `{{relevant_positions}}` | Multi-line list — one bullet per item | body only |
 | `{{stations.time.N}}`, `{{stations.employer.N}}`, `{{stations.details.N}}` | Repeating table row, one row per station | body, **inside a `<w:tr>`** |
 | `{{checkb.moving.yes}}` / `{{checkb.moving.no}}` | Paired checkbox glyphs (☒ / ☐) | body, headers, footers |
-| `{{candidate_photo}}` (declared as `image` variable) | Inline image | body |
+| `{{candidate_photo}}` (declared as `image` variable) | Inline or floating image (per the variable's design options) | body, headers, footers |
 
 The Template Doctor uses these shapes to figure out which rules apply.
+
+**Empty variables stay visible.** When a variable has no value at generation
+time, the placeholder is kept in the document as literal `{{key}}` text with a
+**yellow highlight** — it is never silently blanked out. Fill the value (or
+re-run "Read files & auto-fill") and generate again to resolve it.
+
+**Image positioning.** An `image` variable renders inline at the placeholder
+by default. In the variable's design options you can switch it to **Floating**:
+the picture is then anchored to the page (e.g. upper right corner = Right +
+Top, relative to the page margins) and body text wraps around it. If a source
+PDF (e.g. a CV) contains a portrait photo, "Read files & auto-fill"
+automatically assigns it to an empty image variable; a manually uploaded
+image always wins.
 
 ---
 

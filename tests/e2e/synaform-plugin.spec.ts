@@ -824,10 +824,10 @@ test.describe('Synaform UI Tests', () => {
       await page.waitForTimeout(1000)
 
       const tabs = page.locator('[data-dataset-tab]')
+      await expect(tabs).toHaveCount(3)
       await expect(tabs.nth(0)).toContainText('1.')
       await expect(tabs.nth(1)).toContainText('2.')
       await expect(tabs.nth(2)).toContainText('3.')
-      await expect(tabs.nth(3)).toContainText('4.')
     } finally {
       await api(request, cookie, 'DELETE', `/candidates/${candidateId}`)
     }
