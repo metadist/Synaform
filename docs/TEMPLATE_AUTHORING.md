@@ -288,6 +288,32 @@ runs on the body.
 
 ---
 
+## Profile photo (`{{photo}}`) and auto-extraction from the CV
+
+Declare an **image** variable (e.g. key `photo`) and place its `{{photo}}`
+placeholder where the portrait should appear. Size and positioning
+(inline vs. floating, width/height) are controlled from the variable
+designer — the placeholder itself is just the anchor.
+
+Since v4.1.0 the engine tries to **auto-fill an empty image variable with a
+portrait found in the uploaded CV** during "Read files & auto-fill":
+
+- **PDF CVs** — embedded images are extracted with `pdfimages`.
+- **DOCX CVs** — images under `word/media/*` are scanned.
+- The **largest portrait-ratio** image (aspect ratio between 0.5 and 1.15,
+  min 100×100 px) wins; landscape logos/banners are ignored.
+- The result is stored as PNG and shown in Edit Details with a **"from CV"**
+  badge. The recruiter can always replace or remove it by hand.
+
+Naming the variable/label with `photo`, `foto`, `portrait`, `bild`,
+`picture`, `profil` or `headshot` makes the auto-extractor prefer that field
+when the Collection has several image variables.
+
+If no suitable portrait is found the field simply stays empty — generation is
+never blocked.
+
+---
+
 ## Mini-checklist before shipping a template
 
 - [ ] Open the rendered DOCX with realistic data filled in. Does it look

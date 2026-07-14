@@ -2447,10 +2447,22 @@ class SynaformController extends AbstractController
         $cacheStats = ['hits' => 0, 'misses' => 0];
         $candidateDirty = false;
 
+        // v4.0: per-file extraction telemetry. Every source file gets a
+        // report {filename, slot, kind, chars, ok, strategy} that is
+        // persisted onto the file metadata (`extraction`) and returned to
+        // the frontend so the Sources list can show a per-file readable /
+        // "not readable" status. Files that yield no text are collected in
+        // $unreadable so the UI can name them instead of silently dropping
+        // them (customer feedback item 5).
+        $fileReports = [];
+        $unreadable = [];
+
         if (!empty($entry['files']['cv'])) {
             $storedAs = $entry['files']['cv']['stored_as'] ?? 'cv.pdf';
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
             $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
+            $cvName = $entry['files']['cv']['filename'] ?? $storedAs;
+            $cvKind = $this->classifyDocKind($cvName, 'cv');
             try {
                 [$text, $cMeta] = $this->extractTextWithFileCache(
                     $entry['files']['cv'],
@@ -2460,14 +2472,20 @@ class SynaformController extends AbstractController
                     $userId,
                     $cacheStats,
                 );
-                if (!empty($cMeta['cache_updated'])) {
-                    $candidateDirty = true;
-                }
-                if (!empty(trim((string) $text))) {
-                    $allTexts[] = '=== Primary Document (' . ($entry['files']['cv']['filename'] ?? $storedAs) . ') ===' . "\n" . $text;
+                $report = $this->recordFileExtraction($entry['files']['cv'], $cvName, 'cv', $cvKind, (string) $text, $cMeta);
+                $fileReports[] = $report;
+                $candidateDirty = true;
+                if ($report['ok']) {
+                    $allTexts[] = '=== ' . $report['kind_label'] . ': ' . $cvName . ' ===' . "\n" . $text;
+                } else {
+                    $unreadable[] = $report;
                 }
             } catch (\Throwable $e) {
                 $this->logger->warning('Parse-documents: failed to extract CV text', ['error' => $e->getMessage()]);
+                $report = $this->failedFileExtraction($entry['files']['cv'], $cvName, 'cv', $cvKind, $e->getMessage());
+                $fileReports[] = $report;
+                $unreadable[] = $report;
+                $candidateDirty = true;
             }
         }
 
@@ -2479,6 +2497,8 @@ class SynaformController extends AbstractController
             }
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
             $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
+            $docName = $doc['filename'] ?? $storedAs;
+            $docKind = $this->classifyDocKind($docName, 'other');
             try {
                 [$text, $cMeta] = $this->extractTextWithFileCache(
                     $entry['files']['additional'][$idx],
@@ -2488,14 +2508,20 @@ class SynaformController extends AbstractController
                     $userId,
                     $cacheStats,
                 );
-                if (!empty($cMeta['cache_updated'])) {
-                    $candidateDirty = true;
-                }
-                if (!empty(trim((string) $text))) {
-                    $allTexts[] = '=== Document (' . ($doc['filename'] ?? $storedAs) . ') ===' . "\n" . $text;
+                $report = $this->recordFileExtraction($entry['files']['additional'][$idx], $docName, 'additional', $docKind, (string) $text, $cMeta);
+                $fileReports[] = $report;
+                $candidateDirty = true;
+                if ($report['ok']) {
+                    $allTexts[] = '=== ' . $report['kind_label'] . ': ' . $docName . ' ===' . "\n" . $text;
+                } else {
+                    $unreadable[] = $report;
                 }
             } catch (\Throwable $e) {
                 $this->logger->warning('Parse-documents: failed to extract doc text', ['error' => $e->getMessage(), 'file' => $storedAs]);
+                $report = $this->failedFileExtraction($entry['files']['additional'][$idx], $docName, 'additional', $docKind, $e->getMessage());
+                $fileReports[] = $report;
+                $unreadable[] = $report;
+                $candidateDirty = true;
             }
         }
 
@@ -2517,7 +2543,12 @@ class SynaformController extends AbstractController
         }
 
         if (empty($allTexts)) {
-            return $this->json(['success' => false, 'error' => 'No documents or URLs uploaded, or text could not be extracted from any source'], Response::HTTP_BAD_REQUEST);
+            return $this->json([
+                'success' => false,
+                'error' => 'No documents or URLs uploaded, or text could not be extracted from any source',
+                'files' => $fileReports,
+                'unreadable' => $unreadable,
+            ], Response::HTTP_BAD_REQUEST);
         }
 
         $combinedText = implode("\n\n", $allTexts);
@@ -2614,7 +2645,7 @@ class SynaformController extends AbstractController
                 $aiOptions['reasoning_effort'] = 'low';
                 $aiOptions['temperature'] = 0;
 
-                $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+                $result = $this->extractionChat($messages, $userId, $aiOptions, 'single_call', $candidateId);
                 $singleElapsedMs = (int) ((microtime(true) - $singleStarted) * 1000);
                 $content = (string) ($result['content'] ?? '');
                 $modelUsed = (string) ($result['model'] ?? 'unknown');
@@ -2639,14 +2670,48 @@ class SynaformController extends AbstractController
                             $clean[$k] = $v;
                         }
                     }
+
+                    // v4.0 guaranteed-completeness second pass. The single
+                    // call is accepted, but any field it left empty (or
+                    // never returned) gets a focused retry in THIS SAME
+                    // request. Customers reported having to press
+                    // "Read & auto-fill" twice — the first call left gaps,
+                    // the second filled them. This closes that gap in one
+                    // click. Quality over tokens (explicit requirement).
+                    $beforeMissing = 0;
+                    foreach ($allowedKeys as $k) {
+                        if (!$this->fieldValueIsFilled($clean[$k] ?? null)) {
+                            $beforeMissing++;
+                        }
+                    }
+                    $clean = $this->fillMissingFieldsSecondPass(
+                        $userId,
+                        $fields,
+                        $allowedKeys,
+                        $clean,
+                        $combinedText,
+                        $extractionLanguageName,
+                        $candidateId,
+                    );
+                    $filledCount = 0;
+                    $afterMissing = 0;
+                    foreach ($allowedKeys as $k) {
+                        if ($this->fieldValueIsFilled($clean[$k] ?? null)) {
+                            $filledCount++;
+                        } else {
+                            $afterMissing++;
+                        }
+                    }
+
                     $singleCallSuggestions = $clean;
                     $singleCallTelemetry = [
                         'strategy' => 'single_call',
                         'model' => $modelUsed,
-                        'elapsed_ms' => $singleElapsedMs,
-                        'fields_returned' => count($clean),
+                        'elapsed_ms' => (int) ((microtime(true) - $singleStarted) * 1000),
+                        'fields_returned' => $filledCount,
                         'fields_in_form' => count($allowedKeys),
                         'response_chars' => strlen($content),
+                        'second_pass_recovered' => max(0, $beforeMissing - $afterMissing),
                     ];
                 } else {
                     $singleCallReason = $parsed === null
@@ -2687,6 +2752,8 @@ class SynaformController extends AbstractController
                 'single_call' => $singleCallTelemetry,
                 'total_elapsed_ms' => $singleCallTelemetry['elapsed_ms'] ?? 0,
                 'ocr_cache' => $cacheStats,
+                'files' => $fileReports,
+                'unreadable' => $unreadable,
             ]);
         }
 
@@ -2712,6 +2779,15 @@ class SynaformController extends AbstractController
         $groupTelemetry = [];
         $modelUsed = null;
         $startedAll = microtime(true);
+        // Hard wall-clock budget for the grouped fallback. Each provider
+        // call is already bounded (Symfony HttpClient timeout per provider),
+        // but the loop runs them sequentially, so a slow model over many
+        // groups could still stack into minutes. Once the budget is spent
+        // we stop starting new group calls and return what we have with a
+        // clear "timed out" marker, so the request always ends promptly and
+        // the reason is investigable in the telemetry.
+        $groupedBudgetSeconds = 180.0;
+        $deadlineHit = false;
 
         foreach ($groups as $group) {
             $groupKey = (string) ($group['key'] ?? '');
@@ -2719,6 +2795,31 @@ class SynaformController extends AbstractController
             $rawFieldKeys = array_map('strval', (array) ($group['field_keys'] ?? []));
             $groupFieldKeys = array_values(array_intersect($rawFieldKeys, $allowedKeys));
             if (empty($groupFieldKeys)) {
+                continue;
+            }
+
+            // Stop starting new group calls once the wall-clock budget is
+            // spent. Remaining groups are recorded as skipped so the user
+            // (and the logs) can see extraction was cut short by time.
+            if ((microtime(true) - $startedAll) > $groupedBudgetSeconds) {
+                $deadlineHit = true;
+                $this->logger->warning('Synaform extraction grouped budget exceeded', [
+                    'event' => 'synaform.ai.deadline',
+                    'candidateId' => $candidateId,
+                    'userId' => $userId,
+                    'group' => $groupKey,
+                    'elapsed_ms' => (int) ((microtime(true) - $startedAll) * 1000),
+                    'budget_ms' => (int) ($groupedBudgetSeconds * 1000),
+                ]);
+                $groupTelemetry[] = [
+                    'key' => $groupKey,
+                    'label' => $groupLabel,
+                    'fields_in_group' => count($groupFieldKeys),
+                    'fields_returned' => 0,
+                    'skipped' => true,
+                    'reason' => 'time_budget_exceeded',
+                    'elapsed_ms' => 0,
+                ];
                 continue;
             }
 
@@ -2808,7 +2909,7 @@ class SynaformController extends AbstractController
                 $aiOptions['reasoning_effort'] = 'low';
                 $aiOptions['temperature'] = 0;
 
-                $result = $this->aiFacade->chat($messages, $userId, $aiOptions);
+                $result = $this->extractionChat($messages, $userId, $aiOptions, 'group:' . $groupKey, $candidateId);
                 $content = (string) ($result['content'] ?? '');
                 $modelUsed = $result['model'] ?? $modelUsed;
                 $parsed = $this->parseJsonFromAiResponse($content);
@@ -2916,6 +3017,9 @@ class SynaformController extends AbstractController
             'ocr_cache' => $cacheStats,
             'strategy' => $onlyMissing ? 'grouped_only_missing' : 'grouped_fallback',
             'single_call_skipped_reason' => $singleCallReason ?: null,
+            'files' => $fileReports,
+            'unreadable' => $unreadable,
+            'deadline_hit' => $deadlineHit,
         ]);
     }
 
@@ -3003,6 +3107,199 @@ class SynaformController extends AbstractController
             $textStr,
             $metaArr + ['cache_hit' => false, 'cache_updated' => $cacheUpdated],
         ];
+    }
+
+    /**
+     * Classify a source file by its filename so the AI can attribute
+     * content correctly (a CV vs. an Arbeitszeugnis/certificate) and so
+     * the combined text carries a meaningful section label. Cheap
+     * keyword heuristic — the AI still reads the actual content.
+     */
+    private function classifyDocKind(string $filename, string $default = 'other'): string
+    {
+        $n = mb_strtolower($filename);
+        foreach (['zeugnis', 'arbeitszeugnis', 'certificate', 'zertifikat', 'diploma', 'diplom', 'urkunde', 'reference', 'referenz'] as $needle) {
+            if (str_contains($n, $needle)) {
+                return 'certificate';
+            }
+        }
+        foreach (['cv', 'lebenslauf', 'resume', 'resumé', 'vita', 'curriculum'] as $needle) {
+            if (str_contains($n, $needle)) {
+                return 'cv';
+            }
+        }
+
+        return $default;
+    }
+
+    /**
+     * Human-readable section label for a document kind, used both as the
+     * "=== … ===" header in the combined extraction text and as the badge
+     * shown per file in the Sources list.
+     */
+    private function docKindLabel(string $kind): string
+    {
+        return match ($kind) {
+            'certificate' => 'Certificate/Zeugnis',
+            'cv' => 'CV',
+            default => 'Document',
+        };
+    }
+
+    /**
+     * Build a per-file extraction report, persist it onto the file's
+     * metadata (`extraction`) so the frontend can render a readable /
+     * "not readable" status, and return it for the response payload.
+     *
+     * @param array<string, mixed> $fileMeta reference to the file's metadata entry
+     * @param array<string, mixed> $meta     extraction meta returned by the cache wrapper
+     *
+     * @return array<string, mixed>
+     */
+    private function recordFileExtraction(array &$fileMeta, string $name, string $slot, string $kind, string $text, array $meta): array
+    {
+        $chars = mb_strlen(trim($text));
+        $ok = $chars > 0;
+        $strategy = (string) ($meta['strategy'] ?? '');
+        if ($strategy === '') {
+            $strategy = $ok ? 'extracted' : 'empty';
+        }
+        $report = [
+            'filename' => $name,
+            'slot' => $slot,
+            'kind' => $kind,
+            'kind_label' => $this->docKindLabel($kind),
+            'chars' => $chars,
+            'ok' => $ok,
+            'strategy' => $strategy,
+            'checked_at' => date('c'),
+        ];
+        $fileMeta['extraction'] = $report;
+
+        return $report;
+    }
+
+    /**
+     * Build (and persist) a failure report for a file whose extraction
+     * threw, so it is still surfaced to the user instead of vanishing.
+     *
+     * @param array<string, mixed> $fileMeta reference to the file's metadata entry
+     *
+     * @return array<string, mixed>
+     */
+    private function failedFileExtraction(array &$fileMeta, string $name, string $slot, string $kind, string $error): array
+    {
+        $report = [
+            'filename' => $name,
+            'slot' => $slot,
+            'kind' => $kind,
+            'kind_label' => $this->docKindLabel($kind),
+            'chars' => 0,
+            'ok' => false,
+            'strategy' => 'error',
+            'error' => $error,
+            'checked_at' => date('c'),
+        ];
+        $fileMeta['extraction'] = $report;
+
+        return $report;
+    }
+
+    /**
+     * v4.0 guaranteed-completeness second pass. Given the accepted
+     * single-call result, run ONE focused AI call restricted to the
+     * fields that are still empty and merge any recovered values back in.
+     * This means a single "Read files & auto-fill" click returns a
+     * complete result instead of the user having to press it twice.
+     *
+     * No-op when nothing is missing, or when EVERYTHING is missing (the
+     * single call effectively produced nothing — the grouped fallback is
+     * the better tool for that case, so we let the caller drop into it).
+     *
+     * @param list<array<string, mixed>> $fields
+     * @param list<string>               $allowedKeys
+     * @param array<string, mixed>       $current
+     *
+     * @return array<string, mixed>
+     */
+    private function fillMissingFieldsSecondPass(
+        int $userId,
+        array $fields,
+        array $allowedKeys,
+        array $current,
+        string $combinedText,
+        string $languageName,
+        string $candidateId,
+    ): array {
+        $missing = [];
+        foreach ($allowedKeys as $k) {
+            if (!$this->fieldValueIsFilled($current[$k] ?? null)) {
+                $missing[] = $k;
+            }
+        }
+        $missingCount = count($missing);
+        $total = count($allowedKeys);
+        // Only spend a second (potentially slow) model round-trip when the
+        // first pass left a SUBSTANTIAL gap. Skip when:
+        //   - nothing is missing (already complete),
+        //   - everything is missing (the single call effectively failed →
+        //     the grouped fallback is the better tool, let the caller drop
+        //     into it),
+        //   - only a handful of fields are missing (not worth doubling the
+        //     wall-clock time on a slow reasoning model; the user can tweak
+        //     a stray field by hand).
+        // This keeps the common "one call fills most fields" path a SINGLE
+        // call while still recovering when a model under-delivers badly.
+        $secondPassGate = max(3, (int) ceil($total * 0.25));
+        if ($missingCount === 0 || $missingCount === $total || $missingCount < $secondPassGate) {
+            return $current;
+        }
+
+        $subset = array_values(array_filter(
+            $fields,
+            static fn ($f) => in_array((string) ($f['key'] ?? ''), $missing, true)
+        ));
+        if (empty($subset)) {
+            return $current;
+        }
+
+        $hasTable = false;
+        foreach ($subset as $sf) {
+            if (($sf['type'] ?? '') === 'table') {
+                $hasTable = true;
+                break;
+            }
+        }
+
+        try {
+            $prompt = $this->buildGroupedExtractionPrompt($userId, $subset, $combinedText, $languageName, null);
+            $messages = [
+                ['role' => 'system', 'content' => 'You are a precise document parsing assistant. Return only valid JSON.'],
+                ['role' => 'user', 'content' => $prompt],
+            ];
+            $aiOptions = $this->resolveAiModelOptions($userId);
+            $aiOptions['max_tokens'] = $hasTable ? 16000 : 8000;
+            $aiOptions['thinking_budget'] = 0;
+            $aiOptions['reasoning_effort'] = 'low';
+            $aiOptions['temperature'] = 0;
+
+            $result = $this->extractionChat($messages, $userId, $aiOptions, 'second_pass', $candidateId);
+            $parsed = $this->parseJsonFromAiResponse((string) ($result['content'] ?? ''));
+            if (is_array($parsed) && !array_is_list($parsed)) {
+                foreach ($parsed as $k => $v) {
+                    if (is_string($k) && in_array($k, $missing, true) && $this->fieldValueIsFilled($v)) {
+                        $current[$k] = $v;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $this->logger->info('Synaform: second-pass extraction failed (non-fatal)', [
+                'candidateId' => $candidateId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return $current;
     }
 
     /**
@@ -4184,27 +4481,37 @@ class SynaformController extends AbstractController
         }
 
         $candidateDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
-        $pdfPaths = [];
+        // Collect every source file we can pull an embedded portrait from:
+        // PDFs (via pdfimages) and Office .docx (via word/media/*). The CV is
+        // tried first, then any additional documents.
+        $sourceFiles = [];
         $cvStored = $entry['files']['cv']['stored_as'] ?? null;
-        if (is_string($cvStored) && str_ends_with(strtolower($cvStored), '.pdf') && is_file($candidateDir . '/' . $cvStored)) {
-            $pdfPaths[] = $candidateDir . '/' . $cvStored;
+        if (is_string($cvStored) && is_file($candidateDir . '/' . $cvStored)) {
+            $sourceFiles[] = $candidateDir . '/' . $cvStored;
         }
         foreach ($entry['files']['additional'] ?? [] as $doc) {
             $storedAs = $doc['stored_as'] ?? null;
-            if (is_string($storedAs) && str_ends_with(strtolower($storedAs), '.pdf') && is_file($candidateDir . '/' . $storedAs)) {
-                $pdfPaths[] = $candidateDir . '/' . $storedAs;
+            if (is_string($storedAs) && is_file($candidateDir . '/' . $storedAs)) {
+                $sourceFiles[] = $candidateDir . '/' . $storedAs;
             }
         }
-        if ($pdfPaths === []) {
+        if ($sourceFiles === []) {
             return false;
         }
 
         $photoPath = null;
-        $sourcePdf = null;
-        foreach ($pdfPaths as $pdfPath) {
-            $photoPath = $this->findProfilePhotoInPdf($pdfPath);
+        $sourceFile = null;
+        foreach ($sourceFiles as $src) {
+            $ext = strtolower(pathinfo($src, PATHINFO_EXTENSION));
+            if ($ext === 'pdf') {
+                $photoPath = $this->findProfilePhotoInPdf($src);
+            } elseif ($ext === 'docx') {
+                $photoPath = $this->findProfilePhotoInDocx($src);
+            } else {
+                continue;
+            }
             if ($photoPath !== null) {
-                $sourcePdf = $pdfPath;
+                $sourceFile = $src;
                 break;
             }
         }
@@ -4248,15 +4555,15 @@ class SynaformController extends AbstractController
         $entry['field_values'][$key] = [
             'path' => $storedPath,
             'mime' => 'image/png',
-            'original_name' => basename((string) $sourcePdf) . ' (auto-extracted)',
+            'original_name' => basename((string) $sourceFile) . ' (auto-extracted)',
             'size' => filesize($storedPath) ?: 0,
             'uploaded_at' => date('c'),
             'auto_extracted' => true,
         ];
-        $this->logger->info('Synaform: auto-extracted profile photo from PDF', [
+        $this->logger->info('Synaform: auto-extracted profile photo from CV', [
             'candidateId' => $candidateId,
             'field' => $key,
-            'source' => basename((string) $sourcePdf),
+            'source' => basename((string) $sourceFile),
         ]);
 
         return true;
@@ -4349,6 +4656,78 @@ class SynaformController extends AbstractController
         $this->removeDirectory($tmpDir);
 
         return $finalTmp;
+    }
+
+    /**
+     * Find a candidate portrait photo embedded in a .docx CV by scanning
+     * `word/media/*`. Picks the largest portrait-ratio image (same heuristic
+     * as the PDF path) and normalises it to a PNG temp file so the caller's
+     * stored `image/png` mime stays consistent.
+     *
+     * Returns the temp PNG path or null when no suitable image is found.
+     */
+    private function findProfilePhotoInDocx(string $docxPath): ?string
+    {
+        $zip = new \ZipArchive();
+        if ($zip->open($docxPath) !== true) {
+            return null;
+        }
+
+        $best = null;
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $name = $zip->getNameIndex($i);
+            if (!is_string($name) || preg_match('#^word/media/.+\.(png|jpe?g)$#i', $name) !== 1) {
+                continue;
+            }
+            $bytes = $zip->getFromIndex($i);
+            if ($bytes === false || $bytes === '') {
+                continue;
+            }
+            $info = @getimagesizefromstring($bytes);
+            if (!is_array($info)) {
+                continue;
+            }
+            $w = (int) $info[0];
+            $h = (int) $info[1];
+            if ($w < 100 || $h < 100 || $w > 3000 || $h > 3000) {
+                continue;
+            }
+            $ratio = $h > 0 ? $w / $h : 0;
+            // Portrait-ish only — filters out landscape logos/banners.
+            if ($ratio < 0.5 || $ratio > 1.15) {
+                continue;
+            }
+            if ($best === null || $w * $h > $best['w'] * $best['h']) {
+                $best = ['bytes' => $bytes, 'w' => $w, 'h' => $h];
+            }
+        }
+        $zip->close();
+
+        if ($best === null) {
+            return null;
+        }
+
+        $finalTmp = sys_get_temp_dir() . '/synaform-photo-' . bin2hex(random_bytes(4)) . '.png';
+
+        // Normalise to PNG so the stored file and its 'image/png' mime match,
+        // even when the embedded image was a JPEG.
+        if (function_exists('imagecreatefromstring')) {
+            $img = @imagecreatefromstring($best['bytes']);
+            if ($img !== false) {
+                $ok = @imagepng($img, $finalTmp);
+                imagedestroy($img);
+                if ($ok) {
+                    return $finalTmp;
+                }
+            }
+        }
+
+        // Fallback: write the raw bytes if GD is unavailable.
+        if (@file_put_contents($finalTmp, $best['bytes']) !== false) {
+            return $finalTmp;
+        }
+
+        return null;
     }
 
     // =========================================================================
@@ -4500,8 +4879,10 @@ class SynaformController extends AbstractController
                 - For row-table fields like `stations`, the bullet entries (column with type=list) must be ACTIVITY descriptions. NEVER repeat the row's `position`, `employer`, or `time` value as a bullet; those are already in their own columns. In particular, the FIRST bullet must NOT be the position title or start with the position title (even if the source CV's job line "Interim-CTO at Vicoland - 5 team" reads naturally as a bullet — split that line: extract "Interim-CTO" into the `position` column, "Vicoland" into `employer`, "5 team" or any concrete metric into a separate bullet, and drop everything that's redundant). Each bullet stands on its own as a verb-led achievement or responsibility, e.g. "Aufbau einer cloudbasierten Sicherheits-Lösung", not "CTO bei Vicoland — Aufbau einer Sicherheits-Lösung".
                 - For `stations` specifically: create ONE row per POSITION / PERIOD, NOT per employer. If one employer had several roles or sub-periods over time, output a SEPARATE row for EACH (repeat the `employer`; set `time`, `position` and `details` for that role only). Never merge an employer's multiple roles into one row or pack several periods into a single row.
                 - `stations` is the full chronological Werdegang. INCLUDE, besides regular jobs: completed vocational training (Berufsausbildung / Lehre) AND professionally relevant internships (substantial, field-related Praktika) as their own rows — set `employer` to the training company / institution, `position` to e.g. "Ausbildung zur/zum …" or "Praktikum – …", and fill `time` and `details` for that period. EXCLUDE only general schooling (Schule, Abitur / Fachabitur), academic degree programmes (Studium / university degrees) and short school internships (Schülerpraktikum) — those stay in the `education` field. A Berufsausbildung or relevant internship MAY appear in BOTH `education` (as a summary) and `stations` (as a chronological entry); this is the only allowed cross-field duplication.
-                - An education-style field (e.g. `education`, "Ausbildung/Studium") must contain EVERY education entry found in the documents — schooling, university / degree programmes, vocational training, professional certifications. Return one entry per line (separate entries with a newline character, most recent first), each with its period and institution when the documents provide them. NEVER silently drop an education entry — completeness matters more than brevity here.
+                - Blend the CV with any certificates/references (Arbeitszeugnisse, Zeugnisse, "Certificate/Zeugnis"-labelled documents) when filling the `details` bullets of a `stations` row: match the certificate to the same employer / period, then combine the CV's factual activities with the responsibilities, tasks and achievements described in the Zeugnis for that role. Prefer the CV for hard facts (titles, dates, employer names) and the certificate for richer wording of duties/achievements. Produce a MIXTURE of both sources — do NOT ignore the certificates and do NOT copy an entire Zeugnis sentence verbatim; distil each into a concise, verb-led bullet. Never invent responsibilities that appear in neither source.
+                - An education-style field (e.g. `education`, "Ausbildung/Studium") must contain EVERY education entry found in the documents — schooling (Schule), university / degree programmes (Studium), vocational training, professional certifications. Return one entry per line (separate entries with a newline character, most recent first), each with its period and institution when the documents provide them. NEVER silently drop an education entry — completeness matters more than brevity here. This applies NO MATTER WHERE the entry appears in the documents: a school or degree mentioned only briefly, deep in a document, on a later page, or inside a certificate MUST still be captured. In particular, Studium (university) and Schule (school) belong in this field even when they are not part of the main career section.
                 - For the `time` column of every `stations` row use the format MM/YYYY – MM/YYYY (two-digit month, four-digit year, an en dash "–" with one space on each side). Use MM/YYYY – heute for an ongoing role. If only the year is known, YYYY – YYYY is acceptable; keep the format consistent across all rows.
+                - OPTIONAL grouping columns — populate ONLY when the `stations` table declares them: set `time_total` on an employer's FIRST row to that employer's overall span when they had several consecutive roles (e.g. "01/2014 – 03/2024"); set `sub_of_previous` to true for a role whose period lies inside another role's period (e.g. a side job during a degree). Never invent them — leave empty/false when unknown.
                 - If a `current_position` field exists, fill it with the candidate's present role as "Job title – Employer, Location" — include the current employer and its city/location when the documents provide them, not just the bare job title.
                 TXT;
 
@@ -5134,6 +5515,15 @@ class SynaformController extends AbstractController
               - If a `current_position` field exists, fill it with the present
                 role as "Job title – Employer, Location" (include the current
                 employer and its city/location when known), not the bare title.
+              - OPTIONAL grouping columns — ONLY populate these when the
+                `stations` table actually declares them:
+                  * `time_total`: when ONE employer had SEVERAL consecutive
+                    roles, set this on that employer's FIRST row to the overall
+                    span (e.g. "01/2014 – 03/2024"); leave empty on the others.
+                  * `sub_of_previous`: set to true for a role whose period lies
+                    INSIDE another role's period (e.g. a part-time job held
+                    during a degree programme), so it can be rendered indented.
+                  Never invent these — leave them empty/false when unknown.
 
             {$contextBlock}
 
@@ -7460,9 +7850,106 @@ class SynaformController extends AbstractController
             $variables['checkb.travel.no'] = !$travelYes;
         }
 
+        // WS-G (feedback #7): derive {{relevant_positions}} from the rows the
+        // recruiter ticked "relevant" in a selectable table (the career
+        // `stations` table by convention, or any table with designer flag
+        // `selectable`). Deterministic format "Zeitraum, Position, Arbeitgeber"
+        // per selected row, in table order — predictable and fast (no extra AI
+        // round-trip). Only set when not already provided by an override.
+        if (!array_key_exists('relevant_positions', $variables) || !$this->fieldValueIsFilled($variables['relevant_positions'] ?? null)) {
+            foreach (($formFields ?? []) as $field) {
+                if (($field['type'] ?? '') !== 'table') {
+                    continue;
+                }
+                $tKey = (string) ($field['key'] ?? '');
+                $selectable = ($field['selectable'] ?? false) === true || $tKey === 'stations';
+                if (!$selectable || $tKey === '') {
+                    continue;
+                }
+                $tableRows = $formData[$tKey] ?? [];
+                if (!is_array($tableRows)) {
+                    continue;
+                }
+                $picked = [];
+                foreach ($tableRows as $r) {
+                    if (!is_array($r)) {
+                        continue;
+                    }
+                    $sel = $r['selected'] ?? false;
+                    $isSel = $sel === true
+                        || (is_string($sel) && in_array(strtolower(trim($sel)), ['1', 'true', 'ja', 'yes'], true));
+                    if (!$isSel) {
+                        continue;
+                    }
+                    $parts = [];
+                    foreach (['time', 'position', 'employer'] as $k) {
+                        $v = trim((string) ($r[$k] ?? ''));
+                        if ($v !== '') {
+                            $parts[] = $v;
+                        }
+                    }
+                    if ($parts !== []) {
+                        $picked[] = implode(', ', $parts);
+                    }
+                }
+                if ($picked !== []) {
+                    $variables['relevant_positions'] = $picked;
+                    break;
+                }
+            }
+        }
+
         return [
             'variables' => $variables,
         ];
+    }
+
+    /**
+     * Wrapper around AiFacade::chat for the extraction pipeline that emits
+     * structured, greppable telemetry so a slow or failed call can always
+     * be investigated after the fact (event=synaform.ai.chat[_error],
+     * phase, candidate, model, elapsed_ms). Any provider/network error is
+     * logged with its class + message and re-thrown so the caller's own
+     * fallback/telemetry still runs.
+     *
+     * @param array<int, array<string, string>> $messages
+     * @param array<string, mixed>              $options
+     *
+     * @return array<string, mixed>
+     */
+    private function extractionChat(array $messages, int $userId, array $options, string $phase, string $candidateId): array
+    {
+        $started = microtime(true);
+        $requestedModel = (string) ($options['model'] ?? 'default');
+        try {
+            $result = $this->aiFacade->chat($messages, $userId, $options);
+            $this->logger->info('Synaform extraction AI call', [
+                'event' => 'synaform.ai.chat',
+                'phase' => $phase,
+                'candidateId' => $candidateId,
+                'userId' => $userId,
+                'requested_model' => $requestedModel,
+                'model' => $result['model'] ?? $requestedModel,
+                'provider' => $result['provider'] ?? null,
+                'elapsed_ms' => (int) ((microtime(true) - $started) * 1000),
+                'content_chars' => strlen((string) ($result['content'] ?? '')),
+            ]);
+
+            return $result;
+        } catch (\Throwable $e) {
+            $this->logger->error('Synaform extraction AI call failed', [
+                'event' => 'synaform.ai.chat_error',
+                'phase' => $phase,
+                'candidateId' => $candidateId,
+                'userId' => $userId,
+                'requested_model' => $requestedModel,
+                'elapsed_ms' => (int) ((microtime(true) - $started) * 1000),
+                'error_class' => $e::class,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw $e;
+        }
     }
 
     private function resolveAiModelOptions(int $userId): array
@@ -8533,6 +9020,55 @@ class SynaformController extends AbstractController
     }
 
     /**
+     * Like {@see mergeRPrAddBold} but forces italic (<w:i/>). Used to render
+     * the employer name italic in umbrella / nested station lines (feedback
+     * #10: "Arbeitgeber kursiv geschrieben").
+     */
+    private function mergeRPrAddItalic(string $baseRPr): string
+    {
+        if ($baseRPr === '') {
+            return '<w:rPr><w:i/></w:rPr>';
+        }
+        if (preg_match('#<w:i\s*/>#', $baseRPr)) {
+            return $baseRPr;
+        }
+        $injected = preg_replace('#(<w:rPr\b[^>]*>)#', '$1<w:i/>', $baseRPr, 1);
+
+        return is_string($injected) ? $injected : $baseRPr;
+    }
+
+    /**
+     * Add (or bump) a left indent on a paragraph's `<w:pPr>` so a whole
+     * station block can be shifted right one level (feedback #10: nested
+     * positions "auf Höhe der Position einrücken"). Additive: an existing
+     * `w:left` is increased by $twips; otherwise a fresh `<w:ind>` is added.
+     */
+    private function addLeftIndent(string $pPrXml, int $twips): string
+    {
+        if ($twips <= 0) {
+            return $pPrXml;
+        }
+        if ($pPrXml === '') {
+            return '<w:pPr><w:ind w:left="' . $twips . '"/></w:pPr>';
+        }
+        if (preg_match('#<w:ind\b[^>]*\bw:left="(\d+)"#', $pPrXml, $m) === 1) {
+            $newLeft = (int) $m[1] + $twips;
+            $out = preg_replace('#(<w:ind\b[^>]*\bw:left=")\d+(")#', '${1}' . $newLeft . '$2', $pPrXml, 1);
+
+            return is_string($out) ? $out : $pPrXml;
+        }
+        if (preg_match('#<w:ind\b[^>]*/>#', $pPrXml) === 1) {
+            $out = preg_replace('#(<w:ind\b[^>]*?)(/>)#', '$1 w:left="' . $twips . '"$2', $pPrXml, 1);
+
+            return is_string($out) ? $out : $pPrXml;
+        }
+        // No <w:ind> yet — insert one right after the opening <w:pPr...>.
+        $out = preg_replace('#(<w:pPr\b[^>]*>)#', '$1<w:ind w:left="' . $twips . '"/>', $pPrXml, 1);
+
+        return is_string($out) ? $out : $pPrXml;
+    }
+
+    /**
      * Pre-pass: for each list-type placeholder, find the Word paragraph (<w:p>)
      * that contains it and clone the entire paragraph once per list item. This
      * preserves paragraph formatting (bullet style via <w:numPr>, indentation,
@@ -9270,6 +9806,7 @@ class SynaformController extends AbstractController
         // bullet list.
         $columnTypes = [];
         $columnStructured = [];
+        $columnBullet = [];
         foreach ($formFields as $field) {
             if (($field['type'] ?? '') !== 'table' || empty($field['key'])) {
                 continue;
@@ -9283,6 +9820,7 @@ class SynaformController extends AbstractController
                 $combined = "{$group}.{$colKey}";
                 $columnTypes[$combined] = (string) ($col['type'] ?? 'text');
                 $columnStructured[$combined] = $this->isStructuredListColumn($col);
+                $columnBullet[$combined] = $this->bulletStyleForColumn($col);
             }
         }
 
@@ -9317,6 +9855,7 @@ class SynaformController extends AbstractController
             // has always rendered with date / title / bullet structure when
             // fed a multi-line string).
             $structured = $columnStructured[$richKey] ?? ($richKey === 'stations.details');
+            $bulletStyle = $columnBullet[$richKey] ?? [];
 
             foreach ($rows as $i => $row) {
                 $num = $i + 1;
@@ -9343,6 +9882,22 @@ class SynaformController extends AbstractController
                     $raw = $this->dedupeBulletsAgainstSiblings($raw, $row, $col);
                 }
 
+                // WS-F: umbrella/nested context for the structured details
+                // renderer (feedback #9/#10). Only meaningful for the
+                // structured column; ignored otherwise. `sub_of_previous`
+                // tolerates bool or "true"/"1"/"ja" strings from the editor.
+                $rowContext = [];
+                if ($structured && is_array($row)) {
+                    $subRaw = $row['sub_of_previous'] ?? null;
+                    $sub = $subRaw === true
+                        || (is_string($subRaw) && in_array(strtolower(trim($subRaw)), ['1', 'true', 'ja', 'yes'], true));
+                    $rowContext = [
+                        'time_total' => (string) ($row['time_total'] ?? ''),
+                        'employer' => (string) ($row['employer'] ?? ''),
+                        'sub_of_previous' => $sub,
+                    ];
+                }
+
                 foreach (["{{{$richKey}.N#{$num}}}", "{{{$richKey}#{$num}}}"] as $placeholder) {
                     if (!str_contains($xml, $placeholder)) {
                         continue;
@@ -9359,7 +9914,7 @@ class SynaformController extends AbstractController
                     $pattern = '#<w:p\b[^>]*>(?:(?!</w:p>).)*?' . preg_quote($placeholder, '#') . '(?:(?!</w:p>).)*?</w:p>#s';
                     $replaced = preg_replace_callback(
                         $pattern,
-                        function (array $m) use ($raw, $columnType, $bulletNumId, $structured): string {
+                        function (array $m) use ($raw, $columnType, $bulletNumId, $structured, $bulletStyle, $rowContext): string {
                             $basePPr = '';
                             if (preg_match('#<w:pPr\b[^>]*>.*?</w:pPr>#s', $m[0], $pm)) {
                                 $basePPr = $pm[0];
@@ -9378,6 +9933,8 @@ class SynaformController extends AbstractController
                                 $bulletNumId,
                                 $structured,
                                 $baseRPr,
+                                $bulletStyle,
+                                $rowContext,
                             );
                         },
                         $xml
@@ -9431,23 +9988,26 @@ class SynaformController extends AbstractController
         ?int $bulletNumId,
         bool $structured = false,
         string $baseRPr = '',
+        array $bulletStyle = [],
+        array $rowContext = [],
     ): string {
         if (is_array($raw)) {
             $items = array_map(static fn ($v) => trim((string) $v), $raw);
 
             if ($structured) {
                 $blocks = $this->classifyListItems($items);
-                if (empty($blocks)) {
+                $hasUmbrella = trim((string) ($rowContext['time_total'] ?? '')) !== '';
+                if (empty($blocks) && !$hasUmbrella) {
                     return '';
                 }
-                return $this->renderStationBlocksXml($blocks, $basePPr, $bulletNumId, $baseRPr);
+                return $this->renderStationBlocksXml($blocks, $basePPr, $bulletNumId, $baseRPr, $bulletStyle, $rowContext);
             }
 
             $items = array_values(array_filter($items, static fn ($v) => $v !== ''));
             if (empty($items)) {
                 return '';
             }
-            return $this->renderBulletList($items, $basePPr, $bulletNumId, $baseRPr);
+            return $this->renderBulletList($items, $basePPr, $bulletNumId, $baseRPr, $bulletStyle);
         }
 
         // Legacy string path: keep the date-header / dash-bullet heuristic so
@@ -9456,7 +10016,7 @@ class SynaformController extends AbstractController
         if (trim($str) === '') {
             return '';
         }
-        return $this->renderStationDetailsXml($str, $basePPr, $bulletNumId, $baseRPr);
+        return $this->renderStationDetailsXml($str, $basePPr, $bulletNumId, $baseRPr, $bulletStyle);
     }
 
     /**
@@ -9466,7 +10026,7 @@ class SynaformController extends AbstractController
      *
      * @param list<string> $items
      */
-    private function renderBulletList(array $items, string $basePPr, ?int $bulletNumId, string $baseRPr = ''): string
+    private function renderBulletList(array $items, string $basePPr, ?int $bulletNumId, string $baseRPr = '', array $bulletStyle = []): string
     {
         // `<w:widowControl w:val="0"/>` lets Word split a single long
         // bullet that wraps to 4–5 lines across a page boundary. The
@@ -9483,22 +10043,57 @@ class SynaformController extends AbstractController
         // complaint. Re-using the host run's rPr as the paragraph-mark rPr (the
         // last child of pPr, per the OOXML schema) keeps glyph and text in sync.
         $markRPr = $baseRPr;
-        $bulletPPr = $bulletNumId !== null
-            ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
-                . '<w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>'
-            : '<w:pPr><w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>';
+        [$bulletPPr, $charPrefix] = $this->buildBulletParagraphProps($bulletNumId, $markRPr, $bulletStyle);
 
         $out = '';
         foreach ($items as $item) {
             $text = $this->escapeForWordXml($item);
-            $prefix = $bulletNumId !== null ? '' : '• ';
             $out .= '<w:p>' . $bulletPPr
-                . '<w:r>' . $baseRPr . '<w:t xml:space="preserve">' . $prefix . $text . '</w:t></w:r>'
+                . '<w:r>' . $baseRPr . '<w:t xml:space="preserve">' . $charPrefix . $text . '</w:t></w:r>'
                 . '</w:p>';
         }
         return $out;
+    }
+
+    /**
+     * Build the shared bullet-paragraph pPr and the literal glyph prefix for a
+     * bullet list, honouring an optional per-column designer bullet style
+     * (`char` = custom glyph like "■"/"♥", `indent` = left indent in twips).
+     *
+     * When a custom glyph is set we deliberately DON'T use the template's
+     * numbering.xml numId (the customer's Word templates often carry no bullet
+     * definition at all, feedback #4), and instead emit the glyph as a literal
+     * character prefix with a tokenised indent — giving deterministic square /
+     * heart / custom bullets regardless of the template. When no custom glyph
+     * is set the previous behaviour is preserved exactly: real Word numbering
+     * when the template defines it, else a "• " character fallback.
+     *
+     * @param array{char?: ?string, indent?: ?int} $bulletStyle
+     *
+     * @return array{0: string, 1: string} [pPr, literalPrefix]
+     */
+    private function buildBulletParagraphProps(?int $bulletNumId, string $markRPr, array $bulletStyle): array
+    {
+        $char = isset($bulletStyle['char']) ? trim((string) $bulletStyle['char']) : '';
+        $forceChar = $char !== '';
+        $indent = isset($bulletStyle['indent']) && (int) $bulletStyle['indent'] > 0
+            ? (int) $bulletStyle['indent']
+            : 360;
+        $indXml = '<w:ind w:left="' . $indent . '" w:hanging="' . $indent . '"/>';
+        $useNumId = $bulletNumId !== null && !$forceChar;
+
+        $pPr = $useNumId
+            ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
+                . '<w:widowControl w:val="0"/>'
+                . '<w:spacing w:after="0"/>' . $indXml . $markRPr . '</w:pPr>'
+            : '<w:pPr><w:widowControl w:val="0"/>'
+                . '<w:spacing w:after="0"/>' . $indXml . $markRPr . '</w:pPr>';
+
+        // With real numbering the glyph comes from numbering.xml (no literal
+        // prefix). Otherwise emit the chosen glyph, or "•" as the default.
+        $prefix = $useNumId ? '' : (($forceChar ? $char : '•') . ' ');
+
+        return [$pPr, $prefix];
     }
 
     /**
@@ -10131,9 +10726,9 @@ class SynaformController extends AbstractController
      *   entry; bullet paragraphs reference it via <w:numPr>. When null, bullets
      *   degrade to a character "•" prefix with a hanging indent.
      */
-    private function renderStationDetailsXml(string $details, string $basePPr, ?int $bulletNumId, string $baseRPr = ''): string
+    private function renderStationDetailsXml(string $details, string $basePPr, ?int $bulletNumId, string $baseRPr = '', array $bulletStyle = []): string
     {
-        return $this->renderStationBlocksXml($this->parseStationDetails($details), $basePPr, $bulletNumId, $baseRPr);
+        return $this->renderStationBlocksXml($this->parseStationDetails($details), $basePPr, $bulletNumId, $baseRPr, $bulletStyle);
     }
 
     /**
@@ -10231,10 +10826,24 @@ class SynaformController extends AbstractController
      *
      * @param list<array{type: string, text?: string}> $blocks
      */
-    private function renderStationBlocksXml(array $blocks, string $basePPr, ?int $bulletNumId, string $baseRPr = ''): string
+    private function renderStationBlocksXml(array $blocks, string $basePPr, ?int $bulletNumId, string $baseRPr = '', array $bulletStyle = [], array $rowContext = []): string
     {
-        if (empty($blocks)) {
+        // WS-F: employer umbrella + nested position support (feedback #9/#10).
+        // A row may carry:
+        //   - time_total       employer's overall span (e.g. "01/2014 – 03/2024")
+        //   - employer         company name (rendered italic in the umbrella line)
+        //   - sub_of_previous  this role's period lies within another → indent
+        $timeTotal = trim((string) ($rowContext['time_total'] ?? ''));
+        $umbrellaEmployer = trim((string) ($rowContext['employer'] ?? ''));
+        $nestIndent = !empty($rowContext['sub_of_previous']) ? 360 : 0;
+
+        if (empty($blocks) && $timeTotal === '') {
             return '';
+        }
+
+        // Nested rows shift every paragraph (and its bullets) one level right.
+        if ($nestIndent > 0) {
+            $bulletStyle['indent'] = ($bulletStyle['indent'] ?? 360) + $nestIndent;
         }
 
         // Bullet paragraphs intentionally do NOT inherit the host paragraph's
@@ -10254,23 +10863,39 @@ class SynaformController extends AbstractController
         // complaint. Re-using the host run's rPr as the paragraph-mark rPr (the
         // last child of pPr, per the OOXML schema) keeps glyph and text in sync.
         $markRPr = $baseRPr;
-        $bulletPPr = $bulletNumId !== null
-            ? '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' . $bulletNumId . '"/></w:numPr>'
-                . '<w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>'
-            : '<w:pPr><w:widowControl w:val="0"/>'
-                . '<w:spacing w:after="0"/><w:ind w:left="360" w:hanging="360"/>' . $markRPr . '</w:pPr>';
+        [$bulletPPr, $charPrefix] = $this->buildBulletParagraphProps($bulletNumId, $markRPr, $bulletStyle);
 
         // Non-bullet paragraphs (date/title/spacer) inherit the host paragraph
         // pPr but with any list-bullet numPr stripped — otherwise the title
         // line would inherit the bullet styling from the host paragraph.
         $plainPPr = $this->stripNumPr($basePPr);
+        if ($nestIndent > 0) {
+            $plainPPr = $this->addLeftIndent($plainPPr, $nestIndent);
+        }
 
         // Pre-compute a bold rPr that merges the host run's font/size/colour
         // (so date headers stay in the cell's font) with a forced <w:b/>.
         $dateRPr = $this->mergeRPrAddBold($baseRPr);
+        $italicRPr = $this->mergeRPrAddItalic($baseRPr);
 
         $out = '';
+
+        // Umbrella header: "<time_total>   <employer italic>" on one line
+        // (feedback #9 total span + #10 italic employer). Only emitted when
+        // the row explicitly carries a total span, so existing single-period
+        // rows are unaffected.
+        if ($timeTotal !== '') {
+            $out .= '<w:p>' . $plainPPr
+                . '<w:r>' . $dateRPr . '<w:t xml:space="preserve">'
+                . $this->escapeForWordXml($timeTotal) . '</w:t></w:r>';
+            if ($umbrellaEmployer !== '') {
+                $out .= '<w:r>' . $baseRPr . '<w:t xml:space="preserve">   </w:t></w:r>'
+                    . '<w:r>' . $italicRPr . '<w:t xml:space="preserve">'
+                    . $this->escapeForWordXml($umbrellaEmployer) . '</w:t></w:r>';
+            }
+            $out .= '</w:p>';
+        }
+
         foreach ($blocks as $b) {
             switch ($b['type']) {
                 case 'spacer':
@@ -10287,9 +10912,8 @@ class SynaformController extends AbstractController
 
                 case 'bullet':
                     $text = $this->escapeForWordXml((string) ($b['text'] ?? ''));
-                    $prefix = $bulletNumId !== null ? '' : '• ';
                     $out .= '<w:p>' . $bulletPPr
-                        . '<w:r>' . $baseRPr . '<w:t xml:space="preserve">' . $prefix . $text . '</w:t></w:r>'
+                        . '<w:r>' . $baseRPr . '<w:t xml:space="preserve">' . $charPrefix . $text . '</w:t></w:r>'
                         . '</w:p>';
                     break;
 
@@ -10364,5 +10988,35 @@ class SynaformController extends AbstractController
             return (bool) $designer['structured'];
         }
         return strtolower((string) ($col['key'] ?? '')) === 'details';
+    }
+
+    /**
+     * Read the per-column bullet style from its designer config (feedback #4:
+     * customer-controllable bullet shape/indent). Returns a compact
+     * `['char' => ?string, 'indent' => ?int]` where `char` is a custom bullet
+     * glyph (e.g. "■" for square, "♥") and `indent` is the left/hanging indent
+     * in twips (1 cm = 567 twips). Empty array = keep the default bullet.
+     *
+     * @param array<string, mixed> $col
+     *
+     * @return array{char?: string, indent?: int}
+     */
+    private function bulletStyleForColumn(array $col): array
+    {
+        $designer = is_array($col['designer'] ?? null) ? $col['designer'] : [];
+        $style = [];
+
+        $char = $designer['bullet_char'] ?? ($col['bullet_char'] ?? null);
+        if (is_string($char) && trim($char) !== '') {
+            // Guard against a pasted word — a bullet is a single glyph.
+            $style['char'] = mb_substr(trim($char), 0, 2);
+        }
+
+        $indentCm = $designer['bullet_indent_cm'] ?? ($col['bullet_indent_cm'] ?? null);
+        if (is_numeric($indentCm) && (float) $indentCm > 0) {
+            $style['indent'] = (int) round((float) $indentCm * 567.0);
+        }
+
+        return $style;
     }
 }

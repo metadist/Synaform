@@ -2,7 +2,7 @@
   "id": "synaform",
   "name": "synaform",
   "namespace": "Plugin\\Synaform",
-  "version": "3.8.0",
+  "version": "4.3.0",
   "displayName": "Synaform",
   "description": "Organise data collection workflows into Collections: define variables, upload Word templates, gather datasets, and export with AI-powered extraction.",
   "author": "Synaplan",

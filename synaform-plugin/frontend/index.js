@@ -1,4 +1,4 @@
-const TX_VERSION = "v3.8.0";
+const TX_VERSION = "v4.3.0";
 // Combined with TX_VERSION when fetching plugin assets (i18n bundles, etc.)
 // to defeat stale browser caches whenever a new build of index.js is loaded.
 // The host (PluginView.vue) already cache-busts index.js itself with
@@ -128,6 +128,7 @@ export default {
       newDatasetOpen: false,
       datasetExtracting: false,
       datasetGenerating: false,
+      datasetSaving: false,
       datasetParsing: false,
       datasetParseStep: 0,
       datasetParseStartedAt: null,
@@ -311,17 +312,46 @@ export default {
       return _refreshPromise;
     }
 
+    // Every request is bounded so a slow/stuck backend or AI provider can
+    // NEVER make the UI wait forever. Normal CRUD uses this default;
+    // AI-hitting calls pass a larger `timeoutMs`. Pass `timeoutMs: 0` to
+    // opt out (nothing currently does).
+    const DEFAULT_API_TIMEOUT_MS = 90000;
+    const DEFAULT_UPLOAD_TIMEOUT_MS = 120000;
+
     async function api(path, opts = {}) {
-      const doFetch = () =>
-        fetch(`${BASE}${path}`, {
+      // Per-call timeout. Without it a slow/stuck AI provider (e.g. a heavy
+      // reasoning model) would make the request hang forever and the UI
+      // spin with no end. Callers that hit AI pass a larger `timeoutMs`.
+      const { timeoutMs = DEFAULT_API_TIMEOUT_MS, ...fetchOpts } = opts;
+      const doFetch = () => {
+        let signal = fetchOpts.signal;
+        let timer = null;
+        if (timeoutMs && !signal && typeof AbortController !== "undefined") {
+          const ctrl = new AbortController();
+          signal = ctrl.signal;
+          timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        }
+        const p = fetch(`${BASE}${path}`, {
           credentials: "include",
-          headers: { "Content-Type": "application/json", ...opts.headers },
-          ...opts,
+          headers: { "Content-Type": "application/json", ...fetchOpts.headers },
+          ...fetchOpts,
+          signal,
         });
-      let res = await doFetch();
-      if (res.status === 401) {
-        const refreshed = await refreshAccessToken();
-        if (refreshed) res = await doFetch();
+        return timer ? p.finally(() => clearTimeout(timer)) : p;
+      };
+      let res;
+      try {
+        res = await doFetch();
+        if (res.status === 401) {
+          const refreshed = await refreshAccessToken();
+          if (refreshed) res = await doFetch();
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") {
+          throw new Error(T("datasets.parse_timeout"));
+        }
+        throw e;
       }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -330,21 +360,39 @@ export default {
       return res.json();
     }
 
-    async function apiUpload(path, file, extraFields = {}) {
+    async function apiUpload(path, file, extraFields = {}, opts = {}) {
+      const timeoutMs = opts.timeoutMs ?? DEFAULT_UPLOAD_TIMEOUT_MS;
       const doFetch = () => {
         const fd = new FormData();
         fd.append("file", file);
         for (const [k, v] of Object.entries(extraFields)) fd.append(k, v);
-        return fetch(`${BASE}${path}`, {
+        let signal = null;
+        let timer = null;
+        if (timeoutMs && typeof AbortController !== "undefined") {
+          const ctrl = new AbortController();
+          signal = ctrl.signal;
+          timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        }
+        const p = fetch(`${BASE}${path}`, {
           method: "POST",
           credentials: "include",
           body: fd,
+          signal,
         });
+        return timer ? p.finally(() => clearTimeout(timer)) : p;
       };
-      let res = await doFetch();
-      if (res.status === 401) {
-        const refreshed = await refreshAccessToken();
-        if (refreshed) res = await doFetch();
+      let res;
+      try {
+        res = await doFetch();
+        if (res.status === 401) {
+          const refreshed = await refreshAccessToken();
+          if (refreshed) res = await doFetch();
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") {
+          throw new Error(T("datasets.parse_timeout"));
+        }
+        throw e;
       }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -1943,11 +1991,17 @@ export default {
         render();
       }, 1000);
       render();
+      const aiSuggestCtrl =
+        typeof AbortController !== "undefined" ? new AbortController() : null;
+      const aiSuggestTimer = aiSuggestCtrl
+        ? setTimeout(() => aiSuggestCtrl.abort(), 240000)
+        : null;
       try {
         const res = await fetch(`${BASE}/templates/ai-suggest-from-docx`, {
           method: "POST",
           credentials: "include",
           body: fd,
+          signal: aiSuggestCtrl ? aiSuggestCtrl.signal : undefined,
         });
         if (!res.ok) {
           let msg = `Upload failed (${res.status})`;
@@ -1993,8 +2047,12 @@ export default {
         }
         await Promise.all([fetchTemplates(), fetchForms()]);
       } catch (err) {
-        w.templateError = err.message;
+        w.templateError =
+          err && err.name === "AbortError"
+            ? T("datasets.parse_timeout")
+            : err.message;
       } finally {
+        if (aiSuggestTimer) clearTimeout(aiSuggestTimer);
         if (w.aiSuggestTimer) {
           clearInterval(w.aiSuggestTimer);
           w.aiSuggestTimer = null;
@@ -2042,6 +2100,7 @@ export default {
       try {
         const res = await api("/forms/import-parse", {
           method: "POST",
+          timeoutMs: 180000,
           body: JSON.stringify({ text: w.pastedText }),
         });
         w.pastedFields = res.fields || [];
@@ -3428,13 +3487,33 @@ export default {
               col.structured !== undefined
                 ? !!col.structured
                 : (col.key || "").toLowerCase() === "details";
-            formatRow = `<div class="flex items-center gap-2 pl-1" style="margin-top:.125rem">
+            // Bullet glyph + indent (feedback #4). Empty glyph = keep the
+            // template/default "•"; a custom glyph forces a deterministic
+            // character bullet even when the Word template defines no list.
+            const curGlyph = (col.bullet_char || "").toString();
+            const glyphOpts = ["", "■", "▪", "●", "–", "♥", "▸"]
+              .map(
+                (g) =>
+                  `<option value="${escHtml(g)}"${g === curGlyph ? " selected" : ""}>${g === "" ? T("variables.col_bullet_default") : g}</option>`,
+              )
+              .join("");
+            const curIndent =
+              col.bullet_indent_cm !== undefined &&
+              col.bullet_indent_cm !== null
+                ? String(col.bullet_indent_cm)
+                : "";
+            formatRow = `<div class="flex items-center gap-2 pl-1 flex-wrap" style="margin-top:.125rem">
               <span class="text-xs tx-secondary" style="white-space:nowrap">${T("variables.col_list_format")}</span>
               <select name="fc_${fieldIdx}_cs_${ci}" class="tx-select text-xs" style="width:auto;min-width:14rem">
                 <option value="flat"${!structured ? " selected" : ""}>${T("variables.col_list_format_flat")}</option>
                 <option value="structured"${structured ? " selected" : ""}>${T("variables.col_list_format_structured")}</option>
               </select>
               ${tooltipIcon(T("variables.col_list_format_hint"))}
+              <span class="text-xs tx-secondary" style="white-space:nowrap">${T("variables.col_bullet_glyph")}</span>
+              <select name="fc_${fieldIdx}_bch_${ci}" class="tx-select text-xs" style="width:auto">${glyphOpts}</select>
+              <span class="text-xs tx-secondary" style="white-space:nowrap">${T("variables.col_bullet_indent")}</span>
+              <input name="fc_${fieldIdx}_bin_${ci}" type="number" min="0" step="0.1" value="${escHtml(curIndent)}" placeholder="0.5" class="tx-input text-xs" style="width:5rem" />
+              ${tooltipIcon(T("variables.col_bullet_hint"))}
             </div>`;
           }
           return `<div class="space-y-1" data-col-idx="${ci}">
@@ -4551,7 +4630,7 @@ export default {
               ${hasImage ? `<img src="${escHtml(thumbUrl)}" alt="${escHtml(field.label || field.key)}" style="width:100%;height:100%;object-fit:cover" />` : ICONS.doc}
             </div>
             <div class="flex-1 min-w-0 space-y-2">
-              <p class="text-sm tx-secondary">${hasImage ? T("datasets.image_uploaded") : T("datasets.image_empty")}</p>
+              <p class="text-sm tx-secondary">${hasImage ? T("datasets.image_uploaded") : T("datasets.image_empty")}${hasImage && meta?.auto_extracted ? ` <span class="tx-badge" style="background:var(--bg-chip);color:var(--txt-secondary)">${T("datasets.image_from_cv")}</span>` : ""}</p>
               ${hasImage && meta?.original_name ? `<p class="text-xs tx-secondary truncate">${escHtml(meta.original_name)}</p>` : ""}
               <div class="flex items-center gap-2">
                 <label class="tx-btn tx-btn-sm tx-btn-ghost cursor-pointer">
@@ -4598,6 +4677,12 @@ export default {
         case "table": {
           const cols = field.columns || [];
           const rows = Array.isArray(value) ? value : [];
+          // WS-G (feedback #7): opt-in per-row "relevant" checkbox. Enabled
+          // for a table with designer flag `selectable`, or by convention for
+          // the career `stations` table. Selected rows drive the derived
+          // {{relevant_positions}} list rendered on page 1.
+          const selectable =
+            field.selectable === true || field.key === "stations";
 
           // Weighted column widths — list/textarea cells get the bulk of
           // the row so multi-line content (HR profile tasks, notes) is
@@ -4616,10 +4701,13 @@ export default {
           const colWidths = cols.map(
             (c) => `${((92 * weightOf(c)) / totalWeight).toFixed(2)}%`,
           );
-          const colgroup = `<colgroup>${colWidths
+          const colgroup = `<colgroup>${selectable ? '<col style="width:3rem">' : ""}${colWidths
             .map((w) => `<col style="width:${w}">`)
             .join("")}<col style="width:4.75rem"></colgroup>`;
 
+          const selTh = selectable
+            ? `<th class="py-1.5 px-1 text-xs tx-secondary font-medium text-center" title="${escHtml(T("datasets.col_relevant_hint"))}">${T("datasets.col_relevant")}</th>`
+            : "";
           const hc = cols
             .map(
               (c) =>
@@ -4664,12 +4752,15 @@ export default {
                 <button type="button" data-action="move-table-row" data-dir="1" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary);${ri === rows.length - 1 ? "opacity:.25;pointer-events:none" : ""}" title="${T("datasets.row_move_down")}">${ICONS.arrowDown}</button>
                 <button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button>
               </div>`;
-              return `<tr class="tx-divider border-t">${cells}<td class="py-1.5 px-1 text-center" style="vertical-align:top">${rowActions}</td></tr>`;
+              const selTd = selectable
+                ? `<td class="py-1.5 px-1 text-center" style="vertical-align:top;padding-top:.6rem"><input type="checkbox" name="${escHtml(field.key)}__${ri}__selected"${row.selected ? " checked" : ""} title="${escHtml(T("datasets.col_relevant_hint"))}" /></td>`
+                : "";
+              return `<tr class="tx-divider border-t">${selTd}${cells}<td class="py-1.5 px-1 text-center" style="vertical-align:top">${rowActions}</td></tr>`;
             })
             .join("");
           const empty =
             rows.length === 0
-              ? `<tr><td colspan="${cols.length + 1}" class="py-3 text-center text-xs tx-secondary">${T("datasets.table_empty")}</td></tr>`
+              ? `<tr><td colspan="${cols.length + 1 + (selectable ? 1 : 0)}" class="py-3 text-center text-xs tx-secondary">${T("datasets.table_empty")}</td></tr>`
               : "";
           // table-layout:fixed makes the colgroup widths authoritative —
           // without it browsers fall back to content-based sizing and
@@ -4677,7 +4768,7 @@ export default {
           input = `<div class="rounded" style="border:1px solid var(--divider);overflow:hidden">
             <table class="w-full text-left" style="table-layout:fixed;width:100%">
               ${colgroup}
-              <thead><tr class="tx-divider border-b">${hc}<th class="py-1.5 px-2"></th></tr></thead>
+              <thead><tr class="tx-divider border-b">${selTh}${hc}<th class="py-1.5 px-2"></th></tr></thead>
               <tbody>${dr}${empty}</tbody>
             </table>
           </div>
@@ -4734,14 +4825,42 @@ export default {
         })
         .join("");
 
+      // Per-file extraction status (v4.0). The backend stamps each source
+      // file with an `extraction` report on the last parse-documents run:
+      // green check = readable (chars), amber = read via Vision OCR,
+      // red warning = not readable (with the reason on hover + inline).
+      const fileStatusIcon = (f) => {
+        const ex = f.extraction;
+        if (!ex) {
+          return `<span style="color:var(--status-success)">${ICONS.check}</span>`;
+        }
+        if (!ex.ok) {
+          return `<span style="color:var(--status-error,#dc2626)" title="${escHtml(ex.error || T("datasets.file_unreadable_hint"))}">${ICONS.warning}</span>`;
+        }
+        const strat = String(ex.strategy || "");
+        const isVision =
+          strat.includes("vision") || strat.includes("rasterize");
+        const color = isVision
+          ? "var(--status-warning,#d97706)"
+          : "var(--status-success)";
+        return `<span style="color:${color}" title="${escHtml(strat + " · " + (ex.chars || 0) + " chars")}">${ICONS.check}</span>`;
+      };
+      const fileMeta = (f) => {
+        const ex = f.extraction;
+        if (!ex) return "";
+        if (!ex.ok)
+          return `<span class="text-xs" style="color:var(--status-error,#dc2626)">${T("datasets.file_unreadable")}</span>`;
+        return `<span class="text-xs tx-secondary">${Tf("datasets.file_chars", { count: (ex.chars || 0).toLocaleString() })}</span>`;
+      };
       const list =
         all.length || urls.length
           ? all
               .map(
                 (f) =>
                   `<div class="flex items-center gap-2 py-1.5 group">
-                  <span style="color:var(--status-success)">${ICONS.check}</span>
+                  ${fileStatusIcon(f)}
                   <span class="text-xs flex-1 truncate">${escHtml(f.filename)}</span>
+                  ${fileMeta(f)}
                   <span class="text-xs tx-secondary">${f.size ? (f.size / 1024 > 1024 ? (f.size / 1048576).toFixed(1) + " MB" : Math.round(f.size / 1024) + " KB") : ""}</span>
                   <button data-action="delete-source-file" data-slot="${escHtml(f.slot)}" data-slot-index="${f.slotIndex}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)">${ICONS.trash}</button>
                 </div>`,
@@ -5644,6 +5763,21 @@ export default {
                 } else if (cols[ci].type !== "list") {
                   delete cols[ci].structured;
                 }
+                // Bullet glyph + indent (feedback #4). Only for list columns;
+                // empty glyph clears the override (back to template/default).
+                if (cols[ci].type === "list") {
+                  const bch = fd.get(`fc_${idx}_bch_${ci}`)?.toString() ?? "";
+                  if (bch.trim() !== "") cols[ci].bullet_char = bch.trim();
+                  else delete cols[ci].bullet_char;
+                  const bin = fd.get(`fc_${idx}_bin_${ci}`)?.toString() ?? "";
+                  const binNum = parseFloat(bin);
+                  if (bin.trim() !== "" && !isNaN(binNum) && binNum > 0)
+                    cols[ci].bullet_indent_cm = binNum;
+                  else delete cols[ci].bullet_indent_cm;
+                } else {
+                  delete cols[ci].bullet_char;
+                  delete cols[ci].bullet_indent_cm;
+                }
               }
             }
           }
@@ -5874,6 +6008,7 @@ export default {
           try {
             await refreshAccessToken();
             const res = await api(`/forms/${c.id}/enhance-fields`, {
+              timeoutMs: 180000,
               method: "POST",
               body: JSON.stringify({}),
             });
@@ -6034,10 +6169,19 @@ export default {
         try {
           await refreshAccessToken();
           let res;
-          if (file) res = await apiUpload("/forms/import-parse", file);
+          if (file)
+            res = await apiUpload(
+              "/forms/import-parse",
+              file,
+              {},
+              {
+                timeoutMs: 180000,
+              },
+            );
           else
             res = await api("/forms/import-parse", {
               method: "POST",
+              timeoutMs: 180000,
               body: JSON.stringify({ text }),
             });
           state.variablesImportFields = res.fields || [];
@@ -6706,6 +6850,14 @@ export default {
       if (dataForm && !state.reorderingFields) {
         dataForm.addEventListener("submit", async (e) => {
           e.preventDefault();
+          // In-flight guards (v4.0). Block a save while auto-fill is
+          // running (they both PUT field_values → last-write-wins), and
+          // ignore a double-submit while a save is already in flight.
+          if (state.datasetParsing) {
+            showToast(T("datasets.save_blocked_parsing"), "warning");
+            return;
+          }
+          if (state.datasetSaving) return;
           const fields = c.fields || [];
           const values = {};
           for (const f of fields) {
@@ -6733,6 +6885,11 @@ export default {
                     row[col.key] = raw;
                   }
                 }
+                // WS-G: persist the per-row "relevant" checkbox.
+                const selEl = dataForm.querySelector(
+                  `[name="${f.key}__${ri}__selected"]`,
+                );
+                if (selEl) row.selected = selEl.checked;
                 rows.push(row);
                 ri++;
               }
@@ -6749,6 +6906,19 @@ export default {
                 .filter(Boolean);
             else values[f.key] = input.value;
           }
+          // Save button pending/success animation. The customer had to
+          // press Save twice because there was no feedback that a
+          // (sometimes slow) server round-trip was in progress; they
+          // clicked again, which could race the first request. We drive
+          // the button state directly on the DOM node so we don't
+          // re-render mid-save (which would discard unsaved edits).
+          const saveBtn = dataForm.querySelector('button[type="submit"]');
+          const saveBtnHtml = saveBtn ? saveBtn.innerHTML : "";
+          state.datasetSaving = true;
+          if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = `<span class="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full align-middle"></span> ${T("datasets.save_saving")}`;
+          }
           try {
             const computed =
               values.firstname || values.lastname
@@ -6758,11 +6928,19 @@ export default {
               method: "PUT",
               body: JSON.stringify({ field_values: values, name: computed }),
             });
+            if (saveBtn)
+              saveBtn.innerHTML = `${ICONS.check} ${T("datasets.save_saved")}`;
             showToast(T("app.saved"));
             const upd = await api(`/candidates/${d.id}`);
             state.selectedDataset = upd.candidate;
+            state.datasetSaving = false;
             render();
           } catch (err) {
+            state.datasetSaving = false;
+            if (saveBtn) {
+              saveBtn.disabled = false;
+              saveBtn.innerHTML = saveBtnHtml;
+            }
             showToast(err.message, "error");
           }
         });
@@ -6805,10 +6983,67 @@ export default {
         d.field_values[fieldKey] = rows;
       }
 
+      // Snapshot the ENTIRE Edit-Details form (scalars, lists,
+      // checkboxes AND every table) out of the DOM into d.field_values
+      // before any action that triggers a re-render. The previous
+      // harvest only rescued the table being mutated, so editing a
+      // scalar field and then adding/moving a station row silently
+      // discarded the scalar edit — the customer's "Save only kept the
+      // Stations changes, I have to press Save twice" bug.
+      function harvestAllFormValues() {
+        const form = el.querySelector("#tx-entry-data-form");
+        if (!form) return;
+        if (!d.field_values) d.field_values = {};
+        for (const f of c.fields || []) {
+          if (f.type === "table") {
+            const cols = f.columns || [];
+            if (!cols.length) continue;
+            const rows = [];
+            let ri = 0;
+            while (
+              form.querySelector(`[name="${f.key}__${ri}__${cols[0].key}"]`)
+            ) {
+              const row = {};
+              for (const col of cols) {
+                const cell = form.querySelector(
+                  `[name="${f.key}__${ri}__${col.key}"]`,
+                );
+                const raw = cell?.value ?? "";
+                row[col.key] =
+                  (col.type || "text") === "list"
+                    ? raw
+                        .split(/\r?\n/)
+                        .map((s) => s.trim())
+                        .filter(Boolean)
+                    : raw;
+              }
+              // WS-G: persist the per-row "relevant" checkbox.
+              const selEl = form.querySelector(
+                `[name="${f.key}__${ri}__selected"]`,
+              );
+              if (selEl) row.selected = selEl.checked;
+              rows.push(row);
+              ri++;
+            }
+            d.field_values[f.key] = rows;
+            continue;
+          }
+          const input = form.querySelector(`[name="${f.key}"]`);
+          if (!input) continue;
+          if (f.type === "checkbox") d.field_values[f.key] = input.checked;
+          else if (f.type === "list")
+            d.field_values[f.key] = input.value
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean);
+          else d.field_values[f.key] = input.value;
+        }
+      }
+
       el.querySelectorAll('[data-action="add-table-row"]').forEach((btn) =>
         btn.addEventListener("click", () => {
           const key = btn.dataset.fieldKey;
-          harvestTableRowsFromDom(key);
+          harvestAllFormValues();
           if (!d.field_values) d.field_values = {};
           if (!Array.isArray(d.field_values[key])) d.field_values[key] = [];
           d.field_values[key].push({});
@@ -6819,7 +7054,7 @@ export default {
         btn.addEventListener("click", () => {
           const key = btn.dataset.fieldKey;
           const ri = parseInt(btn.dataset.rowIdx);
-          harvestTableRowsFromDom(key);
+          harvestAllFormValues();
           if (!d.field_values?.[key]) return;
           d.field_values[key].splice(ri, 1);
           render();
@@ -6830,7 +7065,7 @@ export default {
           const key = btn.dataset.fieldKey;
           const ri = parseInt(btn.dataset.rowIdx);
           const dir = parseInt(btn.dataset.dir);
-          harvestTableRowsFromDom(key);
+          harvestAllFormValues();
           const rows = d.field_values?.[key];
           if (!Array.isArray(rows)) return;
           const ni = ri + dir;
@@ -7032,7 +7267,10 @@ export default {
           render();
           await refreshAccessToken();
           try {
-            await api(`/candidates/${d.id}/extract`, { method: "POST" });
+            await api(`/candidates/${d.id}/extract`, {
+              method: "POST",
+              timeoutMs: 240000,
+            });
             const upd = await api(`/candidates/${d.id}`);
             state.selectedDataset = upd.candidate;
             await loadDatasetVariables(d.id);
@@ -7052,6 +7290,12 @@ export default {
       el.querySelector('[data-action="parse-documents"]')?.addEventListener(
         "click",
         async () => {
+          // In-flight guard: never let auto-fill race a manual save
+          // (last-write-wins would silently drop one of them).
+          if (state.datasetSaving) {
+            showToast(T("datasets.parse_blocked_saving"), "warning");
+            return;
+          }
           const imageExts = [
             "jpg",
             "jpeg",
@@ -7129,23 +7373,18 @@ export default {
           try {
             state.datasetParseStep = 2;
             render();
-            const parsePromise = api(`/candidates/${d.id}/parse-documents`, {
+            // v4.0: single extraction pipeline. The legacy
+            // POST /extract call used to run in parallel here, which
+            // caused two AI round-trips per click and confusing partial
+            // results. parse-documents is now the only path (it runs its
+            // own guaranteed-completeness second pass server-side).
+            parseRes = await api(`/candidates/${d.id}/parse-documents`, {
               method: "POST",
-            }).catch((err) => ({ __error: err }));
-            const extractPromise = api(`/candidates/${d.id}/extract`, {
-              method: "POST",
-            }).catch((err) => ({ __error: err }));
-            const [pRes, eRes] = await Promise.all([
-              parsePromise,
-              extractPromise,
-            ]);
-            if (pRes && pRes.__error) {
-              throw pRes.__error;
-            }
-            parseRes = pRes;
-            if (eRes && eRes.__error) {
-              console.warn("[synaform] extract endpoint failed", eRes.__error);
-            }
+              // Safety net so a very slow/stuck model can't spin forever.
+              // Legit fast models finish in well under a minute; this only
+              // trips on a genuinely stuck or extremely slow model.
+              timeoutMs: 240000,
+            });
             state.datasetParseStep = 3;
             // Pin the live status line to the closing "matching variables"
             // message now that both AI round-trips have returned.
@@ -7247,6 +7486,24 @@ export default {
                 );
               }
             }
+            // Extraction was cut short by the server-side time budget —
+            // tell the user plainly (not "already filled").
+            if (parseRes?.deadline_hit) {
+              showToast(T("datasets.parse_deadline"), "warning");
+            }
+            // Name the files we couldn't read instead of silently
+            // skipping them (customer feedback item 5).
+            if (
+              Array.isArray(parseRes?.unreadable) &&
+              parseRes.unreadable.length
+            ) {
+              showToast(
+                Tf("datasets.parse_unreadable_warning", {
+                  files: parseRes.unreadable.map((f) => f.filename).join(", "),
+                }),
+                "warning",
+              );
+            }
             const upd = await api(`/candidates/${d.id}`);
             state.selectedDataset = upd.candidate;
             await loadDatasetVariables(d.id);
@@ -7300,6 +7557,7 @@ export default {
               `/candidates/${d.id}/generate/${state.selectedGenerateTemplate}`,
               {
                 method: "POST",
+                timeoutMs: 240000,
                 ...(instruction
                   ? { body: JSON.stringify({ instruction }) }
                   : {}),
@@ -7515,15 +7773,29 @@ export default {
         await refreshAccessToken();
         const gen = await api(`/candidates/${d.id}/generate/${templateId}`, {
           method: "POST",
+          timeoutMs: 240000,
         });
         const docId = gen?.document?.id;
         if (!docId) throw new Error("Generation did not return a document id");
 
         // 3. Fetch the PDF. Response is a binary stream; turn into a blob URL.
-        const pdfResp = await fetch(
-          `${BASE}/candidates/${d.id}/documents/${docId}/pdf`,
-          { credentials: "include" },
-        );
+        const pdfCtrl =
+          typeof AbortController !== "undefined" ? new AbortController() : null;
+        const pdfTimer = pdfCtrl
+          ? setTimeout(() => pdfCtrl.abort(), 180000)
+          : null;
+        let pdfResp;
+        try {
+          pdfResp = await fetch(
+            `${BASE}/candidates/${d.id}/documents/${docId}/pdf`,
+            {
+              credentials: "include",
+              signal: pdfCtrl ? pdfCtrl.signal : undefined,
+            },
+          );
+        } finally {
+          if (pdfTimer) clearTimeout(pdfTimer);
+        }
         if (pdfResp.status === 501) {
           const errJson = await pdfResp.json().catch(() => ({}));
           state.previewPdfUnavailable = true;
