@@ -10045,6 +10045,10 @@ class SynaformController extends AbstractController
         $markRPr = $baseRPr;
         [$bulletPPr, $charPrefix] = $this->buildBulletParagraphProps($bulletNumId, $markRPr, $bulletStyle);
 
+        // v4.3.1: collapse bullets that repeat within the same list (see
+        // dedupeListStrings) so a skill/activity is never printed twice.
+        $items = $this->dedupeListStrings($items);
+
         $out = '';
         foreach ($items as $item) {
             $text = $this->escapeForWordXml($item);
@@ -10053,6 +10057,87 @@ class SynaformController extends AbstractController
                 . '</w:p>';
         }
         return $out;
+    }
+
+    /**
+     * Normalised comparison key for bullet de-duplication: lower-cased and
+     * stripped of every non-alphanumeric character, so bullets that differ
+     * only in casing, spacing or punctuation collapse to the same key.
+     * Returns '' for items with no alphanumeric content — those are never
+     * de-duplicated against (an empty/spacer entry must survive).
+     */
+    private function bulletDedupKey(string $text): string
+    {
+        $lower = mb_strtolower(trim($text));
+        $key = preg_replace('/[^\p{L}\p{N}]+/u', '', $lower);
+
+        return is_string($key) ? $key : $lower;
+    }
+
+    /**
+     * Drop repeated bullets within a single list (v4.3.1). The v4.3 change
+     * that blends the CV with certificates/Zeugnisse into the same `details`
+     * bullets can emit the same activity twice when both source documents
+     * describe it; this collapses exact duplicates (case/spacing/punctuation
+     * -insensitive) while preserving order and the first occurrence.
+     *
+     * @param list<string> $items
+     *
+     * @return list<string>
+     */
+    private function dedupeListStrings(array $items): array
+    {
+        $seen = [];
+        $kept = [];
+        foreach ($items as $item) {
+            $s = (string) $item;
+            $key = $this->bulletDedupKey($s);
+            if ($key !== '' && isset($seen[$key])) {
+                continue;
+            }
+            if ($key !== '') {
+                $seen[$key] = true;
+            }
+            $kept[] = $s;
+        }
+
+        return array_values($kept);
+    }
+
+    /**
+     * Collapse duplicate `bullet` blocks within a station's classified details
+     * (v4.3.1). See {@see dedupeListStrings}. The "seen" set resets at each
+     * date header so an activity legitimately repeated under a different
+     * period is kept; date / title / spacer blocks are never touched.
+     *
+     * @param list<array{type: string, text?: string}> $blocks
+     *
+     * @return list<array{type: string, text?: string}>
+     */
+    private function dedupeBulletBlocks(array $blocks): array
+    {
+        $seen = [];
+        $kept = [];
+        foreach ($blocks as $b) {
+            $type = $b['type'] ?? '';
+            if ($type === 'date') {
+                $seen = [];
+                $kept[] = $b;
+                continue;
+            }
+            if ($type === 'bullet') {
+                $key = $this->bulletDedupKey((string) ($b['text'] ?? ''));
+                if ($key !== '' && isset($seen[$key])) {
+                    continue;
+                }
+                if ($key !== '') {
+                    $seen[$key] = true;
+                }
+            }
+            $kept[] = $b;
+        }
+
+        return array_values($kept);
     }
 
     /**
@@ -10840,6 +10925,12 @@ class SynaformController extends AbstractController
         if (empty($blocks) && $timeTotal === '') {
             return '';
         }
+
+        // v4.3.1: collapse bullets that repeat within this row's details.
+        // The v4.3 change that blends the CV with certificates/Zeugnisse into
+        // the same `details` list can emit the same activity twice when both
+        // source documents describe it ("alle Unterpunkte doppelt").
+        $blocks = $this->dedupeBulletBlocks($blocks);
 
         // Nested rows shift every paragraph (and its bullets) one level right.
         if ($nestIndent > 0) {
