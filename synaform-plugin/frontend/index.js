@@ -1,4 +1,4 @@
-const TX_VERSION = "v4.3.0";
+const TX_VERSION = "v4.3.1";
 // Combined with TX_VERSION when fetching plugin assets (i18n bundles, etc.)
 // to defeat stale browser caches whenever a new build of index.js is loaded.
 // The host (PluginView.vue) already cache-busts index.js itself with

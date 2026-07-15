@@ -47,6 +47,19 @@ function dedupeListStrings(array $items): array
 }
 
 /**
+ * Data-layer de-dup of the raw list array, BEFORE any structured
+ * classification (which would treat the first line as a title and hide its
+ * duplicate). Mirrors dedupeListColumnValues' per-column behaviour.
+ *
+ * @param list<string> $items
+ * @return list<string>
+ */
+function dedupeDetailsArray(array $items): array
+{
+    return dedupeListStrings(array_map(static fn ($v) => (string) $v, $items));
+}
+
+/**
  * @param list<array{type: string, text?: string}> $blocks
  * @return list<array{type: string, text?: string}>
  */
@@ -117,6 +130,20 @@ $bulletTexts = array_values(array_map(
 ));
 $check('duplicate bullet block dropped', $bulletTexts === ['Aufbau der Cloud', 'Leitung des Teams']);
 $check('date + title blocks preserved', count($out) === 4);
+
+// Data-layer: a whole details block duplicated (6 + 6 identical bullets, no
+// date/title in between) must collapse to 6 — the exact customer scenario
+// ("OCI Germany / Senior Retail Managerin / 6 bullets" printed twice). This
+// runs BEFORE classification, so the leading line is de-duped too.
+$six = [
+    'Leitung und Motivation der Teams Center Information und Retail',
+    'Entwicklung und Umsetzung von Strategien zur Umsatzsteigerung',
+    'Betreuung und Weiterentwicklung von Mieter- und Markenpartnerbeziehungen',
+    'Erstellung von Budgets, Quartalsberichten, Retail-Marketing-Kalendern',
+    'Konzeption und Durchführung von KPI- und Verkaufsschulungen',
+    'Planung und Umsetzung von Marketingmaßnahmen, Store-Events und Mystery Shoppings',
+];
+$check('full 6+6 details block collapses to 6', dedupeDetailsArray(array_merge($six, $six)) === $six);
 
 // Same activity under a DIFFERENT period must survive (seen-set resets on date).
 $in2 = [

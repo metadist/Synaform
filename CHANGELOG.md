@@ -4,6 +4,24 @@ All notable changes to the Synaform plugin are documented here.
 The project follows the HHFF close-out release plan
 (`hhff/planning/07-V4-Release-Plan.md`).
 
+## [4.3.1] - Fix duplicated station sub-items
+
+### Fixed
+
+- **Duplicated `details` bullets ("Die Unterpunkte werden alle doppelt
+  aufgeführt").** The v4.3.0 change that blends the CV with
+  certificates/Arbeitszeugnisse into the same `details` list could emit the
+  same activity twice when both source documents describe it. List entries are
+  now de-duplicated (case/spacing/punctuation-insensitive, first occurrence
+  kept, order preserved) at the **data layer** (`collectArrayData` →
+  `dedupeListColumnValues`) so every template render path is covered, plus a
+  defence-in-depth pass in the bullet renderers (`renderBulletList`,
+  `renderStationBlocksXml`). Applies to existing datasets on the next document
+  generation — no re-extraction needed.
+- New helpers: `bulletDedupKey()`, `dedupeListStrings()`,
+  `dedupeBulletBlocks()`, `dedupeListColumnValues()`. Regression test:
+  `tests/phase-g-dedupe.php`.
+
 ## [4.3.0] - Umbrella/nested periods + station selection (WS-F, WS-G)
 
 Completes the v4 HHFF feature set: feedback #7, #9, #10.

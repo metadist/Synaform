@@ -8071,6 +8071,88 @@ class SynaformController extends AbstractController
             $arrays['stations'] = $this->normalizeStationsRows($arrays['stations']);
         }
 
+        // v4.3.1: collapse duplicate entries in every list value handed to the
+        // generator. This runs at the DATA layer — before any template render
+        // path (table / row-group / block / flat list) and before the
+        // structured classifier (which would treat the first line as a title,
+        // hiding its duplicate) — so "alle Unterpunkte doppelt" is caught
+        // regardless of how the customer's template consumes the data.
+        $arrays = $this->dedupeListColumnValues($arrays, $formFields);
+
+        return $arrays;
+    }
+
+    /**
+     * v4.3.1 data-layer de-duplication for list values.
+     *
+     * Collapses repeated entries in (a) stand-alone `list` variables and
+     * (b) `list`-typed columns inside table rows (always including
+     * `stations.details`). Uses {@see dedupeListStrings} so entries differing
+     * only in casing / spacing / punctuation collapse to one, preserving order
+     * and the first occurrence. Only touches flat string lists — nested row
+     * arrays are recursed into, never de-duplicated as whole rows.
+     *
+     * @param array<string, mixed>             $arrays
+     * @param array<int, array<string, mixed>> $formFields
+     *
+     * @return array<string, mixed>
+     */
+    private function dedupeListColumnValues(array $arrays, array $formFields): array
+    {
+        $topLevelListKeys = [];
+        $listColumns = [];
+        foreach ($formFields as $field) {
+            $key = (string) ($field['key'] ?? '');
+            $type = (string) ($field['type'] ?? 'text');
+            if ($key === '') {
+                continue;
+            }
+            if ($type === 'list') {
+                $topLevelListKeys[$key] = true;
+                continue;
+            }
+            if ($type === 'table') {
+                foreach (($field['columns'] ?? []) as $col) {
+                    if (is_array($col) && ($col['type'] ?? '') === 'list' && !empty($col['key'])) {
+                        $listColumns[$key][] = (string) $col['key'];
+                    }
+                }
+            }
+        }
+        // `stations.details` is a rich bullet list even when a template only
+        // declares it loosely — always de-dup it.
+        $listColumns['stations'] = array_values(array_unique(
+            array_merge($listColumns['stations'] ?? [], ['details'])
+        ));
+
+        foreach ($arrays as $key => $value) {
+            if (!is_array($value)) {
+                continue;
+            }
+            // Stand-alone flat list variable (e.g. languages, other_skills).
+            if (isset($topLevelListKeys[$key]) && !is_array($value[0] ?? null)) {
+                $arrays[$key] = $this->dedupeListStrings(
+                    array_map(static fn ($v) => (string) $v, $value)
+                );
+                continue;
+            }
+            // Table rows: de-dup each list column's array in every row.
+            if (isset($listColumns[$key])) {
+                foreach ($value as $ri => $row) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+                    foreach ($listColumns[$key] as $colKey) {
+                        if (isset($row[$colKey]) && is_array($row[$colKey])) {
+                            $arrays[$key][$ri][$colKey] = $this->dedupeListStrings(
+                                array_map(static fn ($v) => (string) $v, $row[$colKey])
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         return $arrays;
     }
 
