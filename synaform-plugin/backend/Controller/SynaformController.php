@@ -2152,6 +2152,61 @@ class SynaformController extends AbstractController
         return $this->json(['success' => true, 'candidate' => $entry]);
     }
 
+    #[Route('/candidates/{candidateId}/files/{slot}/{fileIndex}/download', name: 'candidates_file_download', methods: ['GET'], requirements: ['fileIndex' => '\d+'])]
+    #[OA\Get(
+        path: '/api/v1/user/{userId}/plugins/synaform/candidates/{candidateId}/files/{slot}/{fileIndex}/download',
+        summary: 'Download an uploaded source file (CV or additional document). PDFs and images are served inline so the browser can preview them; everything else is served as an attachment.',
+        security: [['ApiKey' => []]],
+        tags: ['Synaform Plugin']
+    )]
+    #[OA\Response(response: 200, description: 'The uploaded source file')]
+    #[OA\Response(response: 404, description: 'File not found')]
+    public function candidatesFileDownload(int $userId, string $candidateId, string $slot, int $fileIndex, #[CurrentUser] ?User $user): Response
+    {
+        if (!$this->canAccessPlugin($user, $userId)) {
+            return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
+        }
+
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!$entry) {
+            return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        if ($slot === 'cv') {
+            $fileMeta = $entry['files']['cv'] ?? null;
+        } elseif ($slot === 'additional') {
+            $fileMeta = $entry['files']['additional'][$fileIndex] ?? null;
+        } else {
+            return $this->json(['success' => false, 'error' => 'Invalid slot. Use "cv" or "additional"'], Response::HTTP_BAD_REQUEST);
+        }
+        if (!$fileMeta) {
+            return $this->json(['success' => false, 'error' => 'File not found'], Response::HTTP_NOT_FOUND);
+        }
+
+        // stored_as is server-generated, but never trust a stored value that
+        // ends up in a filesystem path.
+        $storedAs = basename((string) ($fileMeta['stored_as'] ?? ''));
+        $filePath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
+        if ($storedAs === '' || !is_file($filePath)) {
+            return $this->json(['success' => false, 'error' => 'File not found on disk'], Response::HTTP_NOT_FOUND);
+        }
+
+        $mime = (string) ($fileMeta['mime_type'] ?? 'application/octet-stream');
+        $downloadName = preg_replace('/[^a-zA-Z0-9._ -]/', '_', (string) ($fileMeta['filename'] ?? $storedAs)) ?: $storedAs;
+
+        // Inline for previewable types (browser opens PDFs/images in a tab),
+        // attachment for everything else (docx, e-mails, ...).
+        $inline = $mime === 'application/pdf' || str_starts_with($mime, 'image/');
+
+        $response = new BinaryFileResponse($filePath, 200, ['Content-Type' => $mime]);
+        $response->setContentDisposition(
+            $inline ? ResponseHeaderBag::DISPOSITION_INLINE : ResponseHeaderBag::DISPOSITION_ATTACHMENT,
+            $downloadName
+        );
+
+        return $response;
+    }
+
     // =========================================================================
     // URL Sources (LinkedIn profiles, company pages, public web documents)
     // =========================================================================
@@ -2741,6 +2796,8 @@ class SynaformController extends AbstractController
         // Single-call won → return early without running the grouped
         // pipeline at all. Massive wall-time savings on the happy path.
         if ($singleCallSuggestions !== null) {
+            $this->markCandidateExtracted($userId, $candidateId, $modelUsed ?? 'unknown');
+
             return $this->json([
                 'success' => true,
                 'suggestions' => $singleCallSuggestions,
@@ -2900,7 +2957,11 @@ class SynaformController extends AbstractController
                     ['role' => 'system', 'content' => 'You are a precise document parsing assistant. Return only valid JSON.'],
                     ['role' => 'user', 'content' => $prompt],
                 ];
-                $aiOptions = $this->resolveAiModelOptions($userId);
+                // Incremental re-runs ("fill missing fields") may use the
+                // dedicated second-opinion model when one is configured.
+                $aiOptions = $onlyMissing
+                    ? $this->resolveSecondPassModelOptions($userId)
+                    : $this->resolveAiModelOptions($userId);
                 $aiOptions['max_tokens'] = $maxTokens;
                 // Disable Gemini Flash's hidden thinking budget (saves
                 // 5–8 s per call). See note on the form-enhancement
@@ -3001,6 +3062,19 @@ class SynaformController extends AbstractController
             ], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
+        // Incremental mode fills gaps only: a re-extracted group can contain
+        // fields the user already filled or corrected by hand — those
+        // suggestions must never overwrite existing values.
+        if ($onlyMissing) {
+            $allMerged = array_filter(
+                $allMerged,
+                fn ($v, $k) => !$this->fieldValueIsFilled($existingValues[$k] ?? null),
+                ARRAY_FILTER_USE_BOTH
+            );
+        }
+
+        $this->markCandidateExtracted($userId, $candidateId, $modelUsed ?? 'unknown');
+
         return $this->json([
             'success' => true,
             'suggestions' => $allMerged,
@@ -3021,6 +3095,39 @@ class SynaformController extends AbstractController
             'unreadable' => $unreadable,
             'deadline_hit' => $deadlineHit,
         ]);
+    }
+
+    /**
+     * Mark a candidate as extracted after a successful parse-documents run.
+     *
+     * The dataset detail UI only shows the "extraction done / go to review"
+     * card when the candidate status is extracted/reviewed/generated. The
+     * legacy /extract endpoint set that status, but the live parse-documents
+     * path never did — so after a successful scan the dataset stayed in
+     * `draft` and the done card never appeared (customer feedback: "erfasst"
+     * button missing after processing).
+     *
+     * Only upgrades from draft/incomplete — a dataset already reviewed or
+     * generated must not be downgraded by a re-scan. Reloads the entry to
+     * avoid clobbering file metadata persisted earlier in the same request.
+     */
+    private function markCandidateExtracted(int $userId, string $candidateId, string $modelUsed): void
+    {
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (!is_array($entry)) {
+            return;
+        }
+
+        $status = (string) ($entry['status'] ?? 'draft');
+        if (in_array($status, ['', 'draft', 'incomplete'], true)) {
+            $entry['status'] = 'extracted';
+        }
+        $entry['extraction_info'] = [
+            'model_used' => $modelUsed,
+            'finished_at' => date('c'),
+        ];
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
     }
 
     /**
@@ -3277,7 +3384,7 @@ class SynaformController extends AbstractController
                 ['role' => 'system', 'content' => 'You are a precise document parsing assistant. Return only valid JSON.'],
                 ['role' => 'user', 'content' => $prompt],
             ];
-            $aiOptions = $this->resolveAiModelOptions($userId);
+            $aiOptions = $this->resolveSecondPassModelOptions($userId);
             $aiOptions['max_tokens'] = $hasTable ? 16000 : 8000;
             $aiOptions['thinking_budget'] = 0;
             $aiOptions['reasoning_effort'] = 'low';
@@ -7337,10 +7444,23 @@ class SynaformController extends AbstractController
      * @param array<string, bool>                    $existingKeys  map of keys already in the form
      * @return array{fields: list<array<string, mixed>>, summary: array<string, int>}
      */
+    /**
+     * True when a placeholder key names a photo/image slot. Matches whole
+     * tokens (split on ._- and digits) so German compounds like
+     * "ausbildung" (contains "bild") are NOT misclassified.
+     */
+    private function keyLooksLikeImage(string $key): bool
+    {
+        $imageTokens = ['photo', 'foto', 'picture', 'image', 'img', 'portrait', 'portraet', 'bild', 'headshot', 'profilbild', 'lichtbild'];
+        $tokens = preg_split('/[^a-z]+/', strtolower($key), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+
+        return array_intersect($tokens, $imageTokens) !== [];
+    }
+
     private function buildVariableSuggestions(array $placeholders, array $existingKeys): array
     {
         $fields = [];
-        $summary = ['new' => 0, 'duplicate' => 0, 'structural' => 0, 'tables' => 0, 'checkboxes' => 0, 'lists' => 0, 'texts' => 0];
+        $summary = ['new' => 0, 'duplicate' => 0, 'structural' => 0, 'tables' => 0, 'checkboxes' => 0, 'lists' => 0, 'texts' => 0, 'images' => 0];
 
         $rowGroups = [];   // group => [col => true]
         $checkGroups = []; // key => [yes => true, no => true]
@@ -7377,16 +7497,26 @@ class SynaformController extends AbstractController
                 }
             }
 
+            $suggestedType = $type === 'list' ? 'list' : 'text';
+            // Placeholders named like a photo ({{picture}}, {{candidate_photo}},
+            // {{foto}}, ...) become image variables so the profile-photo
+            // auto-extraction and DOCX image embedding kick in out of the box.
+            // Token match (not substring) so e.g. "ausbildung" stays text.
+            if ($suggestedType === 'text' && $this->keyLooksLikeImage($key)) {
+                $suggestedType = 'image';
+            }
             $field = [
                 'key' => $key,
                 'label' => $this->humanizeKey($key),
-                'type' => $type === 'list' ? 'list' : 'text',
+                'type' => $suggestedType,
                 'required' => false,
                 'source' => 'form',
                 '_status' => isset($existingKeys[$key]) ? 'duplicate' : 'new',
             ];
             if ($field['type'] === 'list') {
                 $summary['lists']++;
+            } elseif ($field['type'] === 'image') {
+                $summary['images']++;
             } else {
                 $summary['texts']++;
             }
@@ -7989,6 +8119,32 @@ class SynaformController extends AbstractController
         }
 
         return [];
+    }
+
+    /**
+     * Model options for second-opinion runs (the automatic missing-field
+     * second pass and explicit "fill missing fields" re-runs).
+     *
+     * Prefers the `validation_model` plugin setting so a DIFFERENT (often
+     * stronger) model can take the second look — the setting existed in the
+     * config UI but was never wired to anything. Falls back to the regular
+     * extraction model resolution when unset.
+     */
+    private function resolveSecondPassModelOptions(int $userId): array
+    {
+        $override = $this->configRepository->getValue($userId, self::CONFIG_GROUP, 'validation_model');
+        if (is_string($override) && ctype_digit($override)) {
+            $overrideId = (int) $override;
+            $overrideName = $this->modelConfigService->getModelName($overrideId);
+            if ($overrideName !== null) {
+                return [
+                    'model' => $overrideName,
+                    'provider' => $this->modelConfigService->getProviderForModel($overrideId),
+                ];
+            }
+        }
+
+        return $this->resolveAiModelOptions($userId);
     }
 
     /**

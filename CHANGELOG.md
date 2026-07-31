@@ -4,6 +4,40 @@ All notable changes to the Synaform plugin are documented here.
 The project follows the HHFF close-out release plan
 (`hhff/planning/07-V4-Release-Plan.md`).
 
+## [4.4.0] - HHFF daily-use feedback round (UX + extraction)
+
+### Fixed
+
+- **"Erfasst"/done card missing after a successful scan.** The live
+  `parse-documents` path never set the candidate status, so after auto-fill
+  the dataset stayed in `draft` and the "extraction done / go to review" card
+  only appeared after a lucky second run. The backend now marks the candidate
+  `extracted` on every successful parse (upgrade-only: `reviewed`/`generated`
+  are never downgraded) and records the model used in `extraction_info`.
+
+### Added
+
+- **Drag-and-drop reordering** for variables (editor), dataset fields
+  (reorder mode), and table rows — the up/down arrows stay as an
+  accessible fallback. New shared `enableDragReorder()` helper.
+- **Download / inline preview for uploaded source files.** New endpoint
+  `GET /candidates/{id}/files/{slot}/{index}/download`; PDFs and images are
+  served inline (browser tab preview), other formats download as attachments.
+  Filenames in the Source Documents card are now clickable.
+- **"Fill missing fields" second run.** When the first pass leaves gaps, the
+  extraction card offers an incremental re-run (`?onlyMissing=1`) that only
+  targets still-empty fields. The backend additionally filters incremental
+  suggestions server-side so filled/corrected values are never overwritten.
+- **`validation_model` setting is now wired.** When configured, incremental
+  re-runs and the automatic missing-field second pass use it as a
+  second-opinion model (previously dead config).
+- **Image placeholder detection.** Template scan suggests `type: image` for
+  placeholders named like a photo (`{{picture}}`, `{{foto}}`,
+  `{{candidate_photo}}`, …; token match, so `ausbildung` stays text), which
+  activates profile-photo auto-extraction from the CV and DOCX embedding.
+- **Sticky save bar** on the variables editor and dataset data form, plus a
+  floating **back-to-top button** on long pages.
+
 ## [4.3.1] - Fix duplicated station sub-items
 
 ### Fixed

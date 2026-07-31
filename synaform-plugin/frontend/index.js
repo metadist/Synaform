@@ -1,4 +1,4 @@
-const TX_VERSION = "v4.3.1";
+const TX_VERSION = "v4.4.0";
 // Combined with TX_VERSION when fetching plugin assets (i18n bundles, etc.)
 // to defeat stale browser caches whenever a new build of index.js is loaded.
 // The host (PluginView.vue) already cache-busts index.js itself with
@@ -1264,7 +1264,98 @@ export default {
       .tx-preview ul.tx-preview-bullets { list-style: disc; margin: 0; padding-left: 1.1em; }
       .tx-preview ul.tx-preview-bullets li { margin: 0 0 .15em; }
       .tx-preview-missing { padding: 2rem; text-align: center; color: var(--txt-secondary); font-size: .875rem; }
+
+      /* Drag-and-drop reordering (variables, dataset fields, table rows) */
+      .tx-drag-handle { cursor: grab; touch-action: none; }
+      .tx-drag-handle:active { cursor: grabbing; }
+      .tx-dragging { opacity: .45; }
+      .tx-drag-over-top { box-shadow: inset 0 0 0 1px var(--border-light), 0 -3px 0 0 var(--brand) !important; }
+      .tx-drag-over-bottom { box-shadow: inset 0 0 0 1px var(--border-light), 0 3px 0 0 var(--brand) !important; }
+
+      /* Sticky save bar on long edit forms + floating back-to-top button */
+      .tx-sticky-save { position: sticky; bottom: 0; z-index: 20; margin-top: .5rem; padding: .625rem .75rem; background: var(--bg-card); border-radius: .5rem; box-shadow: inset 0 0 0 1px var(--border-light), 0 -4px 12px rgba(0,0,0,.08); display: flex; align-items: center; gap: .5rem; }
+      .tx-backtop { position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 40; width: 2.5rem; height: 2.5rem; border-radius: 9999px; border: none; background: var(--brand); color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,.25); opacity: .85; transition: opacity .15s; }
+      .tx-backtop:hover { opacity: 1; }
     `;
+
+    /**
+     * Generic HTML5 drag-and-drop reordering for a vertical list of rows.
+     * Complements (does not replace) the up/down arrow buttons — arrows stay
+     * for keyboard/accessibility, dragging is the fast path (customer
+     * feedback: reordering long field lists with arrows is painful).
+     *
+     * When `handleSelector` is given, dragging only starts from that handle,
+     * so rows containing inputs/textareas keep normal text selection.
+     * `onDrop(fromIdx, toIdx)` receives indexes in DOM order.
+     */
+    function enableDragReorder(
+      container,
+      { rowSelector, handleSelector, onDrop },
+    ) {
+      if (!container) return;
+      const rows = Array.from(container.querySelectorAll(rowSelector));
+      let fromIdx = null;
+      const clearMarkers = () =>
+        rows.forEach((r) =>
+          r.classList.remove(
+            "tx-dragging",
+            "tx-drag-over-top",
+            "tx-drag-over-bottom",
+          ),
+        );
+      rows.forEach((row, idx) => {
+        const handle = handleSelector ? row.querySelector(handleSelector) : row;
+        if (!handle) return;
+        if (handleSelector) {
+          handle.addEventListener("mousedown", () =>
+            row.setAttribute("draggable", "true"),
+          );
+          // Without a handle the whole row is always draggable.
+        } else {
+          row.setAttribute("draggable", "true");
+          row.classList.add("tx-drag-handle");
+        }
+        row.addEventListener("dragstart", (e) => {
+          fromIdx = idx;
+          row.classList.add("tx-dragging");
+          e.dataTransfer.effectAllowed = "move";
+          try {
+            e.dataTransfer.setData("text/plain", String(idx));
+          } catch (_e) {
+            /* IE/legacy quirk, harmless */
+          }
+        });
+        row.addEventListener("dragend", () => {
+          fromIdx = null;
+          if (handleSelector) row.removeAttribute("draggable");
+          clearMarkers();
+        });
+        row.addEventListener("dragover", (e) => {
+          if (fromIdx === null || idx === fromIdx) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          const rect = row.getBoundingClientRect();
+          const before = e.clientY < rect.top + rect.height / 2;
+          row.classList.toggle("tx-drag-over-top", before);
+          row.classList.toggle("tx-drag-over-bottom", !before);
+        });
+        row.addEventListener("dragleave", () => {
+          row.classList.remove("tx-drag-over-top", "tx-drag-over-bottom");
+        });
+        row.addEventListener("drop", (e) => {
+          if (fromIdx === null) return;
+          e.preventDefault();
+          const rect = row.getBoundingClientRect();
+          const before = e.clientY < rect.top + rect.height / 2;
+          let to = before ? idx : idx + 1;
+          if (to > fromIdx) to -= 1;
+          const from = fromIdx;
+          fromIdx = null;
+          clearMarkers();
+          if (to !== from) onDrop(from, to);
+        });
+      });
+    }
 
     // =========================================================================
     // Render engine
@@ -1358,6 +1449,64 @@ export default {
         </div>`;
       renderModalPortal();
       bindEvents();
+      setupBackToTop();
+    }
+
+    // Floating "back to top" button (customer feedback: long variable and
+    // dataset pages force endless scrolling). The plugin can be hosted in a
+    // window-scrolled OR inner-scrolled layout, so we watch both.
+    let backToTopBound = false;
+    function findScrollRoot() {
+      let n = el.parentElement;
+      while (n) {
+        const s = getComputedStyle(n);
+        if (
+          /(auto|scroll)/.test(s.overflowY) &&
+          n.scrollHeight > n.clientHeight + 50
+        )
+          return n;
+        n = n.parentElement;
+      }
+      return null;
+    }
+    function setupBackToTop() {
+      const doc = el.ownerDocument || document;
+      let btn = doc.getElementById("tx-backtop");
+      if (!btn) {
+        btn = doc.createElement("button");
+        btn.id = "tx-backtop";
+        btn.type = "button";
+        btn.className = "tx tx-backtop";
+        btn.title = T("app.back_to_top");
+        btn.innerHTML = ICONS.arrowUp;
+        btn.hidden = true;
+        doc.body.appendChild(btn);
+        btn.addEventListener("click", () => {
+          const root = findScrollRoot();
+          if (root) root.scrollTo({ top: 0, behavior: "smooth" });
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+      }
+      if (!backToTopBound) {
+        backToTopBound = true;
+        const update = () => {
+          const b = doc.getElementById("tx-backtop");
+          if (!b) return;
+          if (!el.isConnected) {
+            // Plugin host unmounted — remove the body-level button.
+            b.remove();
+            return;
+          }
+          const root = findScrollRoot();
+          const offset = Math.max(root ? root.scrollTop : 0, window.scrollY);
+          b.hidden = offset < 400;
+        };
+        window.addEventListener("scroll", update, { passive: true });
+        doc.addEventListener("scroll", update, {
+          passive: true,
+          capture: true,
+        });
+      }
     }
 
     function renderHeader() {
@@ -3160,7 +3309,7 @@ export default {
       } else {
         body = `<form id="tx-variables-form" class="space-y-2">
           ${fields.map((fd, idx) => renderVariableEditor(fd, idx)).join("")}
-          <div class="flex items-center gap-2 pt-2">
+          <div class="tx-sticky-save">
             <button type="submit" class="tx-btn tx-btn-sm"${state.variablesDirty ? "" : " disabled"}>${ICONS.check} ${T("app.save")}</button>
             ${state.variablesDirty ? `<button type="button" data-action="variables-reset" class="tx-btn tx-btn-sm tx-btn-ghost">${T("app.reset")}</button>` : ""}
           </div>
@@ -3261,6 +3410,7 @@ export default {
       return `<div class="tx-row p-3 space-y-2" data-field-idx="${idx}">
         <div class="flex items-start gap-2">
           <div class="flex flex-col gap-0.5 pt-1 flex-shrink-0">
+            <span data-drag-handle class="tx-drag-handle p-0.5" style="color:var(--txt-secondary)" title="${T("variables.drag_to_reorder")}">${ICONS.grip}</span>
             <button type="button" data-action="var-move-up" data-idx="${idx}" class="p-0.5 rounded transition-colors" style="color:var(--txt-secondary)${idx === 0 ? ";opacity:0.3" : ""}" ${idx === 0 ? "disabled" : ""}>${ICONS.arrowUp}</button>
             <button type="button" data-action="var-move-down" data-idx="${idx}" class="p-0.5 rounded transition-colors" style="color:var(--txt-secondary)${idx === total - 1 ? ";opacity:0.3" : ""}" ${idx === total - 1 ? "disabled" : ""}>${ICONS.arrowDown}</button>
           </div>
@@ -4562,13 +4712,14 @@ export default {
                 <span class="text-sm font-medium">${escHtml(f.label || f.key)}</span>
                 <span class="text-xs tx-secondary ml-1">(${escHtml(T(`variables.type_${f.type || "text"}`, f.type || "text"))})</span>
               </div>
+              <span class="shrink-0 mt-1" style="color:var(--txt-secondary)" title="${T("variables.drag_to_reorder")}">${ICONS.grip}</span>
             </div>`,
           )
           .join("")}</div>`;
       } else {
         inner = `<form id="tx-entry-data-form" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           ${fields.map((f) => renderFormFieldWithValue(f, formData[f.key])).join("")}
-          <div style="grid-column:1 / -1"><button type="submit" class="tx-btn tx-btn-sm">${T("app.save")}</button></div>
+          <div class="tx-sticky-save" style="grid-column:1 / -1"><button type="submit" class="tx-btn tx-btn-sm">${T("app.save")}</button></div>
         </form>`;
       }
       return `<div class="tx-card p-5">
@@ -4748,6 +4899,7 @@ export default {
               // extracted table rows, e.g. career stations, must be
               // re-orderable by hand) plus remove.
               const rowActions = `<div class="flex items-center justify-center gap-0.5" style="padding-top:.55rem">
+                <span data-drag-handle class="tx-drag-handle p-0.5" style="color:var(--txt-secondary)" title="${T("variables.drag_to_reorder")}">${ICONS.grip}</span>
                 <button type="button" data-action="move-table-row" data-dir="-1" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary);${ri === 0 ? "opacity:.25;pointer-events:none" : ""}" title="${T("datasets.row_move_up")}">${ICONS.arrowUp}</button>
                 <button type="button" data-action="move-table-row" data-dir="1" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary);${ri === rows.length - 1 ? "opacity:.25;pointer-events:none" : ""}" title="${T("datasets.row_move_down")}">${ICONS.arrowDown}</button>
                 <button type="button" data-action="remove-table-row" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}" class="p-0.5" style="color:var(--txt-secondary)">${ICONS.trash}</button>
@@ -4755,7 +4907,7 @@ export default {
               const selTd = selectable
                 ? `<td class="py-1.5 px-1 text-center" style="vertical-align:top;padding-top:.6rem"><input type="checkbox" name="${escHtml(field.key)}__${ri}__selected"${row.selected ? " checked" : ""} title="${escHtml(T("datasets.col_relevant_hint"))}" /></td>`
                 : "";
-              return `<tr class="tx-divider border-t">${selTd}${cells}<td class="py-1.5 px-1 text-center" style="vertical-align:top">${rowActions}</td></tr>`;
+              return `<tr class="tx-divider border-t" data-field-key="${escHtml(field.key)}" data-row-idx="${ri}">${selTd}${cells}<td class="py-1.5 px-1 text-center" style="vertical-align:top">${rowActions}</td></tr>`;
             })
             .join("");
           const empty =
@@ -4859,9 +5011,10 @@ export default {
                 (f) =>
                   `<div class="flex items-center gap-2 py-1.5 group">
                   ${fileStatusIcon(f)}
-                  <span class="text-xs flex-1 truncate">${escHtml(f.filename)}</span>
+                  <button type="button" data-action="download-source-file" data-slot="${escHtml(f.slot)}" data-slot-index="${f.slotIndex}" class="text-xs flex-1 truncate text-left tx-link" style="background:none;border:none;padding:0" title="${T("datasets.download_source_hint")}">${escHtml(f.filename)}</button>
                   ${fileMeta(f)}
                   <span class="text-xs tx-secondary">${f.size ? (f.size / 1024 > 1024 ? (f.size / 1048576).toFixed(1) + " MB" : Math.round(f.size / 1024) + " KB") : ""}</span>
+                  <button data-action="download-source-file" data-slot="${escHtml(f.slot)}" data-slot-index="${f.slotIndex}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)" title="${T("datasets.download_source_hint")}">${ICONS.download}</button>
                   <button data-action="delete-source-file" data-slot="${escHtml(f.slot)}" data-slot-index="${f.slotIndex}" class="p-1 rounded opacity-0 group-hover:opacity-100" style="color:var(--txt-secondary)">${ICONS.trash}</button>
                 </div>`,
               )
@@ -4983,10 +5136,35 @@ export default {
       if (!isExtracted && !state.datasetParsing) {
         return "";
       }
-      const info = d.ai_extracted || {};
+      const info = d.extraction_info || d.ai_extracted || {};
       const modelInfo = info.model_used
         ? ` · ${T("datasets.extract_model")}: <span class="font-mono text-xs">${escHtml(info.model_used)}</span>`
         : "";
+      // Offer an incremental second run when the first pass left gaps:
+      // re-extracts ONLY still-empty fields, never touching filled ones
+      // (customer feedback: "search empty fields again in a second run").
+      const coll = collectionById(d.form_id);
+      const collFields = (coll && coll.fields) || [];
+      const values = d.field_values || {};
+      const isEmptyVal = (v) =>
+        v === null ||
+        v === undefined ||
+        v === "" ||
+        (Array.isArray(v) && v.length === 0);
+      const missingCount = collFields.filter((f) =>
+        isEmptyVal(values[f.key]),
+      ).length;
+      const hasSources = !!(
+        d.files?.cv ||
+        (d.files?.additional || []).length ||
+        (d.files?.urls || []).length
+      );
+      const rerunBtn =
+        missingCount > 0 && hasSources
+          ? `<button type="button" data-action="parse-missing" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("datasets.parse_missing_hint")}">
+              ${ICONS.sparkle} ${Tf("datasets.parse_missing_btn", { count: missingCount })}
+            </button>`
+          : "";
       const line = state.datasetParsing
         ? `<div class="flex items-center gap-2 text-sm" style="color:var(--brand)">
             <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
@@ -4996,9 +5174,12 @@ export default {
             <div class="flex items-center gap-2 text-sm" style="color:var(--status-success)">
               ${ICONS.check} ${T("datasets.extract_done")}${modelInfo}
             </div>
-            <button type="button" data-dataset-tab="details" class="tx-btn tx-btn-sm">
-              ${T("datasets.goto_review")} →
-            </button>
+            <div class="flex items-center gap-2">
+              ${rerunBtn}
+              <button type="button" data-dataset-tab="details" class="tx-btn tx-btn-sm">
+                ${T("datasets.goto_review")} →
+              </button>
+            </div>
           </div>`;
       return `<div class="tx-card p-5">
         <div class="flex items-center gap-2 mb-3">
@@ -5883,6 +6064,19 @@ export default {
           render();
         }),
       );
+
+      enableDragReorder(el.querySelector("#tx-variables-form"), {
+        rowSelector: ":scope > .tx-row[data-field-idx]",
+        handleSelector: "[data-drag-handle]",
+        onDrop: (from, to) => {
+          ensureDraft();
+          collectForm();
+          const moved = state.variablesDraft.splice(from, 1)[0];
+          state.variablesDraft.splice(to, 0, moved);
+          state.variablesDirty = true;
+          render();
+        },
+      });
 
       el.querySelectorAll('[data-action="var-col-add"]').forEach((btn) =>
         btn.addEventListener("click", () => {
@@ -7075,6 +7269,26 @@ export default {
         }),
       );
 
+      el.querySelectorAll("#tx-entry-data-form table tbody").forEach(
+        (tbody) => {
+          const firstRow = tbody.querySelector("tr[data-field-key]");
+          if (!firstRow) return;
+          const key = firstRow.dataset.fieldKey;
+          enableDragReorder(tbody, {
+            rowSelector: ":scope > tr[data-field-key]",
+            handleSelector: "[data-drag-handle]",
+            onDrop: (from, to) => {
+              harvestAllFormValues();
+              const rows = d.field_values?.[key];
+              if (!Array.isArray(rows)) return;
+              const moved = rows.splice(from, 1)[0];
+              rows.splice(to, 0, moved);
+              render();
+            },
+          });
+        },
+      );
+
       el.querySelector('[data-action="toggle-reorder"]')?.addEventListener(
         "click",
         async () => {
@@ -7108,6 +7322,19 @@ export default {
           render();
         }),
       );
+
+      if (state.reorderingFields) {
+        // Reorder-mode rows carry no inputs, so the whole row is draggable.
+        enableDragReorder(el.querySelector("#tx-entry-data-form"), {
+          rowSelector: ":scope > [data-field-idx]",
+          onDrop: (from, to) => {
+            if (!c.fields) return;
+            const moved = c.fields.splice(from, 1)[0];
+            c.fields.splice(to, 0, moved);
+            render();
+          },
+        });
+      }
 
       // File upload — via the button AND by dropping files anywhere on the
       // Source Documents card (beta feedback: a drop target was expected here).
@@ -7287,244 +7514,253 @@ export default {
       // (extract) in parallel. We surface a live elapsed-time + adaptive
       // progress bar so users know that a slow image OCR or AI roundtrip
       // is still in progress rather than hung.
-      el.querySelector('[data-action="parse-documents"]')?.addEventListener(
-        "click",
-        async () => {
-          // In-flight guard: never let auto-fill race a manual save
-          // (last-write-wins would silently drop one of them).
-          if (state.datasetSaving) {
-            showToast(T("datasets.parse_blocked_saving"), "warning");
-            return;
-          }
-          const imageExts = [
-            "jpg",
-            "jpeg",
-            "png",
-            "gif",
-            "webp",
-            "tif",
-            "tiff",
-            "bmp",
-          ];
-          const allFiles = [];
-          if (d.files?.cv?.filename) allFiles.push(d.files.cv.filename);
-          for (const f of d.files?.additional || []) {
-            if (f?.filename) allFiles.push(f.filename);
-          }
-          const urlCount = (d.files?.urls || []).length;
-          const fileCount = allFiles.length + urlCount;
-          const hasImages = allFiles.some((name) => {
-            const dot = name.lastIndexOf(".");
-            if (dot < 0) return false;
-            return imageExts.includes(name.slice(dot + 1).toLowerCase());
-          });
-          // Build a live, per-variable status line from the collection's
-          // own field labels so the user sees concrete progress ("Looking
-          // for «Vorname»…", "Sorting table entries: «Stations»…") rather
-          // than a single static spinner. The backend POST is opaque (no
-          // streaming), so we drive the line on the elapsed-time timer.
-          const parseColl = collectionById(d.form_id);
-          const parseFields = (parseColl && parseColl.fields) || [];
-          const statusMsgs = [T("datasets.analyze_status_reading")];
-          for (const f of parseFields) {
-            const name = (f && (f.label || f.key)) || "";
-            if (!name) continue;
-            statusMsgs.push(
-              f && f.type === "table"
-                ? Tf("datasets.analyze_status_table", { name })
-                : Tf("datasets.analyze_status_field", { name }),
-            );
-          }
-          statusMsgs.push(T("datasets.analyze_status_finalizing"));
+      // `onlyMissing` runs the incremental variant (?onlyMissing=1): the
+      // backend re-extracts ONLY still-empty fields (optionally with the
+      // configured second-opinion model) and never overwrites filled ones.
+      async function runParseDocuments(onlyMissing = false) {
+        // In-flight guard: never let auto-fill race a manual save
+        // (last-write-wins would silently drop one of them).
+        if (state.datasetSaving) {
+          showToast(T("datasets.parse_blocked_saving"), "warning");
+          return;
+        }
+        const imageExts = [
+          "jpg",
+          "jpeg",
+          "png",
+          "gif",
+          "webp",
+          "tif",
+          "tiff",
+          "bmp",
+        ];
+        const allFiles = [];
+        if (d.files?.cv?.filename) allFiles.push(d.files.cv.filename);
+        for (const f of d.files?.additional || []) {
+          if (f?.filename) allFiles.push(f.filename);
+        }
+        const urlCount = (d.files?.urls || []).length;
+        const fileCount = allFiles.length + urlCount;
+        const hasImages = allFiles.some((name) => {
+          const dot = name.lastIndexOf(".");
+          if (dot < 0) return false;
+          return imageExts.includes(name.slice(dot + 1).toLowerCase());
+        });
+        // Build a live, per-variable status line from the collection's
+        // own field labels so the user sees concrete progress ("Looking
+        // for «Vorname»…", "Sorting table entries: «Stations»…") rather
+        // than a single static spinner. The backend POST is opaque (no
+        // streaming), so we drive the line on the elapsed-time timer.
+        const parseColl = collectionById(d.form_id);
+        const parseFields = (parseColl && parseColl.fields) || [];
+        const statusMsgs = [T("datasets.analyze_status_reading")];
+        for (const f of parseFields) {
+          const name = (f && (f.label || f.key)) || "";
+          if (!name) continue;
+          statusMsgs.push(
+            f && f.type === "table"
+              ? Tf("datasets.analyze_status_table", { name })
+              : Tf("datasets.analyze_status_field", { name }),
+          );
+        }
+        statusMsgs.push(T("datasets.analyze_status_finalizing"));
 
-          state.datasetParsing = true;
-          state.datasetParseStep = 0;
-          state.datasetParseStartedAt = Date.now();
-          state.datasetParseElapsedSec = 0;
-          state.datasetParseFileCount = fileCount;
-          state.datasetParseHasImages = hasImages;
-          state.datasetParseStatusMsgs = statusMsgs;
-          state.datasetParseStatusIdx = 0;
-          if (state.datasetParseTimer) clearInterval(state.datasetParseTimer);
-          state.datasetParseTimer = setInterval(() => {
-            if (!state.datasetParsing || !state.datasetParseStartedAt) return;
-            state.datasetParseElapsedSec = Math.round(
-              (Date.now() - state.datasetParseStartedAt) / 1000,
-            );
-            // Walk the live status line through the field list while we wait,
-            // but hold on the last field message (one before "finalizing")
-            // until the request actually returns — at which point step 3
-            // pins it to the closing "finalizing/matching" message.
-            const msgs = state.datasetParseStatusMsgs || [];
-            if (
-              msgs.length > 2 &&
-              state.datasetParseStatusIdx < msgs.length - 2
-            ) {
-              state.datasetParseStatusIdx += 1;
-            }
-            render();
-          }, 1000);
+        state.datasetParsing = true;
+        state.datasetParseStep = 0;
+        state.datasetParseStartedAt = Date.now();
+        state.datasetParseElapsedSec = 0;
+        state.datasetParseFileCount = fileCount;
+        state.datasetParseHasImages = hasImages;
+        state.datasetParseStatusMsgs = statusMsgs;
+        state.datasetParseStatusIdx = 0;
+        if (state.datasetParseTimer) clearInterval(state.datasetParseTimer);
+        state.datasetParseTimer = setInterval(() => {
+          if (!state.datasetParsing || !state.datasetParseStartedAt) return;
+          state.datasetParseElapsedSec = Math.round(
+            (Date.now() - state.datasetParseStartedAt) / 1000,
+          );
+          // Walk the live status line through the field list while we wait,
+          // but hold on the last field message (one before "finalizing")
+          // until the request actually returns — at which point step 3
+          // pins it to the closing "finalizing/matching" message.
+          const msgs = state.datasetParseStatusMsgs || [];
+          if (
+            msgs.length > 2 &&
+            state.datasetParseStatusIdx < msgs.length - 2
+          ) {
+            state.datasetParseStatusIdx += 1;
+          }
           render();
-          await new Promise((r) => setTimeout(r, 250));
-          state.datasetParseStep = 1;
+        }, 1000);
+        render();
+        await new Promise((r) => setTimeout(r, 250));
+        state.datasetParseStep = 1;
+        render();
+        await refreshAccessToken();
+        let parseRes = null;
+        try {
+          state.datasetParseStep = 2;
           render();
-          await refreshAccessToken();
-          let parseRes = null;
-          try {
-            state.datasetParseStep = 2;
-            render();
-            // v4.0: single extraction pipeline. The legacy
-            // POST /extract call used to run in parallel here, which
-            // caused two AI round-trips per click and confusing partial
-            // results. parse-documents is now the only path (it runs its
-            // own guaranteed-completeness second pass server-side).
-            parseRes = await api(`/candidates/${d.id}/parse-documents`, {
+          // v4.0: single extraction pipeline. The legacy
+          // POST /extract call used to run in parallel here, which
+          // caused two AI round-trips per click and confusing partial
+          // results. parse-documents is now the only path (it runs its
+          // own guaranteed-completeness second pass server-side).
+          parseRes = await api(
+            `/candidates/${d.id}/parse-documents${onlyMissing ? "?onlyMissing=1" : ""}`,
+            {
               method: "POST",
               // Safety net so a very slow/stuck model can't spin forever.
               // Legit fast models finish in well under a minute; this only
               // trips on a genuinely stuck or extremely slow model.
               timeoutMs: 240000,
-            });
-            state.datasetParseStep = 3;
-            // Pin the live status line to the closing "matching variables"
-            // message now that both AI round-trips have returned.
-            if ((state.datasetParseStatusMsgs || []).length) {
-              state.datasetParseStatusIdx =
-                state.datasetParseStatusMsgs.length - 1;
-            }
-            render();
-            if (parseRes && parseRes.success && parseRes.suggestions) {
-              const sug = parseRes.suggestions;
-              // Defensive guard: a malformed AI response (top-level
-              // array, primitive, etc.) used to be silently spread
-              // into field_values, producing numeric-keyed garbage
-              // that broke template generation. Treat anything that
-              // isn't a plain object as a parse failure.
-              const isPlainObject =
-                sug &&
-                typeof sug === "object" &&
-                !Array.isArray(sug) &&
-                Object.prototype.toString.call(sug) === "[object Object]";
-              const baseline =
-                d.field_values &&
-                typeof d.field_values === "object" &&
-                !Array.isArray(d.field_values)
-                  ? d.field_values
-                  : {};
-              if (!isPlainObject) {
-                showToast(
-                  T("datasets.parse_unusable_shape") ||
-                    "AI returned a response we couldn't apply to the form.",
-                  "warning",
-                );
-              } else {
-                const merged = { ...baseline };
-                for (const [k, v] of Object.entries(sug)) {
-                  if (v !== null && v !== undefined && v !== "") merged[k] = v;
-                }
-                await api(`/candidates/${d.id}`, {
-                  method: "PUT",
-                  body: JSON.stringify({ field_values: merged }),
-                });
-              }
-            } else if (parseRes && !parseRes.success) {
-              // Surface the diagnostic backend hint instead of a
-              // silent "no changes" — users couldn't tell why nothing
-              // updated.
-              const msg = parseRes.error || T("datasets.parse_failed");
-              showToast(msg, "warning");
-            }
-            // Group-extraction telemetry (v3.7.1+). Backend returns a
-            // `groups` array describing which logical clusters of
-            // fields succeeded, were skipped (already filled), or
-            // failed. We surface this as a console table for power
-            // users + a richer success toast so partial extractions
-            // are visible. Older backends without grouped extraction
-            // simply won't have these fields and the block is a no-op.
-            if (parseRes && Array.isArray(parseRes.groups)) {
-              try {
-                console.table(
-                  parseRes.groups.map((g) => ({
-                    group: g.label || g.key,
-                    fields: `${g.fields_returned ?? 0}/${g.fields_in_group ?? 0}`,
-                    status: g.skipped
-                      ? `skipped (${g.reason || "filled"})`
-                      : g.succeeded
-                        ? "ok"
-                        : `failed: ${g.error || "unknown"}`,
-                    elapsed_ms: g.elapsed_ms ?? 0,
-                  })),
-                );
-              } catch (_) {
-                /* console.table missing */
-              }
-              const groupsTotal =
-                parseRes.groups_total ?? parseRes.groups.length;
-              const groupsOk = parseRes.groups_succeeded ?? 0;
-              const groupsSkipped = parseRes.groups_skipped ?? 0;
-              const failedGroups = parseRes.groups.filter(
-                (g) => !g.skipped && !g.succeeded,
-              );
-              if (failedGroups.length > 0) {
-                showToast(
-                  Tf("datasets.parse_partial", {
-                    ok: groupsOk,
-                    total: groupsTotal,
-                    failed: failedGroups
-                      .map((g) => g.label || g.key)
-                      .join(", "),
-                  }),
-                  "warning",
-                );
-              } else if (groupsSkipped > 0) {
-                showToast(
-                  Tf("datasets.parse_summary_skipped", {
-                    ok: groupsOk,
-                    skipped: groupsSkipped,
-                    total: groupsTotal,
-                  }),
-                );
-              }
-            }
-            // Extraction was cut short by the server-side time budget —
-            // tell the user plainly (not "already filled").
-            if (parseRes?.deadline_hit) {
-              showToast(T("datasets.parse_deadline"), "warning");
-            }
-            // Name the files we couldn't read instead of silently
-            // skipping them (customer feedback item 5).
-            if (
-              Array.isArray(parseRes?.unreadable) &&
-              parseRes.unreadable.length
-            ) {
+            },
+          );
+          state.datasetParseStep = 3;
+          // Pin the live status line to the closing "matching variables"
+          // message now that both AI round-trips have returned.
+          if ((state.datasetParseStatusMsgs || []).length) {
+            state.datasetParseStatusIdx =
+              state.datasetParseStatusMsgs.length - 1;
+          }
+          render();
+          if (parseRes && parseRes.success && parseRes.suggestions) {
+            const sug = parseRes.suggestions;
+            // Defensive guard: a malformed AI response (top-level
+            // array, primitive, etc.) used to be silently spread
+            // into field_values, producing numeric-keyed garbage
+            // that broke template generation. Treat anything that
+            // isn't a plain object as a parse failure.
+            const isPlainObject =
+              sug &&
+              typeof sug === "object" &&
+              !Array.isArray(sug) &&
+              Object.prototype.toString.call(sug) === "[object Object]";
+            const baseline =
+              d.field_values &&
+              typeof d.field_values === "object" &&
+              !Array.isArray(d.field_values)
+                ? d.field_values
+                : {};
+            if (!isPlainObject) {
               showToast(
-                Tf("datasets.parse_unreadable_warning", {
-                  files: parseRes.unreadable.map((f) => f.filename).join(", "),
+                T("datasets.parse_unusable_shape") ||
+                  "AI returned a response we couldn't apply to the form.",
+                "warning",
+              );
+            } else {
+              const merged = { ...baseline };
+              for (const [k, v] of Object.entries(sug)) {
+                if (v !== null && v !== undefined && v !== "") merged[k] = v;
+              }
+              await api(`/candidates/${d.id}`, {
+                method: "PUT",
+                body: JSON.stringify({ field_values: merged }),
+              });
+            }
+          } else if (parseRes && !parseRes.success) {
+            // Surface the diagnostic backend hint instead of a
+            // silent "no changes" — users couldn't tell why nothing
+            // updated.
+            const msg = parseRes.error || T("datasets.parse_failed");
+            showToast(msg, "warning");
+          }
+          // Group-extraction telemetry (v3.7.1+). Backend returns a
+          // `groups` array describing which logical clusters of
+          // fields succeeded, were skipped (already filled), or
+          // failed. We surface this as a console table for power
+          // users + a richer success toast so partial extractions
+          // are visible. Older backends without grouped extraction
+          // simply won't have these fields and the block is a no-op.
+          if (parseRes && Array.isArray(parseRes.groups)) {
+            try {
+              console.table(
+                parseRes.groups.map((g) => ({
+                  group: g.label || g.key,
+                  fields: `${g.fields_returned ?? 0}/${g.fields_in_group ?? 0}`,
+                  status: g.skipped
+                    ? `skipped (${g.reason || "filled"})`
+                    : g.succeeded
+                      ? "ok"
+                      : `failed: ${g.error || "unknown"}`,
+                  elapsed_ms: g.elapsed_ms ?? 0,
+                })),
+              );
+            } catch (_) {
+              /* console.table missing */
+            }
+            const groupsTotal = parseRes.groups_total ?? parseRes.groups.length;
+            const groupsOk = parseRes.groups_succeeded ?? 0;
+            const groupsSkipped = parseRes.groups_skipped ?? 0;
+            const failedGroups = parseRes.groups.filter(
+              (g) => !g.skipped && !g.succeeded,
+            );
+            if (failedGroups.length > 0) {
+              showToast(
+                Tf("datasets.parse_partial", {
+                  ok: groupsOk,
+                  total: groupsTotal,
+                  failed: failedGroups.map((g) => g.label || g.key).join(", "),
                 }),
                 "warning",
               );
+            } else if (groupsSkipped > 0) {
+              showToast(
+                Tf("datasets.parse_summary_skipped", {
+                  ok: groupsOk,
+                  skipped: groupsSkipped,
+                  total: groupsTotal,
+                }),
+              );
             }
-            const upd = await api(`/candidates/${d.id}`);
-            state.selectedDataset = upd.candidate;
-            await loadDatasetVariables(d.id);
-            showToast(T("datasets.parse_done"));
-          } catch (err) {
-            showToast(err.message, "error");
           }
-          if (state.datasetParseTimer) {
-            clearInterval(state.datasetParseTimer);
-            state.datasetParseTimer = null;
+          // Extraction was cut short by the server-side time budget —
+          // tell the user plainly (not "already filled").
+          if (parseRes?.deadline_hit) {
+            showToast(T("datasets.parse_deadline"), "warning");
           }
-          state.datasetParsing = false;
-          state.datasetParseStep = 0;
-          state.datasetParseStartedAt = null;
-          state.datasetParseElapsedSec = 0;
-          state.datasetParseFileCount = 0;
-          state.datasetParseHasImages = false;
-          state.datasetParseStatusMsgs = [];
-          state.datasetParseStatusIdx = 0;
-          render();
-        },
+          // Name the files we couldn't read instead of silently
+          // skipping them (customer feedback item 5).
+          if (
+            Array.isArray(parseRes?.unreadable) &&
+            parseRes.unreadable.length
+          ) {
+            showToast(
+              Tf("datasets.parse_unreadable_warning", {
+                files: parseRes.unreadable.map((f) => f.filename).join(", "),
+              }),
+              "warning",
+            );
+          }
+          const upd = await api(`/candidates/${d.id}`);
+          state.selectedDataset = upd.candidate;
+          await loadDatasetVariables(d.id);
+          showToast(T("datasets.parse_done"));
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+        if (state.datasetParseTimer) {
+          clearInterval(state.datasetParseTimer);
+          state.datasetParseTimer = null;
+        }
+        state.datasetParsing = false;
+        state.datasetParseStep = 0;
+        state.datasetParseStartedAt = null;
+        state.datasetParseElapsedSec = 0;
+        state.datasetParseFileCount = 0;
+        state.datasetParseHasImages = false;
+        state.datasetParseStatusMsgs = [];
+        state.datasetParseStatusIdx = 0;
+        render();
+      }
+
+      el.querySelector('[data-action="parse-documents"]')?.addEventListener(
+        "click",
+        () => runParseDocuments(false),
+      );
+      el.querySelector('[data-action="parse-missing"]')?.addEventListener(
+        "click",
+        () => runParseDocuments(true),
       );
 
       // Generate
@@ -7591,6 +7827,17 @@ export default {
             "_blank",
           );
         }),
+      );
+      // Uploaded source files: PDFs/images are served inline (browser
+      // preview tab), other formats download as attachments.
+      el.querySelectorAll('[data-action="download-source-file"]').forEach(
+        (btn) =>
+          btn.addEventListener("click", () => {
+            window.open(
+              `${BASE}/candidates/${d.id}/files/${btn.dataset.slot}/${btn.dataset.slotIndex}/download`,
+              "_blank",
+            );
+          }),
       );
       el.querySelectorAll('[data-action="delete-doc"]').forEach((btn) =>
         btn.addEventListener("click", async () => {
