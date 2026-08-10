@@ -355,7 +355,11 @@ export default {
       }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
+        const err = new Error(body.error || `HTTP ${res.status}`);
+        // Attach structured body so callers (e.g. parse-documents) can surface
+        // outcome / unreadable files even on HTTP 4xx instead of a bare string.
+        err.payload = body;
+        throw err;
       }
       return res.json();
     }
@@ -4977,14 +4981,24 @@ export default {
         })
         .join("");
 
-      // Per-file extraction status (v4.0). The backend stamps each source
-      // file with an `extraction` report on the last parse-documents run:
-      // green check = readable (chars), amber = read via Vision OCR,
-      // red warning = not readable (with the reason on hover + inline).
+      // Per-file extraction status (v4.0+). Before the first scan we show a
+      // neutral "not scanned yet" chip — a green check here used to imply
+      // success even though nothing had been read.
+      const strategyLabel = (strat) => {
+        const s = String(strat || "");
+        if (!s) return "";
+        if (s === "ocr_cache") return T("datasets.file_strategy_cache");
+        if (s.includes("vision") || s.includes("rasterize"))
+          return T("datasets.file_strategy_vision");
+        if (s === "tika") return T("datasets.file_strategy_tika");
+        if (s === "error" || s === "empty")
+          return T("datasets.file_strategy_failed");
+        return s;
+      };
       const fileStatusIcon = (f) => {
         const ex = f.extraction;
         if (!ex) {
-          return `<span style="color:var(--status-success)">${ICONS.check}</span>`;
+          return `<span style="color:var(--txt-secondary)" title="${T("datasets.file_pending_hint")}">${ICONS.file}</span>`;
         }
         if (!ex.ok) {
           return `<span style="color:var(--status-error,#dc2626)" title="${escHtml(ex.error || T("datasets.file_unreadable_hint"))}">${ICONS.warning}</span>`;
@@ -4995,14 +5009,24 @@ export default {
         const color = isVision
           ? "var(--status-warning,#d97706)"
           : "var(--status-success)";
-        return `<span style="color:${color}" title="${escHtml(strat + " · " + (ex.chars || 0) + " chars")}">${ICONS.check}</span>`;
+        return `<span style="color:${color}" title="${escHtml(strategyLabel(strat) + " · " + (ex.chars || 0) + " chars")}">${ICONS.check}</span>`;
       };
       const fileMeta = (f) => {
         const ex = f.extraction;
-        if (!ex) return "";
-        if (!ex.ok)
-          return `<span class="text-xs" style="color:var(--status-error,#dc2626)">${T("datasets.file_unreadable")}</span>`;
-        return `<span class="text-xs tx-secondary">${Tf("datasets.file_chars", { count: (ex.chars || 0).toLocaleString() })}</span>`;
+        if (!ex) {
+          return `<span class="text-xs tx-secondary">${T("datasets.file_pending")}</span>`;
+        }
+        if (!ex.ok) {
+          const reason = ex.error
+            ? ` — ${escHtml(ex.error)}`
+            : "";
+          return `<span class="text-xs" style="color:var(--status-error,#dc2626)">${T("datasets.file_unreadable")}${reason}</span>`;
+        }
+        const strat = strategyLabel(ex.strategy);
+        const stratBit = strat
+          ? `<span class="tx-secondary"> · ${escHtml(strat)}</span>`
+          : "";
+        return `<span class="text-xs tx-secondary">${Tf("datasets.file_chars", { count: (ex.chars || 0).toLocaleString() })}${stratBit}</span>`;
       };
       const list =
         all.length || urls.length
@@ -5123,26 +5147,23 @@ export default {
       </div>`;
     }
 
-    // Status-only display for the AI extraction stage. The actual
-    // trigger is the unified "Read files & auto-fill" button in the
-    // Source Documents section above; this card only surfaces the
-    // outcome (and the model used) so users still get feedback that
-    // their data has been extracted.
+    // Status card for the AI extraction stage. Shown while a run is in
+    // flight, after a completed/partial/failed run (`last_parse`), or when
+    // the candidate status is already extracted/reviewed/generated.
     function renderDatasetExtractionSection(d) {
+      const last = d.last_parse || null;
       const isExtracted =
         d.status === "extracted" ||
         d.status === "reviewed" ||
         d.status === "generated";
-      if (!isExtracted && !state.datasetParsing) {
+      if (!isExtracted && !state.datasetParsing && !last) {
         return "";
       }
       const info = d.extraction_info || d.ai_extracted || {};
-      const modelInfo = info.model_used
-        ? ` · ${T("datasets.extract_model")}: <span class="font-mono text-xs">${escHtml(info.model_used)}</span>`
+      const modelName = (last && last.model) || info.model_used || "";
+      const modelInfo = modelName
+        ? ` · ${T("datasets.extract_model")}: <span class="font-mono text-xs">${escHtml(modelName)}</span>`
         : "";
-      // Offer an incremental second run when the first pass left gaps:
-      // re-extracts ONLY still-empty fields, never touching filled ones
-      // (customer feedback: "search empty fields again in a second run").
       const coll = collectionById(d.form_id);
       const collFields = (coll && coll.fields) || [];
       const values = d.field_values || {};
@@ -5160,17 +5181,84 @@ export default {
         (d.files?.urls || []).length
       );
       const rerunBtn =
-        missingCount > 0 && hasSources
+        missingCount > 0 && hasSources && !state.datasetParsing
           ? `<button type="button" data-action="parse-missing" class="tx-btn tx-btn-sm tx-btn-ghost" title="${T("datasets.parse_missing_hint")}">
               ${ICONS.sparkle} ${Tf("datasets.parse_missing_btn", { count: missingCount })}
             </button>`
           : "";
-      const line = state.datasetParsing
-        ? `<div class="flex items-center gap-2 text-sm" style="color:var(--brand)">
+
+      let outcomeBlock = "";
+      if (state.datasetParsing) {
+        outcomeBlock = `<div class="flex items-center gap-2 text-sm" style="color:var(--brand)">
             <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
             ${T("datasets.extract_running")}
-          </div>`
-        : `<div class="flex items-center justify-between gap-3 flex-wrap">
+          </div>`;
+      } else if (last) {
+        const outcome = last.outcome || "complete";
+        const color =
+          outcome === "complete"
+            ? "var(--status-success)"
+            : outcome === "partial"
+              ? "var(--status-warning,#d97706)"
+              : "var(--status-error,#dc2626)";
+        const title =
+          outcome === "complete"
+            ? T("datasets.parse_outcome_complete")
+            : outcome === "partial"
+              ? T("datasets.parse_outcome_partial")
+              : T("datasets.parse_outcome_failed");
+        const sourcesLine = Tf("datasets.parse_outcome_sources", {
+          ok: last.sources_ok ?? 0,
+          total: last.sources_total ?? 0,
+        });
+        const fieldsLine = Tf("datasets.parse_outcome_fields", {
+          filled: last.fields_filled ?? 0,
+          total: last.fields_total ?? 0,
+        });
+        const unread =
+          Array.isArray(last.unreadable_files) && last.unreadable_files.length
+            ? `<div class="text-xs mt-1" style="color:var(--status-error,#dc2626)">${Tf(
+                "datasets.parse_unreadable_warning",
+                {
+                  files: last.unreadable_files
+                    .map((f) => f.filename || "?")
+                    .join(", "),
+                },
+              )}</div>`
+            : "";
+        const errLine =
+          last.error && outcome === "failed"
+            ? `<div class="text-xs mt-1" style="color:var(--status-error,#dc2626)">${escHtml(last.error)}</div>`
+            : "";
+        const retryHint =
+          outcome !== "complete"
+            ? `<div class="text-xs mt-1 tx-secondary">${T("datasets.parse_outcome_retry_hint")}</div>`
+            : "";
+        outcomeBlock = `<div class="space-y-1">
+            <div class="flex items-center justify-between gap-3 flex-wrap">
+              <div class="flex items-center gap-2 text-sm" style="color:${color}">
+                ${outcome === "complete" ? ICONS.check : ICONS.warning} ${title}${modelInfo}
+              </div>
+              <div class="flex items-center gap-2">
+                ${rerunBtn}
+                ${
+                  outcome !== "failed"
+                    ? `<button type="button" data-dataset-tab="details" class="tx-btn tx-btn-sm">
+                  ${T("datasets.goto_review")} →
+                </button>`
+                    : hasSources
+                      ? `<button type="button" data-action="parse-documents" class="tx-btn tx-btn-sm">${ICONS.sparkle} ${T("datasets.parse_btn")}</button>`
+                      : ""
+                }
+              </div>
+            </div>
+            <div class="text-xs tx-secondary">${sourcesLine} · ${fieldsLine}</div>
+            ${unread}
+            ${errLine}
+            ${retryHint}
+          </div>`;
+      } else {
+        outcomeBlock = `<div class="flex items-center justify-between gap-3 flex-wrap">
             <div class="flex items-center gap-2 text-sm" style="color:var(--status-success)">
               ${ICONS.check} ${T("datasets.extract_done")}${modelInfo}
             </div>
@@ -5181,12 +5269,13 @@ export default {
               </button>
             </div>
           </div>`;
+      }
       return `<div class="tx-card p-5">
         <div class="flex items-center gap-2 mb-3">
           <h4 class="text-sm font-semibold uppercase tracking-wider tx-secondary flex items-center gap-2">${ICONS.sparkle} ${T("datasets.section_extraction")}</h4>
           <span class="text-xs tx-secondary">— ${T("datasets.section_extraction_hint")}</span>
         </div>
-        ${line}
+        ${outcomeBlock}
       </div>`;
     }
 
@@ -7624,6 +7713,8 @@ export default {
               state.datasetParseStatusMsgs.length - 1;
           }
           render();
+          let appliedFields = 0;
+          let outcome = parseRes?.outcome || null;
           if (parseRes && parseRes.success && parseRes.suggestions) {
             const sug = parseRes.suggestions;
             // Defensive guard: a malformed AI response (top-level
@@ -7643,15 +7734,15 @@ export default {
                 ? d.field_values
                 : {};
             if (!isPlainObject) {
-              showToast(
-                T("datasets.parse_unusable_shape") ||
-                  "AI returned a response we couldn't apply to the form.",
-                "warning",
-              );
+              showToast(T("datasets.parse_unusable_shape"), "warning");
+              outcome = "failed";
             } else {
               const merged = { ...baseline };
               for (const [k, v] of Object.entries(sug)) {
-                if (v !== null && v !== undefined && v !== "") merged[k] = v;
+                if (v !== null && v !== undefined && v !== "") {
+                  merged[k] = v;
+                  appliedFields += 1;
+                }
               }
               await api(`/candidates/${d.id}`, {
                 method: "PUT",
@@ -7659,19 +7750,14 @@ export default {
               });
             }
           } else if (parseRes && !parseRes.success) {
-            // Surface the diagnostic backend hint instead of a
-            // silent "no changes" — users couldn't tell why nothing
-            // updated.
             const msg = parseRes.error || T("datasets.parse_failed");
             showToast(msg, "warning");
+            outcome = "failed";
           }
           // Group-extraction telemetry (v3.7.1+). Backend returns a
           // `groups` array describing which logical clusters of
           // fields succeeded, were skipped (already filled), or
-          // failed. We surface this as a console table for power
-          // users + a richer success toast so partial extractions
-          // are visible. Older backends without grouped extraction
-          // simply won't have these fields and the block is a no-op.
+          // failed. Console table stays for power users.
           if (parseRes && Array.isArray(parseRes.groups)) {
             try {
               console.table(
@@ -7689,41 +7775,30 @@ export default {
             } catch (_) {
               /* console.table missing */
             }
-            const groupsTotal = parseRes.groups_total ?? parseRes.groups.length;
-            const groupsOk = parseRes.groups_succeeded ?? 0;
-            const groupsSkipped = parseRes.groups_skipped ?? 0;
-            const failedGroups = parseRes.groups.filter(
-              (g) => !g.skipped && !g.succeeded,
-            );
-            if (failedGroups.length > 0) {
-              showToast(
-                Tf("datasets.parse_partial", {
-                  ok: groupsOk,
-                  total: groupsTotal,
-                  failed: failedGroups.map((g) => g.label || g.key).join(", "),
-                }),
-                "warning",
-              );
-            } else if (groupsSkipped > 0) {
-              showToast(
-                Tf("datasets.parse_summary_skipped", {
-                  ok: groupsOk,
-                  skipped: groupsSkipped,
-                  total: groupsTotal,
-                }),
-              );
-            }
           }
-          // Extraction was cut short by the server-side time budget —
-          // tell the user plainly (not "already filled").
-          if (parseRes?.deadline_hit) {
+          const upd = await api(`/candidates/${d.id}`);
+          state.selectedDataset = upd.candidate;
+          await loadDatasetVariables(d.id);
+
+          // Single authoritative toast from the persisted outcome —
+          // never append a green "done" after warnings (that hid failures).
+          const last = state.selectedDataset?.last_parse || parseRes?.last_parse;
+          outcome = (last && last.outcome) || outcome || "complete";
+          const filled =
+            last?.fields_filled ??
+            parseRes?.fields_filled ??
+            appliedFields;
+          const total =
+            last?.fields_total ?? parseRes?.fields_total ?? 0;
+          const sourcesOk = last?.sources_ok ?? parseRes?.files?.filter((f) => f.ok).length ?? 0;
+          const sourcesTotal =
+            last?.sources_total ?? parseRes?.files?.length ?? fileCount;
+          if (parseRes?.deadline_hit || last?.deadline_hit) {
             showToast(T("datasets.parse_deadline"), "warning");
-          }
-          // Name the files we couldn't read instead of silently
-          // skipping them (customer feedback item 5).
-          if (
+          } else if (
             Array.isArray(parseRes?.unreadable) &&
-            parseRes.unreadable.length
+            parseRes.unreadable.length &&
+            outcome !== "failed"
           ) {
             showToast(
               Tf("datasets.parse_unreadable_warning", {
@@ -7732,12 +7807,57 @@ export default {
               "warning",
             );
           }
-          const upd = await api(`/candidates/${d.id}`);
-          state.selectedDataset = upd.candidate;
-          await loadDatasetVariables(d.id);
-          showToast(T("datasets.parse_done"));
+          if (outcome === "failed") {
+            showToast(
+              last?.error || parseRes?.error || T("datasets.parse_failed"),
+              "error",
+            );
+          } else if (outcome === "partial") {
+            showToast(
+              Tf("datasets.parse_outcome_partial_toast", {
+                sources_ok: sourcesOk,
+                sources_total: sourcesTotal,
+                filled,
+                total,
+              }),
+              "warning",
+            );
+          } else {
+            showToast(
+              Tf("datasets.parse_outcome_complete_toast", {
+                filled,
+                total: total || filled,
+                sources: sourcesOk || sourcesTotal,
+              }),
+            );
+          }
         } catch (err) {
-          showToast(err.message, "error");
+          // HTTP 4xx from parse-documents still carries last_parse /
+          // unreadable — reload so the outcome card appears, then toast.
+          const payload = err && err.payload;
+          try {
+            const upd = await api(`/candidates/${d.id}`);
+            state.selectedDataset = upd.candidate;
+            await loadDatasetVariables(d.id);
+          } catch (_) {
+            /* ignore reload failure */
+          }
+          const last = state.selectedDataset?.last_parse || payload?.last_parse;
+          if (last && last.outcome === "failed") {
+            showToast(last.error || err.message || T("datasets.parse_failed"), "error");
+          } else if (
+            Array.isArray(payload?.unreadable) &&
+            payload.unreadable.length
+          ) {
+            showToast(
+              Tf("datasets.parse_unreadable_warning", {
+                files: payload.unreadable.map((f) => f.filename).join(", "),
+              }),
+              "error",
+            );
+          } else {
+            showToast(err.message || T("datasets.parse_failed"), "error");
+          }
         }
         if (state.datasetParseTimer) {
           clearInterval(state.datasetParseTimer);

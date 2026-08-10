@@ -9,6 +9,7 @@ use App\Repository\ConfigRepository;
 use App\Repository\ModelRepository;
 use App\Repository\PluginDataRepository;
 use App\AI\Service\AiFacade;
+use App\Service\File\FileHelper;
 use App\Service\File\FileProcessor;
 use App\Service\PluginDataService;
 use App\Service\ModelConfigService;
@@ -2012,13 +2013,12 @@ class SynaformController extends AbstractController
         }
 
         $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
-        if (!is_dir($dir)) {
-            mkdir($dir, 0755, true);
-        }
+        FileHelper::createDirectory($dir);
 
         $originalName = $file->getClientOriginalName();
         $storedName = 'cv.' . $ext;
         $file->move($dir, $storedName);
+        $this->finalizeUploadedFile($dir . '/' . $storedName);
 
         $existing['files']['cv'] = [
             'filename' => $originalName,
@@ -2062,13 +2062,12 @@ class SynaformController extends AbstractController
         }
 
         $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
-        if (!is_dir($dir)) {
-            mkdir($dir, 0755, true);
-        }
+        FileHelper::createDirectory($dir);
 
         $originalName = $file->getClientOriginalName();
         $safeFilename = bin2hex(random_bytes(4)) . '-' . preg_replace('/[^a-zA-Z0-9._-]/', '_', $originalName);
         $file->move($dir, $safeFilename);
+        $this->finalizeUploadedFile($dir . '/' . $safeFilename);
 
         $docEntry = [
             'filename' => $originalName,
@@ -2187,7 +2186,7 @@ class SynaformController extends AbstractController
         // ends up in a filesystem path.
         $storedAs = basename((string) ($fileMeta['stored_as'] ?? ''));
         $filePath = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
-        if ($storedAs === '' || !is_file($filePath)) {
+        if ($storedAs === '' || !$this->waitForUploadFile($filePath)) {
             return $this->json(['success' => false, 'error' => 'File not found on disk'], Response::HTTP_NOT_FOUND);
         }
 
@@ -2518,42 +2517,88 @@ class SynaformController extends AbstractController
             $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
             $cvName = $entry['files']['cv']['filename'] ?? $storedAs;
             $cvKind = $this->classifyDocKind($cvName, 'cv');
-            try {
-                [$text, $cMeta] = $this->extractTextWithFileCache(
+            $cvAbsolute = $candidateDir . '/' . $storedAs;
+            // Cluster (web1/2/3): metadata is in Galera, bytes are on NFS.
+            // Cloudflare round-robins with no sticky sessions, so parse can
+            // land on a different node than the upload. Wait through NFS
+            // attribute-cache lag instead of treating the file as missing.
+            if (!$this->waitForUploadFile($cvAbsolute)) {
+                $this->logger->warning('Parse-documents: CV file not visible on this node', [
+                    'candidateId' => $candidateId,
+                    'path' => $cvAbsolute,
+                    'hostname' => gethostname() ?: 'unknown',
+                ]);
+                $report = $this->failedFileExtraction(
                     $entry['files']['cv'],
-                    $candidateDir,
-                    $relativePath,
-                    $ext,
-                    $userId,
-                    $cacheStats,
+                    $cvName,
+                    'cv',
+                    $cvKind,
+                    'Source file not yet visible on this server (cluster NFS). Please retry auto-fill.',
                 );
-                $report = $this->recordFileExtraction($entry['files']['cv'], $cvName, 'cv', $cvKind, (string) $text, $cMeta);
-                $fileReports[] = $report;
-                $candidateDirty = true;
-                if ($report['ok']) {
-                    $allTexts[] = '=== ' . $report['kind_label'] . ': ' . $cvName . ' ===' . "\n" . $text;
-                } else {
-                    $unreadable[] = $report;
-                }
-            } catch (\Throwable $e) {
-                $this->logger->warning('Parse-documents: failed to extract CV text', ['error' => $e->getMessage()]);
-                $report = $this->failedFileExtraction($entry['files']['cv'], $cvName, 'cv', $cvKind, $e->getMessage());
                 $fileReports[] = $report;
                 $unreadable[] = $report;
                 $candidateDirty = true;
+            } else {
+                try {
+                    [$text, $cMeta] = $this->extractTextWithFileCache(
+                        $entry['files']['cv'],
+                        $candidateDir,
+                        $relativePath,
+                        $ext,
+                        $userId,
+                        $cacheStats,
+                    );
+                    $report = $this->recordFileExtraction($entry['files']['cv'], $cvName, 'cv', $cvKind, (string) $text, $cMeta);
+                    $fileReports[] = $report;
+                    $candidateDirty = true;
+                    if ($report['ok']) {
+                        $allTexts[] = '=== ' . $report['kind_label'] . ': ' . $cvName . ' ===' . "\n" . $text;
+                    } else {
+                        $unreadable[] = $report;
+                    }
+                } catch (\Throwable $e) {
+                    $this->logger->warning('Parse-documents: failed to extract CV text', ['error' => $e->getMessage()]);
+                    $report = $this->failedFileExtraction($entry['files']['cv'], $cvName, 'cv', $cvKind, $e->getMessage());
+                    $fileReports[] = $report;
+                    $unreadable[] = $report;
+                    $candidateDirty = true;
+                }
             }
         }
 
         $additional = $entry['files']['additional'] ?? [];
         foreach ($additional as $idx => $doc) {
             $storedAs = $doc['stored_as'] ?? '';
-            if (empty($storedAs) || !is_file($candidateDir . '/' . $storedAs)) {
+            $docName = $doc['filename'] ?? $storedAs;
+            $docKind = $this->classifyDocKind((string) $docName, 'other');
+            if ($storedAs === '') {
+                continue;
+            }
+            $absolutePath = $candidateDir . '/' . $storedAs;
+            // Was a silent `continue` on !is_file() — on the cluster that
+            // dropped freshly uploaded docs when parse hit another web node,
+            // so the first auto-fill only saw a subset of sources and users
+            // had to click 2–3 times as NFS cache caught up.
+            if (!$this->waitForUploadFile($absolutePath)) {
+                $this->logger->warning('Parse-documents: additional file not visible on this node', [
+                    'candidateId' => $candidateId,
+                    'path' => $absolutePath,
+                    'hostname' => gethostname() ?: 'unknown',
+                ]);
+                $report = $this->failedFileExtraction(
+                    $entry['files']['additional'][$idx],
+                    (string) $docName,
+                    'additional',
+                    $docKind,
+                    'Source file not yet visible on this server (cluster NFS). Please retry auto-fill.',
+                );
+                $fileReports[] = $report;
+                $unreadable[] = $report;
+                $candidateDirty = true;
                 continue;
             }
             $ext = strtolower(pathinfo($storedAs, PATHINFO_EXTENSION));
             $relativePath = $userId . '/synaform/candidates/' . $candidateId . '/' . $storedAs;
-            $docName = $doc['filename'] ?? $storedAs;
-            $docKind = $this->classifyDocKind($docName, 'other');
             try {
                 [$text, $cMeta] = $this->extractTextWithFileCache(
                     $entry['files']['additional'][$idx],
@@ -2563,7 +2608,7 @@ class SynaformController extends AbstractController
                     $userId,
                     $cacheStats,
                 );
-                $report = $this->recordFileExtraction($entry['files']['additional'][$idx], $docName, 'additional', $docKind, (string) $text, $cMeta);
+                $report = $this->recordFileExtraction($entry['files']['additional'][$idx], (string) $docName, 'additional', $docKind, (string) $text, $cMeta);
                 $fileReports[] = $report;
                 $candidateDirty = true;
                 if ($report['ok']) {
@@ -2573,7 +2618,7 @@ class SynaformController extends AbstractController
                 }
             } catch (\Throwable $e) {
                 $this->logger->warning('Parse-documents: failed to extract doc text', ['error' => $e->getMessage(), 'file' => $storedAs]);
-                $report = $this->failedFileExtraction($entry['files']['additional'][$idx], $docName, 'additional', $docKind, $e->getMessage());
+                $report = $this->failedFileExtraction($entry['files']['additional'][$idx], (string) $docName, 'additional', $docKind, $e->getMessage());
                 $fileReports[] = $report;
                 $unreadable[] = $report;
                 $candidateDirty = true;
@@ -2598,11 +2643,33 @@ class SynaformController extends AbstractController
         }
 
         if (empty($allTexts)) {
+            $summary = $this->persistLastParseSummary(
+                $userId,
+                $candidateId,
+                [
+                    'outcome' => 'failed',
+                    'model' => null,
+                    'strategy' => 'no_text',
+                    'elapsed_ms' => 0,
+                    'sources_total' => count($fileReports),
+                    'sources_ok' => 0,
+                    'sources_unreadable' => count($unreadable),
+                    'unreadable_files' => $this->summarizeUnreadableFiles($unreadable),
+                    'fields_filled' => 0,
+                    'fields_total' => 0,
+                    'deadline_hit' => false,
+                    'error' => 'No documents or URLs uploaded, or text could not be extracted from any source',
+                    'files' => $fileReports,
+                ],
+            );
+
             return $this->json([
                 'success' => false,
+                'outcome' => 'failed',
                 'error' => 'No documents or URLs uploaded, or text could not be extracted from any source',
                 'files' => $fileReports,
                 'unreadable' => $unreadable,
+                'last_parse' => $summary,
             ], Response::HTTP_BAD_REQUEST);
         }
 
@@ -2796,21 +2863,45 @@ class SynaformController extends AbstractController
         // Single-call won → return early without running the grouped
         // pipeline at all. Massive wall-time savings on the happy path.
         if ($singleCallSuggestions !== null) {
-            $this->markCandidateExtracted($userId, $candidateId, $modelUsed ?? 'unknown');
+            // Only mark "extracted" when every declared source was readable.
+            // Otherwise a cluster NFS miss on one of 3 uploads would look like
+            // a finished scan and force the user into a second/third click.
+            $modelName = (string) ($singleCallTelemetry['model'] ?? $modelUsed ?? 'unknown');
+            if ($unreadable === []) {
+                $this->markCandidateExtracted($userId, $candidateId, $modelName);
+            }
+
+            $summary = $this->buildAndPersistParseSummary(
+                $userId,
+                $candidateId,
+                $fileReports,
+                $unreadable,
+                $singleCallSuggestions,
+                $allowedKeys,
+                $modelName,
+                'single_call',
+                (int) ($singleCallTelemetry['elapsed_ms'] ?? 0),
+                false,
+                true,
+            );
 
             return $this->json([
                 'success' => true,
+                'outcome' => $summary['outcome'],
                 'suggestions' => $singleCallSuggestions,
                 'documents_parsed' => count($allTexts),
-                'model' => $singleCallTelemetry['model'] ?? 'unknown',
+                'model' => $modelName,
                 'doc_chars' => mb_strlen($combinedText),
                 'fields_returned' => count($singleCallSuggestions),
+                'fields_filled' => $summary['fields_filled'],
+                'fields_total' => $summary['fields_total'],
                 'strategy' => 'single_call',
                 'single_call' => $singleCallTelemetry,
                 'total_elapsed_ms' => $singleCallTelemetry['elapsed_ms'] ?? 0,
                 'ocr_cache' => $cacheStats,
                 'files' => $fileReports,
                 'unreadable' => $unreadable,
+                'last_parse' => $summary,
             ]);
         }
 
@@ -3047,10 +3138,26 @@ class SynaformController extends AbstractController
         // skipped) OR all run-groups failed AND we have no merged fields.
         if (count($groupsRun) > 0 && count($groupsSucceeded) === 0 && empty($allMerged)) {
             $worst = $groupsRun[0] ?? [];
+            $errMsg = (string) ($worst['error'] ?? 'Document parsing failed for every field group.');
+            $summary = $this->buildAndPersistParseSummary(
+                $userId,
+                $candidateId,
+                $fileReports,
+                $unreadable,
+                [],
+                $allowedKeys,
+                (string) ($modelUsed ?? 'unknown'),
+                $onlyMissing ? 'grouped_only_missing' : 'grouped_fallback',
+                $totalElapsedMs,
+                $deadlineHit,
+                false,
+                $errMsg,
+            );
 
             return $this->json([
                 'success' => false,
-                'error' => $worst['error'] ?? 'Document parsing failed for every field group.',
+                'outcome' => 'failed',
+                'error' => $errMsg,
                 'documents_parsed' => count($allTexts),
                 'model' => $modelUsed ?? 'unknown',
                 'doc_chars' => mb_strlen($combinedText),
@@ -3059,6 +3166,9 @@ class SynaformController extends AbstractController
                 'groups_succeeded' => 0,
                 'groups_skipped' => count($groupsSkipped),
                 'total_elapsed_ms' => $totalElapsedMs,
+                'files' => $fileReports,
+                'unreadable' => $unreadable,
+                'last_parse' => $summary,
             ], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
@@ -3073,15 +3183,34 @@ class SynaformController extends AbstractController
             );
         }
 
-        $this->markCandidateExtracted($userId, $candidateId, $modelUsed ?? 'unknown');
+        if ($unreadable === []) {
+            $this->markCandidateExtracted($userId, $candidateId, $modelUsed ?? 'unknown');
+        }
+
+        $summary = $this->buildAndPersistParseSummary(
+            $userId,
+            $candidateId,
+            $fileReports,
+            $unreadable,
+            $allMerged,
+            $allowedKeys,
+            (string) ($modelUsed ?? 'unknown'),
+            $onlyMissing ? 'grouped_only_missing' : 'grouped_fallback',
+            $totalElapsedMs,
+            $deadlineHit,
+            true,
+        );
 
         return $this->json([
             'success' => true,
+            'outcome' => $summary['outcome'],
             'suggestions' => $allMerged,
             'documents_parsed' => count($allTexts),
             'model' => $modelUsed ?? 'unknown',
             'doc_chars' => mb_strlen($combinedText),
             'fields_returned' => count($allMerged),
+            'fields_filled' => $summary['fields_filled'],
+            'fields_total' => $summary['fields_total'],
             'groups' => $groupTelemetry,
             'groups_total' => count($groupTelemetry),
             'groups_succeeded' => count($groupsSucceeded),
@@ -3094,6 +3223,7 @@ class SynaformController extends AbstractController
             'files' => $fileReports,
             'unreadable' => $unreadable,
             'deadline_hit' => $deadlineHit,
+            'last_parse' => $summary,
         ]);
     }
 
@@ -3131,6 +3261,159 @@ class SynaformController extends AbstractController
     }
 
     /**
+     * Build a user-facing parse summary, persist it on the candidate as
+     * `last_parse`, and return it so the response + UI stay in sync.
+     *
+     * Outcome vocabulary (stable contract for the frontend):
+     *   - complete — every source readable and enough fields filled
+     *   - partial  — some sources unread, deadline hit, or many fields empty
+     *   - failed   — no usable result
+     *
+     * @param list<array<string, mixed>> $fileReports
+     * @param list<array<string, mixed>> $unreadable
+     * @param array<string, mixed>       $suggestions
+     * @param list<string>               $allowedKeys
+     *
+     * @return array<string, mixed>
+     */
+    private function buildAndPersistParseSummary(
+        int $userId,
+        string $candidateId,
+        array $fileReports,
+        array $unreadable,
+        array $suggestions,
+        array $allowedKeys,
+        string $model,
+        string $strategy,
+        int $elapsedMs,
+        bool $deadlineHit,
+        bool $success,
+        ?string $error = null,
+    ): array {
+        $sourcesOk = 0;
+        foreach ($fileReports as $report) {
+            if (!empty($report['ok'])) {
+                ++$sourcesOk;
+            }
+        }
+        $fieldsFilled = 0;
+        foreach ($allowedKeys as $key) {
+            if ($this->fieldValueIsFilled($suggestions[$key] ?? null)) {
+                ++$fieldsFilled;
+            }
+        }
+        $fieldsTotal = count($allowedKeys);
+        $sourcesTotal = count($fileReports);
+        $sourcesUnreadable = count($unreadable);
+
+        if (!$success || ($sourcesTotal > 0 && $sourcesOk === 0 && $fieldsFilled === 0)) {
+            $outcome = 'failed';
+        } elseif ($sourcesUnreadable > 0 || $deadlineHit || ($fieldsTotal > 0 && $fieldsFilled < (int) ceil($fieldsTotal * 0.5))) {
+            $outcome = 'partial';
+        } else {
+            $outcome = 'complete';
+        }
+
+        return $this->persistLastParseSummary($userId, $candidateId, [
+            'outcome' => $outcome,
+            'model' => $model,
+            'strategy' => $strategy,
+            'elapsed_ms' => $elapsedMs,
+            'sources_total' => $sourcesTotal,
+            'sources_ok' => $sourcesOk,
+            'sources_unreadable' => $sourcesUnreadable,
+            'unreadable_files' => $this->summarizeUnreadableFiles($unreadable),
+            'fields_filled' => $fieldsFilled,
+            'fields_total' => $fieldsTotal,
+            'deadline_hit' => $deadlineHit,
+            'error' => $error,
+            'files' => $fileReports,
+        ]);
+    }
+
+    /**
+     * @param list<array<string, mixed>> $unreadable
+     *
+     * @return list<array{filename: string, error: string}>
+     */
+    private function summarizeUnreadableFiles(array $unreadable): array
+    {
+        $out = [];
+        foreach ($unreadable as $row) {
+            $out[] = [
+                'filename' => (string) ($row['filename'] ?? ''),
+                'error' => (string) ($row['error'] ?? ''),
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param array<string, mixed> $summary
+     *
+     * @return array<string, mixed>
+     */
+    private function persistLastParseSummary(int $userId, string $candidateId, array $summary): array
+    {
+        $summary['finished_at'] = date('c');
+        $entry = $this->pluginData->get($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId);
+        if (is_array($entry)) {
+            $entry['last_parse'] = $summary;
+            $entry['updated_at'] = date('c');
+            $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+        }
+
+        return $summary;
+    }
+
+    /**
+     * After Symfony's UploadedFile::move(), flush PHP's stat cache and set
+     * NFS-friendly permissions so sibling web nodes can see the file promptly.
+     */
+    private function finalizeUploadedFile(string $absolutePath): void
+    {
+        clearstatcache(true, $absolutePath);
+        if (is_file($absolutePath)) {
+            FileHelper::setFilePermissions($absolutePath);
+        }
+        // Also clear the parent dir listing — NFS caches that separately and
+        // is_file() on another node often fails until the dir cache expires.
+        clearstatcache(true, dirname($absolutePath));
+    }
+
+    /**
+     * Wait until an upload is visible on this node (NFS attribute-cache aware).
+     *
+     * Production (synaplan-platform): Cloudflare round-robins web1/web2/web3
+     * with no sticky sessions. Uploads land on NFS (`up/` → s1). A file
+     * written on web1 may still fail a plain is_file() on web2 for up to
+     * ~actimeo seconds. Core FileHelper::fileExistsNfs() forces a refresh;
+     * we additionally retry briefly to cover the documented 1s actimeo.
+     */
+    private function waitForUploadFile(string $absolutePath, int $attempts = 8, int $sleepMs = 200): bool
+    {
+        for ($i = 0; $i < $attempts; ++$i) {
+            if (FileHelper::fileExistsNfs($absolutePath)) {
+                if ($i > 0) {
+                    $this->logger->info('Synaform: upload became visible after NFS wait', [
+                        'path' => $absolutePath,
+                        'attempt' => $i + 1,
+                        'hostname' => gethostname() ?: 'unknown',
+                    ]);
+                }
+
+                return true;
+            }
+            if ($i + 1 < $attempts) {
+                usleep($sleepMs * 1000);
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Cached wrapper around FileProcessor::extractText().
      *
      * Each candidate file (CV or additional) carries an `ocr_cache`
@@ -3161,10 +3444,10 @@ class SynaformController extends AbstractController
     ): array {
         $storedAs = (string) ($fileMeta['stored_as'] ?? '');
         $absolutePath = $candidateDir . '/' . $storedAs;
-        if ($storedAs === '' || !is_file($absolutePath)) {
-            // No file on disk — fall through to the underlying call so
-            // its existing error handling kicks in. Don't bump cache
-            // counters; this isn't a cache decision.
+        if ($storedAs === '' || !$this->waitForUploadFile($absolutePath)) {
+            // No file on disk (or NFS still stale after wait) — fall through
+            // so FileProcessor's existing error handling kicks in. Don't bump
+            // cache counters; this isn't a cache decision.
             [$text, $meta] = $this->fileProcessor->extractText($relativePath, $ext, $userId);
             return [is_string($text) ? $text : '', is_array($meta) ? $meta : []];
         }
@@ -4593,12 +4876,12 @@ class SynaformController extends AbstractController
         // tried first, then any additional documents.
         $sourceFiles = [];
         $cvStored = $entry['files']['cv']['stored_as'] ?? null;
-        if (is_string($cvStored) && is_file($candidateDir . '/' . $cvStored)) {
+        if (is_string($cvStored) && $this->waitForUploadFile($candidateDir . '/' . $cvStored)) {
             $sourceFiles[] = $candidateDir . '/' . $cvStored;
         }
         foreach ($entry['files']['additional'] ?? [] as $doc) {
             $storedAs = $doc['stored_as'] ?? null;
-            if (is_string($storedAs) && is_file($candidateDir . '/' . $storedAs)) {
+            if (is_string($storedAs) && $this->waitForUploadFile($candidateDir . '/' . $storedAs)) {
                 $sourceFiles[] = $candidateDir . '/' . $storedAs;
             }
         }

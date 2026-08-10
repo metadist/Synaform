@@ -4,6 +4,43 @@ All notable changes to the Synaform plugin are documented here.
 The project follows the HHFF close-out release plan
 (`hhff/planning/07-V4-Release-Plan.md`).
 
+## [4.4.2] - Clear extraction progress / failure feedback
+
+### Fixed
+
+- **Silent or misleading end states after “Read files & auto-fill”.** The UI
+  always toasted a green “done” even when sources were unreadable, the AI
+  failed, or only a subset of fields filled — so users thought nothing was
+  wrong and clicked again. Outcome is now explicit (`complete` / `partial` /
+  `failed`), persisted on the candidate as `last_parse`, and shown as a lasting
+  status card (not only a fleeting toast).
+- **Green check on files that were never scanned.** Untouched sources now show
+  “Not scanned yet”; unreadables show the concrete error inline; readable
+  sources show strategy (text / Vision / cached).
+
+### Added
+
+- Backend `last_parse` summary on every parse-documents result (including HTTP
+  4xx “no text extracted” / all-groups-failed paths).
+- Outcome toasts with counts: sources readable + fields filled.
+- Retry affordance on the extraction card when outcome is not complete.
+
+## [4.4.1] - Cluster NFS: stop silent multi-click scans
+
+### Fixed
+
+- **"Read & auto-fill" needed 2–3 clicks on production (web1/2/3).** Uploads
+  are shared via NFS (`up/`), but Cloudflare round-robins with no sticky
+  sessions. Metadata lands in Galera immediately; the bytes can still be
+  invisible to a sibling node for ~`actimeo` seconds. Synaform used plain
+  `is_file()` and — for additional docs — **silently skipped** missing files,
+  so the first click only OCR'd a subset of sources. Subsequent clicks saw
+  more files as the NFS cache caught up. Now:
+  - Upload finalize clears PHP/NFS stat cache and sets permissions.
+  - Parse waits with `FileHelper::fileExistsNfs()` (short retry, ~1.6 s).
+  - Missing-after-wait sources are reported as unreadable (no silent drop).
+  - Candidate is only marked `extracted` when every declared source was read.
+
 ## [4.4.0] - HHFF daily-use feedback round (UX + extraction)
 
 ### Fixed
