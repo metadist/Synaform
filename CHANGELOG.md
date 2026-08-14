@@ -4,6 +4,34 @@ All notable changes to the Synaform plugin are documented here.
 The project follows the HHFF close-out release plan
 (`hhff/planning/07-V4-Release-Plan.md`).
 
+## [4.4.3] - No silent failures: page alerts, size/timeout, auto-continue
+
+### Fixed
+
+- **Large iPhone scans appearing to "do nothing" (2–3 clicks).** Production
+  sits behind Cloudflare, which returns HTML 524 if the origin is silent for
+  ~100 s. A multi-page phone scan falls through Tika to Vision OCR (up to
+  10 pages × 5–15 s) and was killed mid-request with no lasting UI. Now:
+  - `parse-documents` returns JSON at an 80 s wall-clock budget (before the
+    proxy timeout), persists OCR cache **per file**, and flags `deadline_hit`
+    / `ocr_incomplete` instead of dying silently.
+  - The UI auto-retries up to 4 rounds on timeout/524/`deadline_hit`, with a
+    sticky page-top alert so the user sees "continuing large scan".
+  - Uploads show per-file progress (bytes + percent). Size, type, empty-file,
+    PHP `UPLOAD_ERR_*`, and dropped-connection errors are explicit JSON — never
+    a bare "No file uploaded".
+- **Upload timeout used the parse/AI error string.** Large files on a slow
+  link aborted at 120 s with a message about a slow model. Timeout now scales
+  with file size (up to 5 min) and the copy names the upload.
+
+### Added
+
+- Sticky **page-top alert** for success / failure / timeout / in-progress
+  (upload, parse, generate). Toasts remain for short confirmations (saved,
+  deleted).
+- Client-side 80 MB cap and HEIC/HEIF on the source-document allow-list
+  (iPhone camera photos). Template uploads share the same error mapping.
+
 ## [4.4.2] - Clear extraction progress / failure feedback
 
 ### Fixed

@@ -22,6 +22,7 @@ use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -58,7 +59,35 @@ class SynaformController extends AbstractController
     // FileProcessor routes non-image/-media files to Apache Tika, which reads
     // RFC822 (.eml) and Outlook (.msg) natively. Extension-based allowlist, so
     // a .msg arriving as application/octet-stream still passes.
-    private const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'txt', 'rtf', 'odt', 'xls', 'xlsx', 'pptx', 'eml', 'msg'];
+    // HEIC/HEIF: iPhone camera photos; FileProcessor transcodes them for Vision.
+    private const ALLOWED_UPLOAD_EXTENSIONS = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif', 'bmp', 'heic', 'heif', 'txt', 'rtf', 'odt', 'xls', 'xlsx', 'pptx', 'eml', 'msg'];
+
+    /**
+     * Hard cap for a single source-document upload. Stays under Cloudflare's
+     * ~200 MB body limit and PHP's 200M upload_max_filesize so a too-large
+     * iPhone scan is rejected here with a clear JSON error instead of an
+     * empty $_FILES / HTML 413.
+     */
+    private const MAX_SOURCE_UPLOAD_BYTES = 80 * 1024 * 1024;
+
+    /** Template .docx files are far smaller than scans. */
+    private const MAX_TEMPLATE_UPLOAD_BYTES = 40 * 1024 * 1024;
+
+    /**
+     * Wall-clock budget for parse-documents. Production sits behind
+     * Cloudflare, which returns HTML 524 if the origin is silent for ~100 s.
+     * Returning JSON before that keeps the failure visible and lets the
+     * frontend auto-continue (OCR is cached per file).
+     */
+    private const PARSE_REQUEST_BUDGET_SECONDS = 80.0;
+
+    /** Don't start another Vision/Tika extract if less than this remains. */
+    private const PARSE_MIN_SECONDS_FOR_OCR = 12.0;
+
+    /** Don't start the AI fill pass if less than this remains. */
+    private const PARSE_MIN_SECONDS_FOR_AI = 20.0;
+
+    private const PARSE_TIMEOUT_FILE_MESSAGE = 'Timed out while reading this large scan. Already-read files are cached — run auto-fill again to continue.';
 
     /**
      * Row-group sub-fields whose string value is too rich for a single Word run
@@ -579,17 +608,13 @@ class SynaformController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $file = $request->files->get('file');
-        if (!$file) {
-            return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
+        $accepted = $this->acceptUploadedFile($request, ['docx'], self::MAX_TEMPLATE_UPLOAD_BYTES);
+        if (!$accepted['ok']) {
+            return $this->json(['success' => false, 'error' => $accepted['error']], $accepted['status']);
         }
+        $file = $accepted['file'];
 
         $originalName = $file->getClientOriginalName();
-        $ext = strtolower($file->getClientOriginalExtension());
-        if ($ext !== 'docx') {
-            return $this->json(['success' => false, 'error' => 'Only .docx files are allowed'], Response::HTTP_BAD_REQUEST);
-        }
-
         $name = $request->request->get('name', pathinfo($originalName, PATHINFO_FILENAME));
         $templateId = 'tpl_' . bin2hex(random_bytes(6));
 
@@ -599,6 +624,7 @@ class SynaformController extends AbstractController
         }
 
         $file->move($dir, 'template.docx');
+        $this->finalizeUploadedFile($dir . '/template.docx');
 
         $placeholders = $this->extractPlaceholders($dir . '/template.docx');
         $lint = $this->lintTemplate($dir . '/template.docx');
@@ -654,17 +680,13 @@ class SynaformController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Unauthorized'], Response::HTTP_UNAUTHORIZED);
         }
 
-        $file = $request->files->get('file');
-        if (!$file) {
-            return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
+        $accepted = $this->acceptUploadedFile($request, ['docx'], self::MAX_TEMPLATE_UPLOAD_BYTES);
+        if (!$accepted['ok']) {
+            return $this->json(['success' => false, 'error' => $accepted['error']], $accepted['status']);
         }
+        $file = $accepted['file'];
 
         $originalName = $file->getClientOriginalName();
-        $ext = strtolower($file->getClientOriginalExtension());
-        if ($ext !== 'docx') {
-            return $this->json(['success' => false, 'error' => 'Only .docx files are allowed'], Response::HTTP_BAD_REQUEST);
-        }
-
         $name = trim((string) $request->request->get('name', pathinfo($originalName, PATHINFO_FILENAME)));
         if ($name === '') {
             $name = pathinfo($originalName, PATHINFO_FILENAME);
@@ -2002,15 +2024,13 @@ class SynaformController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $file = $request->files->get('file');
-        if (!$file) {
-            return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
+        $accepted = $this->acceptUploadedFile($request, self::ALLOWED_UPLOAD_EXTENSIONS, self::MAX_SOURCE_UPLOAD_BYTES);
+        if (!$accepted['ok']) {
+            return $this->json(['success' => false, 'error' => $accepted['error']], $accepted['status']);
         }
+        $file = $accepted['file'];
 
         $ext = strtolower($file->getClientOriginalExtension());
-        if (!in_array($ext, self::ALLOWED_UPLOAD_EXTENSIONS, true)) {
-            return $this->json(['success' => false, 'error' => 'Unsupported file type: ' . $ext], Response::HTTP_BAD_REQUEST);
-        }
 
         $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         FileHelper::createDirectory($dir);
@@ -2056,10 +2076,11 @@ class SynaformController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $file = $request->files->get('file');
-        if (!$file) {
-            return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
+        $accepted = $this->acceptUploadedFile($request, self::ALLOWED_UPLOAD_EXTENSIONS, self::MAX_SOURCE_UPLOAD_BYTES);
+        if (!$accepted['ok']) {
+            return $this->json(['success' => false, 'error' => $accepted['error']], $accepted['status']);
         }
+        $file = $accepted['file'];
 
         $dir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         FileHelper::createDirectory($dir);
@@ -2488,6 +2509,13 @@ class SynaformController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Form definition not found'], Response::HTTP_NOT_FOUND);
         }
 
+        // Cloudflare returns HTML 524 if the origin is silent ~100 s. Keep
+        // working after a dropped proxy so OCR cache still lands, and return
+        // JSON ourselves before that wall so the UI can auto-continue.
+        ignore_user_abort(true);
+        $requestStarted = microtime(true);
+        $ocrIncomplete = false;
+
         $candidateDir = $this->uploadDir . '/' . $userId . '/synaform/candidates/' . $candidateId;
         $allTexts = [];
         // OCR cache stats reported back in the response. The cache
@@ -2522,7 +2550,23 @@ class SynaformController extends AbstractController
             // Cloudflare round-robins with no sticky sessions, so parse can
             // land on a different node than the upload. Wait through NFS
             // attribute-cache lag instead of treating the file as missing.
-            if (!$this->waitForUploadFile($cvAbsolute)) {
+            if ($this->isOverParseBudget($requestStarted, self::PARSE_MIN_SECONDS_FOR_OCR)) {
+                $this->logger->warning('Parse-documents: skipping CV OCR — request budget nearly spent', [
+                    'candidateId' => $candidateId,
+                    'elapsed_ms' => $this->parseElapsedMs($requestStarted),
+                ]);
+                $report = $this->failedFileExtraction(
+                    $entry['files']['cv'],
+                    $cvName,
+                    'cv',
+                    $cvKind,
+                    self::PARSE_TIMEOUT_FILE_MESSAGE,
+                );
+                $fileReports[] = $report;
+                $unreadable[] = $report;
+                $candidateDirty = true;
+                $ocrIncomplete = true;
+            } elseif (!$this->waitForUploadFile($cvAbsolute)) {
                 $this->logger->warning('Parse-documents: CV file not visible on this node', [
                     'candidateId' => $candidateId,
                     'path' => $cvAbsolute,
@@ -2563,6 +2607,8 @@ class SynaformController extends AbstractController
                     $unreadable[] = $report;
                     $candidateDirty = true;
                 }
+                $this->persistCandidateNow($userId, $candidateId, $entry);
+                $candidateDirty = false;
             }
         }
 
@@ -2579,6 +2625,25 @@ class SynaformController extends AbstractController
             // dropped freshly uploaded docs when parse hit another web node,
             // so the first auto-fill only saw a subset of sources and users
             // had to click 2–3 times as NFS cache caught up.
+            if ($this->isOverParseBudget($requestStarted, self::PARSE_MIN_SECONDS_FOR_OCR)) {
+                $this->logger->warning('Parse-documents: skipping additional OCR — request budget nearly spent', [
+                    'candidateId' => $candidateId,
+                    'file' => $storedAs,
+                    'elapsed_ms' => $this->parseElapsedMs($requestStarted),
+                ]);
+                $report = $this->failedFileExtraction(
+                    $entry['files']['additional'][$idx],
+                    (string) $docName,
+                    'additional',
+                    $docKind,
+                    self::PARSE_TIMEOUT_FILE_MESSAGE,
+                );
+                $fileReports[] = $report;
+                $unreadable[] = $report;
+                $candidateDirty = true;
+                $ocrIncomplete = true;
+                continue;
+            }
             if (!$this->waitForUploadFile($absolutePath)) {
                 $this->logger->warning('Parse-documents: additional file not visible on this node', [
                     'candidateId' => $candidateId,
@@ -2623,14 +2688,14 @@ class SynaformController extends AbstractController
                 $unreadable[] = $report;
                 $candidateDirty = true;
             }
+            $this->persistCandidateNow($userId, $candidateId, $entry);
+            $candidateDirty = false;
         }
 
-        // Persist the candidate if any file got a fresh OCR result
-        // cached. Doing it once after all files are processed keeps
-        // the write count at most O(1) per parse-documents call.
+        // Persist any remaining metadata (timeout skips, NFS misses) that
+        // did not go through the per-file persist above.
         if ($candidateDirty) {
-            $entry['updated_at'] = date('c');
-            $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+            $this->persistCandidateNow($userId, $candidateId, $entry);
         }
 
         foreach ($entry['files']['urls'] ?? [] as $urlEntry) {
@@ -2642,7 +2707,7 @@ class SynaformController extends AbstractController
             }
         }
 
-        if (empty($allTexts)) {
+        if (empty($allTexts) && !$ocrIncomplete) {
             $summary = $this->persistLastParseSummary(
                 $userId,
                 $candidateId,
@@ -2698,6 +2763,41 @@ class SynaformController extends AbstractController
             if ($key !== '') {
                 $fieldsByKey[$key] = $f;
             }
+        }
+
+        $deferAi = $ocrIncomplete || $this->isOverParseBudget($requestStarted, self::PARSE_MIN_SECONDS_FOR_AI);
+        if ($deferAi) {
+            $errMsg = $ocrIncomplete
+                ? 'Large scans are still being read. Already-processed files are cached — continuing will pick up where we left off.'
+                : 'Documents were read. Filling fields was deferred to stay within the time limit — run auto-fill again (this will be faster).';
+            $summary = $this->buildAndPersistParseSummary(
+                $userId,
+                $candidateId,
+                $fileReports,
+                $unreadable,
+                [],
+                $allowedKeys,
+                'deferred',
+                $ocrIncomplete ? 'ocr_budget' : 'ai_deferred',
+                $this->parseElapsedMs($requestStarted),
+                true,
+                true,
+                $errMsg,
+            );
+
+            return $this->json([
+                'success' => true,
+                'outcome' => $summary['outcome'],
+                'deadline_hit' => true,
+                'ocr_incomplete' => $ocrIncomplete,
+                'error' => $errMsg,
+                'suggestions' => [],
+                'documents_parsed' => count($allTexts),
+                'files' => $fileReports,
+                'unreadable' => $unreadable,
+                'ocr_cache' => $cacheStats,
+                'last_parse' => $summary,
+            ]);
         }
 
         // Auto-fill empty image-typed variables with a portrait photo found
@@ -2934,7 +3034,7 @@ class SynaformController extends AbstractController
         // we stop starting new group calls and return what we have with a
         // clear "timed out" marker, so the request always ends promptly and
         // the reason is investigable in the telemetry.
-        $groupedBudgetSeconds = 180.0;
+        $groupedBudgetSeconds = min(180.0, max(15.0, $this->secondsLeftOnParse($requestStarted) - 5.0));
         $deadlineHit = false;
 
         foreach ($groups as $group) {
@@ -3411,6 +3511,159 @@ class SynaformController extends AbstractController
         }
 
         return false;
+    }
+
+    private function secondsLeftOnParse(float $startedAt): float
+    {
+        return self::PARSE_REQUEST_BUDGET_SECONDS - (microtime(true) - $startedAt);
+    }
+
+    private function isOverParseBudget(float $startedAt, float $needSeconds = 0.0): bool
+    {
+        return $this->secondsLeftOnParse($startedAt) < $needSeconds;
+    }
+
+    private function parseElapsedMs(float $startedAt): int
+    {
+        return (int) ((microtime(true) - $startedAt) * 1000);
+    }
+
+    /**
+     * @param array<string, mixed> $entry
+     */
+    private function persistCandidateNow(int $userId, string $candidateId, array &$entry): void
+    {
+        $entry['updated_at'] = date('c');
+        $this->pluginData->set($userId, self::PLUGIN_NAME, self::DATA_TYPE_CANDIDATE, $candidateId, $entry);
+    }
+
+    /**
+     * Accept a multipart upload with explicit errors for size, PHP ini
+     * limits, empty files, and unsupported types. Never return a silent
+     * "No file uploaded" when the real cause is a too-large scan.
+     *
+     * @param list<string> $allowedExtensions
+     *
+     * @return array{ok: true, file: UploadedFile}|array{ok: false, error: string, status: int}
+     */
+    private function acceptUploadedFile(Request $request, array $allowedExtensions, int $maxBytes, string $field = 'file'): array
+    {
+        $file = $request->files->get($field);
+        if (!$file instanceof UploadedFile) {
+            $contentLength = (int) $request->headers->get('Content-Length', '0');
+            $postMax = $this->phpIniBytes((string) ini_get('post_max_size'));
+            $uploadMax = $this->phpIniBytes((string) ini_get('upload_max_filesize'));
+            $limit = min($maxBytes, $postMax > 0 ? $postMax : $maxBytes, $uploadMax > 0 ? $uploadMax : $maxBytes);
+            if ($contentLength > 0 && $limit > 0 && $contentLength > $limit) {
+                return [
+                    'ok' => false,
+                    'error' => sprintf(
+                        'File is too large (%d MB). Maximum size is %d MB. Compress the scan or split it into fewer pages.',
+                        (int) ceil($contentLength / 1048576),
+                        (int) floor($limit / 1048576)
+                    ),
+                    'status' => Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
+                ];
+            }
+
+            return [
+                'ok' => false,
+                'error' => 'No file was received. If this was a large iPhone scan, the upload may have been blocked by size or a dropped connection — try again, or save as a smaller PDF.',
+                'status' => Response::HTTP_BAD_REQUEST,
+            ];
+        }
+
+        $phpError = $file->getError();
+        if ($phpError !== \UPLOAD_ERR_OK) {
+            $status = in_array($phpError, [\UPLOAD_ERR_INI_SIZE, \UPLOAD_ERR_FORM_SIZE], true)
+                ? Response::HTTP_REQUEST_ENTITY_TOO_LARGE
+                : Response::HTTP_BAD_REQUEST;
+
+            return [
+                'ok' => false,
+                'error' => $this->phpUploadErrorMessage($phpError, $maxBytes),
+                'status' => $status,
+            ];
+        }
+
+        $size = (int) $file->getSize();
+        if ($size <= 0) {
+            return [
+                'ok' => false,
+                'error' => 'The uploaded file is empty (0 bytes). Re-export the scan and try again.',
+                'status' => Response::HTTP_BAD_REQUEST,
+            ];
+        }
+        if ($size > $maxBytes) {
+            return [
+                'ok' => false,
+                'error' => sprintf(
+                    'File is too large (%s). Maximum size is %d MB.',
+                    $this->formatMb($size),
+                    (int) floor($maxBytes / 1048576)
+                ),
+                'status' => Response::HTTP_REQUEST_ENTITY_TOO_LARGE,
+            ];
+        }
+
+        $ext = strtolower($file->getClientOriginalExtension());
+        if ($ext === '' || !in_array($ext, $allowedExtensions, true)) {
+            return [
+                'ok' => false,
+                'error' => sprintf(
+                    'Unsupported file type%s. Allowed: %s.',
+                    $ext !== '' ? ': ' . $ext : '',
+                    implode(', ', $allowedExtensions)
+                ),
+                'status' => Response::HTTP_BAD_REQUEST,
+            ];
+        }
+
+        return ['ok' => true, 'file' => $file];
+    }
+
+    private function phpUploadErrorMessage(int $errorCode, int $maxBytes): string
+    {
+        $maxMb = (int) floor($maxBytes / 1048576);
+
+        return match ($errorCode) {
+            \UPLOAD_ERR_INI_SIZE, \UPLOAD_ERR_FORM_SIZE => sprintf(
+                'File exceeds the server upload limit (max %d MB). Compress the scan or split it into fewer pages.',
+                $maxMb
+            ),
+            \UPLOAD_ERR_PARTIAL => 'The file was only partially uploaded — the connection dropped. Please try again.',
+            \UPLOAD_ERR_NO_FILE => 'No file was uploaded.',
+            \UPLOAD_ERR_NO_TMP_DIR => 'Server is missing a temporary folder for uploads. Please contact support.',
+            \UPLOAD_ERR_CANT_WRITE => 'Server could not write the uploaded file to disk. Please try again.',
+            \UPLOAD_ERR_EXTENSION => 'A server extension stopped the upload. Please try a different file format (PDF).',
+            default => 'File upload failed (error code ' . $errorCode . '). Please try again.',
+        };
+    }
+
+    private function phpIniBytes(string $value): int
+    {
+        $value = trim($value);
+        if ($value === '' || $value === '0') {
+            return 0;
+        }
+        $unit = strtolower(substr($value, -1));
+        $num = (float) $value;
+
+        return (int) match ($unit) {
+            'g' => $num * 1073741824,
+            'm' => $num * 1048576,
+            'k' => $num * 1024,
+            default => (int) $value,
+        };
+    }
+
+    private function formatMb(int $bytes): string
+    {
+        if ($bytes < 1048576) {
+            return max(1, (int) round($bytes / 1024)) . ' KB';
+        }
+
+        return number_format($bytes / 1048576, 1) . ' MB';
     }
 
     /**
@@ -4703,20 +4956,16 @@ class SynaformController extends AbstractController
             return $this->json(['success' => false, 'error' => 'Entry not found'], Response::HTTP_NOT_FOUND);
         }
 
-        $file = $request->files->get('file');
-        if (!$file) {
-            return $this->json(['success' => false, 'error' => 'No file uploaded'], Response::HTTP_BAD_REQUEST);
+        $accepted = $this->acceptUploadedFile($request, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'], 8 * 1024 * 1024);
+        if (!$accepted['ok']) {
+            return $this->json(['success' => false, 'error' => $accepted['error']], $accepted['status']);
         }
+        $file = $accepted['file'];
 
         $mime = $file->getMimeType() ?? 'application/octet-stream';
-        $allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'];
-        if (!in_array($mime, $allowedMimes, true)) {
+        $allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/heic', 'image/heif'];
+        if (!in_array($mime, $allowedMimes, true) && !str_starts_with($mime, 'image/')) {
             return $this->json(['success' => false, 'error' => 'Unsupported image format: ' . $mime], Response::HTTP_UNSUPPORTED_MEDIA_TYPE);
-        }
-
-        $sizeLimit = 8 * 1024 * 1024;
-        if ($file->getSize() > $sizeLimit) {
-            return $this->json(['success' => false, 'error' => 'Image too large (max 8 MB)'], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
         }
 
         $ext = $this->mimeToExtension($mime);
@@ -4732,6 +4981,7 @@ class SynaformController extends AbstractController
 
         $filename = $key . '.' . $ext;
         $file->move($dir, $filename);
+        $this->finalizeUploadedFile($dir . '/' . $filename);
 
         $storedPath = $dir . '/' . $filename;
         $meta = [
@@ -4840,6 +5090,7 @@ class SynaformController extends AbstractController
             'image/gif'  => 'gif',
             'image/webp' => 'webp',
             'image/bmp'  => 'bmp',
+            'image/heic', 'image/heif' => 'heic',
             default      => 'bin',
         };
     }

@@ -1,4 +1,4 @@
-const TX_VERSION = "v4.4.2";
+const TX_VERSION = "v4.4.3";
 // Combined with TX_VERSION when fetching plugin assets (i18n bundles, etc.)
 // to defeat stale browser caches whenever a new build of index.js is loaded.
 // The host (PluginView.vue) already cache-busts index.js itself with
@@ -145,6 +145,20 @@ export default {
       urlFormOpen: false,
       urlAdding: false,
       urlAddError: null,
+
+      // Source-file upload in flight (progress lives in the Sources card
+      // AND in the page-top alert so a large iPhone scan is never silent).
+      datasetUploading: false,
+      datasetUploadCurrent: 0,
+      datasetUploadTotal: 0,
+      datasetUploadFilename: "",
+      datasetUploadPercent: 0,
+      datasetUploadBytesSent: 0,
+      datasetUploadBytesTotal: 0,
+
+      // Sticky page-top alert for process outcomes (upload / parse /
+      // timeout / generate). Toasts stay for short confirmations.
+      pageAlert: null,
 
       // Tabbed dataset detail view: "sources" | "details" | "generate".
       // The old single-page layout was extremely long; the tabs scope the
@@ -317,7 +331,90 @@ export default {
     // AI-hitting calls pass a larger `timeoutMs`. Pass `timeoutMs: 0` to
     // opt out (nothing currently does).
     const DEFAULT_API_TIMEOUT_MS = 90000;
-    const DEFAULT_UPLOAD_TIMEOUT_MS = 120000;
+    // Base upload timeout; apiUpload() raises this with file size so a
+    // large iPhone scan on a slow link is not aborted at 2 minutes.
+    const DEFAULT_UPLOAD_TIMEOUT_MS = 180000;
+    const MAX_SOURCE_UPLOAD_BYTES = 80 * 1024 * 1024;
+    const SOURCE_UPLOAD_EXTS = [
+      "pdf",
+      "doc",
+      "docx",
+      "jpg",
+      "jpeg",
+      "png",
+      "gif",
+      "webp",
+      "tiff",
+      "tif",
+      "bmp",
+      "heic",
+      "heif",
+      "txt",
+      "rtf",
+      "odt",
+      "xls",
+      "xlsx",
+      "pptx",
+      "eml",
+      "msg",
+    ];
+
+    function fileExtension(name) {
+      const n = String(name || "");
+      const dot = n.lastIndexOf(".");
+      return dot < 0 ? "" : n.slice(dot + 1).toLowerCase();
+    }
+
+    function formatBytes(n) {
+      const v = Number(n) || 0;
+      if (v < 1024) return `${v} B`;
+      if (v < 1048576) return `${Math.round(v / 1024)} KB`;
+      return `${(v / 1048576).toFixed(1)} MB`;
+    }
+
+    function uploadTimeoutMsFor(file) {
+      const mb = Math.max(1, (file && file.size ? file.size : 0) / 1048576);
+      return Math.min(300000, Math.round(60000 + mb * 4000));
+    }
+
+    function validateSourceFile(file) {
+      if (!file) return T("datasets.upload_no_file");
+      if (!file.size) return T("datasets.upload_empty");
+      if (file.size > MAX_SOURCE_UPLOAD_BYTES) {
+        return Tf("datasets.upload_too_large", {
+          size: formatBytes(file.size),
+          max: "80 MB",
+        });
+      }
+      const ext = fileExtension(file.name);
+      if (!ext || !SOURCE_UPLOAD_EXTS.includes(ext)) {
+        return Tf("datasets.upload_bad_type", { ext: ext || "?" });
+      }
+      return null;
+    }
+
+    function explainNetworkError(e, kind) {
+      if (!e) return T("datasets.network_error");
+      if (e.name === "AbortError" || e.code === "TIMEOUT") {
+        return kind === "upload"
+          ? T("datasets.upload_timeout")
+          : T("datasets.parse_timeout");
+      }
+      const msg = String(e.message || "");
+      if (/Failed to fetch|NetworkError|Load failed|ERR_NETWORK/i.test(msg)) {
+        return T("datasets.network_error");
+      }
+      return msg || T("datasets.network_error");
+    }
+
+    function isRetryableParseFailure(err) {
+      if (!err) return false;
+      if (err.name === "AbortError" || err.code === "TIMEOUT") return true;
+      const status = err.status || err.payload?.status;
+      if (status === 502 || status === 504 || status === 524) return true;
+      const msg = String(err.message || "");
+      return /524|504|502|timed out|timeout|gateway|network/i.test(msg);
+    }
 
     async function api(path, opts = {}) {
       // Per-call timeout. Without it a slow/stuck AI provider (e.g. a heavy
@@ -351,58 +448,125 @@ export default {
         if (e && e.name === "AbortError") {
           throw new Error(T("datasets.parse_timeout"));
         }
-        throw e;
+        throw new Error(explainNetworkError(e, "api"));
       }
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        const err = new Error(body.error || `HTTP ${res.status}`);
-        // Attach structured body so callers (e.g. parse-documents) can surface
-        // outcome / unreadable files even on HTTP 4xx instead of a bare string.
+        const raw = await res.text().catch(() => "");
+        let body = {};
+        try {
+          body = raw ? JSON.parse(raw) : {};
+        } catch (_) {
+          body = {};
+        }
+        let msg = body.error || "";
+        if (!msg) {
+          if (res.status === 413) msg = T("datasets.upload_too_large_server");
+          else if (
+            res.status === 524 ||
+            res.status === 504 ||
+            res.status === 502
+          )
+            msg = T("datasets.parse_gateway_timeout");
+          else if (/cloudflare|timeout|524/i.test(raw))
+            msg = T("datasets.parse_gateway_timeout");
+          else msg = `HTTP ${res.status}`;
+        }
+        const err = new Error(msg);
         err.payload = body;
+        err.status = res.status;
         throw err;
       }
       return res.json();
     }
 
     async function apiUpload(path, file, extraFields = {}, opts = {}) {
-      const timeoutMs = opts.timeoutMs ?? DEFAULT_UPLOAD_TIMEOUT_MS;
-      const doFetch = () => {
-        const fd = new FormData();
-        fd.append("file", file);
-        for (const [k, v] of Object.entries(extraFields)) fd.append(k, v);
-        let signal = null;
-        let timer = null;
-        if (timeoutMs && typeof AbortController !== "undefined") {
-          const ctrl = new AbortController();
-          signal = ctrl.signal;
-          timer = setTimeout(() => ctrl.abort(), timeoutMs);
-        }
-        const p = fetch(`${BASE}${path}`, {
-          method: "POST",
-          credentials: "include",
-          body: fd,
-          signal,
+      const timeoutMs = opts.timeoutMs ?? uploadTimeoutMsFor(file);
+      const onProgress =
+        typeof opts.onProgress === "function" ? opts.onProgress : null;
+
+      const doXhr = () =>
+        new Promise((resolve, reject) => {
+          const fd = new FormData();
+          fd.append("file", file);
+          for (const [k, v] of Object.entries(extraFields)) fd.append(k, v);
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", `${BASE}${path}`);
+          xhr.withCredentials = true;
+          xhr.timeout = timeoutMs;
+          xhr.responseType = "text";
+          if (xhr.upload && onProgress) {
+            xhr.upload.onprogress = (ev) => {
+              if (!ev.lengthComputable) return;
+              onProgress({
+                loaded: ev.loaded,
+                total: ev.total,
+                percent: Math.round((ev.loaded / ev.total) * 100),
+              });
+            };
+          }
+          xhr.onload = () => {
+            let body = {};
+            try {
+              body = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+            } catch (_) {
+              body = {};
+            }
+            if (xhr.status === 401) {
+              reject(
+                Object.assign(new Error("HTTP 401"), {
+                  status: 401,
+                  payload: body,
+                }),
+              );
+              return;
+            }
+            if (xhr.status < 200 || xhr.status >= 300) {
+              let msg = body.error || "";
+              if (!msg) {
+                if (xhr.status === 413)
+                  msg = T("datasets.upload_too_large_server");
+                else if (
+                  xhr.status === 524 ||
+                  xhr.status === 504 ||
+                  xhr.status === 502
+                )
+                  msg = T("datasets.parse_gateway_timeout");
+                else msg = `HTTP ${xhr.status}`;
+              }
+              reject(
+                Object.assign(new Error(msg), {
+                  status: xhr.status,
+                  payload: body,
+                }),
+              );
+              return;
+            }
+            resolve(body);
+          };
+          xhr.onerror = () => reject(new Error(T("datasets.network_error")));
+          xhr.ontimeout = () => {
+            const e = new Error(T("datasets.upload_timeout"));
+            e.name = "AbortError";
+            e.code = "TIMEOUT";
+            reject(e);
+          };
+          xhr.send(fd);
         });
-        return timer ? p.finally(() => clearTimeout(timer)) : p;
-      };
-      let res;
+
       try {
-        res = await doFetch();
-        if (res.status === 401) {
-          const refreshed = await refreshAccessToken();
-          if (refreshed) res = await doFetch();
-        }
+        return await doXhr();
       } catch (e) {
-        if (e && e.name === "AbortError") {
-          throw new Error(T("datasets.parse_timeout"));
+        if (e && e.status === 401) {
+          const refreshed = await refreshAccessToken();
+          if (refreshed) return await doXhr();
         }
-        throw e;
+        if (e && e.name === "AbortError") {
+          throw new Error(T("datasets.upload_timeout"));
+        }
+        throw e instanceof Error
+          ? e
+          : new Error(explainNetworkError(e, "upload"));
       }
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-      return res.json();
     }
 
     // =========================================================================
@@ -493,6 +657,83 @@ export default {
         div.style.opacity = "0";
         setTimeout(() => div.remove(), 300);
       }, dwellMs);
+    }
+
+    /**
+     * Sticky alert at the top of the plugin page. Used for process outcomes
+     * (upload / parse / timeout / generate) so they cannot vanish after 4s.
+     * Pass sticky:false to auto-clear on the next navigation-less render
+     * of a different alert. Dismiss with the × button.
+     */
+    function showPageAlert({
+      type = "info",
+      title = "",
+      message = "",
+      sticky = true,
+    } = {}) {
+      state.pageAlert = {
+        type,
+        title: title || "",
+        message: message || "",
+        sticky: sticky !== false,
+      };
+      render();
+      try {
+        const root = findScrollRoot();
+        if (root) root.scrollTo({ top: 0, behavior: "smooth" });
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    function clearPageAlert() {
+      if (!state.pageAlert) return;
+      state.pageAlert = null;
+      render();
+    }
+
+    function renderPageAlert() {
+      const a = state.pageAlert;
+      if (!a) return "";
+      const palette = {
+        success: {
+          bg: "color-mix(in srgb, var(--status-success, #16a34a) 12%, var(--bg-card))",
+          border: "var(--status-success, #16a34a)",
+          color: "var(--status-success, #166534)",
+          icon: ICONS.check,
+        },
+        error: {
+          bg: "color-mix(in srgb, var(--status-error, #dc2626) 12%, var(--bg-card))",
+          border: "var(--status-error, #dc2626)",
+          color: "var(--status-error, #991b1b)",
+          icon: ICONS.warning,
+        },
+        warning: {
+          bg: "color-mix(in srgb, var(--status-warning, #d97706) 14%, var(--bg-card))",
+          border: "var(--status-warning, #d97706)",
+          color: "var(--status-warning, #92400e)",
+          icon: ICONS.warning,
+        },
+        info: {
+          bg: "color-mix(in srgb, var(--brand) 12%, var(--bg-card))",
+          border: "var(--brand)",
+          color: "var(--brand)",
+          icon: ICONS.info,
+        },
+      };
+      const p = palette[a.type] || palette.info;
+      const title = a.title
+        ? `<div class="font-semibold">${escHtml(a.title)}</div>`
+        : "";
+      const msg = a.message
+        ? `<div class="text-sm" style="opacity:.95">${escHtml(a.message)}</div>`
+        : "";
+      return `<div class="tx-page-alert" role="alert" aria-live="assertive" style="background:${p.bg};border-color:${p.border};color:${p.color}">
+        <span class="flex-none mt-0.5">${p.icon}</span>
+        <div class="flex-1 min-w-0">${title}${msg}</div>
+        <button type="button" data-action="dismiss-page-alert" class="tx-page-alert-close" title="${T("app.close")}">${ICONS.close}</button>
+      </div>`;
     }
 
     /**
@@ -1239,6 +1480,9 @@ export default {
       .tx-collection-card:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
       .tx-callout { padding: .75rem 1rem; border-radius: .5rem; background: var(--brand-alpha-light); color: var(--txt-primary); font-size: .8125rem; }
       .tx-danger-zone { border: 1px solid color-mix(in srgb, var(--status-error) 40%, transparent); border-radius: .75rem; padding: 1.25rem; background: color-mix(in srgb, var(--status-error) 6%, var(--bg-card)); }
+      .tx-page-alert { display:flex; align-items:flex-start; gap:.75rem; margin: .75rem 0 0; padding: .85rem 1rem; border-radius: .6rem; border: 1px solid; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+      .tx-page-alert-close { flex:none; background:transparent; border:none; padding:.15rem; cursor:pointer; color:inherit; opacity:.7; border-radius:.25rem; }
+      .tx-page-alert-close:hover { opacity:1; background: rgba(0,0,0,.06); }
 
       /* Live preview — rendered as a wide modal overlay so the dataset form
          can use the full screen width when the preview is closed. */
@@ -1449,6 +1693,7 @@ export default {
         <div class="tx max-w-6xl mx-auto px-4 py-6">
           ${renderHeader()}
           ${renderNav()}
+          ${renderPageAlert()}
           <div id="tx-content" class="mt-4">${renderView()}</div>
         </div>`;
       renderModalPortal();
@@ -5017,9 +5262,7 @@ export default {
           return `<span class="text-xs tx-secondary">${T("datasets.file_pending")}</span>`;
         }
         if (!ex.ok) {
-          const reason = ex.error
-            ? ` — ${escHtml(ex.error)}`
-            : "";
+          const reason = ex.error ? ` — ${escHtml(ex.error)}` : "";
           return `<span class="text-xs" style="color:var(--status-error,#dc2626)">${T("datasets.file_unreadable")}${reason}</span>`;
         }
         const strat = strategyLabel(ex.strategy);
@@ -5102,6 +5345,34 @@ export default {
         </div>`;
       }
 
+      let uploadProgress = "";
+      if (state.datasetUploading) {
+        const pct = Math.max(0, Math.min(100, state.datasetUploadPercent || 0));
+        const cur = state.datasetUploadCurrent || 1;
+        const tot = state.datasetUploadTotal || 1;
+        uploadProgress = `<div class="mt-3 space-y-2">
+          <div class="flex items-center justify-between gap-2 text-sm font-medium" style="color:var(--brand)">
+            <div class="flex items-center gap-2">
+              <div class="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent"></div>
+              ${escHtml(T("datasets.upload_in_progress_title"))}
+            </div>
+            <span class="text-xs font-mono tx-secondary" id="tx-upload-pct-label">${pct}% · ${escHtml(formatBytes(state.datasetUploadBytesSent))} / ${escHtml(formatBytes(state.datasetUploadBytesTotal))}</span>
+          </div>
+          <div class="w-full rounded-full h-2" style="background:var(--divider)">
+            <div id="tx-upload-pct" class="h-2 rounded-full transition-all duration-200" style="width:${pct}%;background:var(--brand)"></div>
+          </div>
+          <div class="text-sm" style="color:var(--brand)">${escHtml(
+            Tf("datasets.upload_in_progress", {
+              current: cur,
+              total: tot,
+              name: state.datasetUploadFilename || "",
+              size: formatBytes(state.datasetUploadBytesTotal),
+            }),
+          )}</div>
+          <div class="text-xs" style="color:var(--status-warning,#d97706)">${escHtml(T("datasets.analyze_dont_close"))}</div>
+        </div>`;
+      }
+
       const hasAnySource = all.length > 0 || urls.length > 0;
       const urlFormOpen = state.urlFormOpen;
       const urlFormMarkup = urlFormOpen
@@ -5128,15 +5399,16 @@ export default {
         </div>
         <div class="space-y-1">${list}</div>
         <div class="mt-3 flex items-center gap-2 flex-wrap">
-          <label class="tx-btn tx-btn-sm tx-btn-ghost cursor-pointer">
-            ${ICONS.upload} ${all.length ? T("datasets.upload_more") : T("datasets.upload_doc")}
-            <input type="file" id="tx-doc-upload" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.tiff,.tif,.bmp,.txt,.rtf,.odt,.xls,.xlsx,.pptx,.eml,.msg" multiple class="hidden" />
+          <label class="tx-btn tx-btn-sm tx-btn-ghost cursor-pointer${state.datasetUploading || state.datasetParsing ? " opacity-50 pointer-events-none" : ""}">
+            ${state.datasetUploading ? `<span class="animate-spin inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full"></span>` : ICONS.upload}
+            ${all.length ? T("datasets.upload_more") : T("datasets.upload_doc")}
+            <input type="file" id="tx-doc-upload" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.gif,.webp,.tiff,.tif,.bmp,.heic,.heif,.txt,.rtf,.odt,.xls,.xlsx,.pptx,.eml,.msg" multiple class="hidden"${state.datasetUploading || state.datasetParsing ? " disabled" : ""} />
           </label>
-          <button data-action="toggle-url-form" class="tx-btn tx-btn-sm tx-btn-ghost">
+          <button data-action="toggle-url-form" class="tx-btn tx-btn-sm tx-btn-ghost"${state.datasetUploading || state.datasetParsing ? " disabled" : ""}>
             ${ICONS.link || ICONS.sparkle} ${T("datasets.url_add_btn")}
           </button>
           ${
-            hasAnySource && !state.datasetParsing
+            hasAnySource && !state.datasetParsing && !state.datasetUploading
               ? `<button data-action="parse-documents" class="tx-btn tx-btn-sm">${ICONS.sparkle} ${T("datasets.parse_btn")}</button>
                  <button type="button" class="tx-help-trigger" title="${T("datasets.parse_hint")}">${ICONS.question}</button>`
               : ""
@@ -5144,6 +5416,7 @@ export default {
         </div>
         ${urlFormMarkup}
         ${progress}
+        ${uploadProgress}
       </div>`;
     }
 
@@ -5672,6 +5945,14 @@ export default {
           else if (v === "settings") navigate({ view: "settings" });
           else if (v === "prompts") navigate({ view: "prompts" });
         }),
+      );
+
+      el.querySelector('[data-action="dismiss-page-alert"]')?.addEventListener(
+        "click",
+        () => {
+          state.pageAlert = null;
+          render();
+        },
       );
 
       // Collection tabs
@@ -7430,21 +7711,139 @@ export default {
       async function uploadSourceFiles(fileList) {
         const files = Array.from(fileList || []);
         if (!files.length) return;
+        if (state.datasetUploading || state.datasetParsing) {
+          showPageAlert({
+            type: "warning",
+            title: T("datasets.upload_busy_title"),
+            message: T("datasets.upload_busy"),
+          });
+          return;
+        }
+        const rejected = [];
+        const accepted = [];
+        for (const f of files) {
+          const why = validateSourceFile(f);
+          if (why) rejected.push({ name: f.name, why });
+          else accepted.push(f);
+        }
+        if (rejected.length) {
+          showPageAlert({
+            type: "error",
+            title: T("datasets.upload_rejected_title"),
+            message: rejected.map((r) => `${r.name}: ${r.why}`).join(" · "),
+          });
+        }
+        if (!accepted.length) return;
+
         const hasCv = !!d.files?.cv;
+        const okNames = [];
+        const failNames = [];
+        state.datasetUploading = true;
+        state.datasetUploadTotal = accepted.length;
+        state.datasetUploadCurrent = 0;
+        state.datasetUploadPercent = 0;
+        state.datasetUploadBytesSent = 0;
+        state.datasetUploadBytesTotal = 0;
+        showPageAlert({
+          type: "info",
+          title: T("datasets.upload_in_progress_title"),
+          message: Tf("datasets.upload_in_progress", {
+            current: 1,
+            total: accepted.length,
+            name: accepted[0].name,
+            size: formatBytes(accepted[0].size),
+          }),
+        });
+        render();
         try {
-          for (let i = 0; i < files.length; i++) {
-            const f = files[i];
-            if (i === 0 && !hasCv)
-              await apiUpload(`/candidates/${d.id}/upload-cv`, f);
-            else await apiUpload(`/candidates/${d.id}/upload-doc`, f);
+          for (let i = 0; i < accepted.length; i++) {
+            const f = accepted[i];
+            state.datasetUploadCurrent = i + 1;
+            state.datasetUploadFilename = f.name;
+            state.datasetUploadPercent = 0;
+            state.datasetUploadBytesSent = 0;
+            state.datasetUploadBytesTotal = f.size || 0;
+            showPageAlert({
+              type: "info",
+              title: T("datasets.upload_in_progress_title"),
+              message: Tf("datasets.upload_in_progress", {
+                current: i + 1,
+                total: accepted.length,
+                name: f.name,
+                size: formatBytes(f.size),
+              }),
+            });
+            try {
+              const dest =
+                i === 0 && !hasCv
+                  ? `/candidates/${d.id}/upload-cv`
+                  : `/candidates/${d.id}/upload-doc`;
+              await apiUpload(
+                dest,
+                f,
+                {},
+                {
+                  timeoutMs: uploadTimeoutMsFor(f),
+                  onProgress: (p) => {
+                    state.datasetUploadPercent = p.percent;
+                    state.datasetUploadBytesSent = p.loaded;
+                    state.datasetUploadBytesTotal = p.total;
+                    const bar = el.querySelector("#tx-upload-pct");
+                    const label = el.querySelector("#tx-upload-pct-label");
+                    if (bar) bar.style.width = `${p.percent}%`;
+                    if (label)
+                      label.textContent = `${p.percent}% · ${formatBytes(p.loaded)} / ${formatBytes(p.total)}`;
+                  },
+                },
+              );
+              okNames.push(f.name);
+            } catch (err) {
+              failNames.push(`${f.name}: ${err.message || err}`);
+            }
           }
-          showToast(T("datasets.doc_uploaded"));
           const upd = await api(`/candidates/${d.id}`);
           state.selectedDataset = upd.candidate;
-          render();
+          if (failNames.length && !okNames.length) {
+            showPageAlert({
+              type: "error",
+              title: T("datasets.upload_failed_title"),
+              message: failNames.join(" · "),
+            });
+          } else if (failNames.length) {
+            showPageAlert({
+              type: "warning",
+              title: T("datasets.upload_partial_title"),
+              message: Tf("datasets.upload_partial", {
+                ok: okNames.length,
+                fail: failNames.length,
+                errors: failNames.join(" · "),
+              }),
+            });
+            showToast(T("datasets.doc_uploaded"), "warning");
+          } else {
+            showPageAlert({
+              type: "success",
+              title: T("datasets.upload_ok_title"),
+              message: Tf("datasets.upload_ok", {
+                count: okNames.length,
+                names: okNames.join(", "),
+              }),
+            });
+            showToast(T("datasets.doc_uploaded"));
+          }
         } catch (err) {
-          showToast(err.message, "error");
+          showPageAlert({
+            type: "error",
+            title: T("datasets.upload_failed_title"),
+            message: err.message || String(err),
+          });
         }
+        state.datasetUploading = false;
+        state.datasetUploadCurrent = 0;
+        state.datasetUploadTotal = 0;
+        state.datasetUploadFilename = "";
+        state.datasetUploadPercent = 0;
+        render();
       }
       const uploader = el.querySelector("#tx-doc-upload");
       if (uploader) {
@@ -7611,6 +8010,19 @@ export default {
         // (last-write-wins would silently drop one of them).
         if (state.datasetSaving) {
           showToast(T("datasets.parse_blocked_saving"), "warning");
+          showPageAlert({
+            type: "warning",
+            title: T("datasets.parse_blocked_saving"),
+            message: "",
+          });
+          return;
+        }
+        if (state.datasetUploading) {
+          showPageAlert({
+            type: "warning",
+            title: T("datasets.upload_busy_title"),
+            message: T("datasets.upload_busy"),
+          });
           return;
         }
         const imageExts = [
@@ -7622,6 +8034,8 @@ export default {
           "tif",
           "tiff",
           "bmp",
+          "heic",
+          "heif",
         ];
         const allFiles = [];
         if (d.files?.cv?.filename) allFiles.push(d.files.cv.filename);
@@ -7682,6 +8096,11 @@ export default {
           render();
         }, 1000);
         render();
+        showPageAlert({
+          type: "info",
+          title: T("datasets.parse_in_progress_title"),
+          message: T("datasets.analyze_dont_close"),
+        });
         await new Promise((r) => setTimeout(r, 250));
         state.datasetParseStep = 1;
         render();
@@ -7690,21 +8109,47 @@ export default {
         try {
           state.datasetParseStep = 2;
           render();
-          // v4.0: single extraction pipeline. The legacy
-          // POST /extract call used to run in parallel here, which
-          // caused two AI round-trips per click and confusing partial
-          // results. parse-documents is now the only path (it runs its
-          // own guaranteed-completeness second pass server-side).
-          parseRes = await api(
-            `/candidates/${d.id}/parse-documents${onlyMissing ? "?onlyMissing=1" : ""}`,
-            {
-              method: "POST",
-              // Safety net so a very slow/stuck model can't spin forever.
-              // Legit fast models finish in well under a minute; this only
-              // trips on a genuinely stuck or extremely slow model.
-              timeoutMs: 240000,
-            },
-          );
+          const MAX_ROUNDS = 4;
+          for (let round = 1; round <= MAX_ROUNDS; round++) {
+            if (round > 1) {
+              showPageAlert({
+                type: "info",
+                title: T("datasets.parse_continue_title"),
+                message: Tf("datasets.parse_continue", { round }),
+              });
+              await new Promise((r) => setTimeout(r, 2500));
+            }
+            try {
+              parseRes = await api(
+                `/candidates/${d.id}/parse-documents${onlyMissing ? "?onlyMissing=1" : ""}`,
+                {
+                  method: "POST",
+                  // Just over Cloudflare's ~100s proxy timeout so we receive
+                  // a 524/JSON deadline instead of hanging for minutes.
+                  timeoutMs: 110000,
+                },
+              );
+            } catch (err) {
+              if (round < MAX_ROUNDS && isRetryableParseFailure(err)) {
+                showPageAlert({
+                  type: "warning",
+                  title: T("datasets.parse_continue_title"),
+                  message: Tf("datasets.parse_continue_after_timeout", {
+                    round: round + 1,
+                  }),
+                });
+                continue;
+              }
+              throw err;
+            }
+            if (
+              (parseRes?.deadline_hit || parseRes?.ocr_incomplete) &&
+              round < MAX_ROUNDS
+            ) {
+              continue;
+            }
+            break;
+          }
           state.datasetParseStep = 3;
           // Pin the live status line to the closing "matching variables"
           // message now that both AI round-trips have returned.
@@ -7734,7 +8179,11 @@ export default {
                 ? d.field_values
                 : {};
             if (!isPlainObject) {
-              showToast(T("datasets.parse_unusable_shape"), "warning");
+              showPageAlert({
+                type: "warning",
+                title: T("datasets.parse_outcome_failed"),
+                message: T("datasets.parse_unusable_shape"),
+              });
               outcome = "failed";
             } else {
               const merged = { ...baseline };
@@ -7751,7 +8200,11 @@ export default {
             }
           } else if (parseRes && !parseRes.success) {
             const msg = parseRes.error || T("datasets.parse_failed");
-            showToast(msg, "warning");
+            showPageAlert({
+              type: "warning",
+              title: T("datasets.parse_outcome_failed"),
+              message: msg,
+            });
             outcome = "failed";
           }
           // Group-extraction telemetry (v3.7.1+). Backend returns a
@@ -7782,47 +8235,61 @@ export default {
 
           // Single authoritative toast from the persisted outcome —
           // never append a green "done" after warnings (that hid failures).
-          const last = state.selectedDataset?.last_parse || parseRes?.last_parse;
+          const last =
+            state.selectedDataset?.last_parse || parseRes?.last_parse;
           outcome = (last && last.outcome) || outcome || "complete";
           const filled =
-            last?.fields_filled ??
-            parseRes?.fields_filled ??
-            appliedFields;
-          const total =
-            last?.fields_total ?? parseRes?.fields_total ?? 0;
-          const sourcesOk = last?.sources_ok ?? parseRes?.files?.filter((f) => f.ok).length ?? 0;
+            last?.fields_filled ?? parseRes?.fields_filled ?? appliedFields;
+          const total = last?.fields_total ?? parseRes?.fields_total ?? 0;
+          const sourcesOk =
+            last?.sources_ok ??
+            parseRes?.files?.filter((f) => f.ok).length ??
+            0;
           const sourcesTotal =
             last?.sources_total ?? parseRes?.files?.length ?? fileCount;
-          if (parseRes?.deadline_hit || last?.deadline_hit) {
-            showToast(T("datasets.parse_deadline"), "warning");
-          } else if (
-            Array.isArray(parseRes?.unreadable) &&
-            parseRes.unreadable.length &&
-            outcome !== "failed"
-          ) {
-            showToast(
-              Tf("datasets.parse_unreadable_warning", {
-                files: parseRes.unreadable.map((f) => f.filename).join(", "),
-              }),
-              "warning",
-            );
-          }
+          const deadline = !!(parseRes?.deadline_hit || last?.deadline_hit);
           if (outcome === "failed") {
-            showToast(
-              last?.error || parseRes?.error || T("datasets.parse_failed"),
-              "error",
-            );
-          } else if (outcome === "partial") {
-            showToast(
-              Tf("datasets.parse_outcome_partial_toast", {
-                sources_ok: sourcesOk,
-                sources_total: sourcesTotal,
-                filled,
-                total,
-              }),
-              "warning",
-            );
+            showPageAlert({
+              type: "error",
+              title: T("datasets.parse_outcome_failed"),
+              message:
+                last?.error || parseRes?.error || T("datasets.parse_failed"),
+            });
+          } else if (deadline || outcome === "partial") {
+            const extra =
+              Array.isArray(parseRes?.unreadable) && parseRes.unreadable.length
+                ? " " +
+                  Tf("datasets.parse_unreadable_warning", {
+                    files: parseRes.unreadable
+                      .map((f) => f.filename)
+                      .join(", "),
+                  })
+                : "";
+            showPageAlert({
+              type: "warning",
+              title: deadline
+                ? T("datasets.parse_deadline_title")
+                : T("datasets.parse_outcome_partial"),
+              message:
+                (deadline ? T("datasets.parse_deadline") + " " : "") +
+                Tf("datasets.parse_outcome_partial_toast", {
+                  sources_ok: sourcesOk,
+                  sources_total: sourcesTotal,
+                  filled,
+                  total,
+                }) +
+                extra,
+            });
           } else {
+            showPageAlert({
+              type: "success",
+              title: T("datasets.parse_outcome_complete"),
+              message: Tf("datasets.parse_outcome_complete_toast", {
+                filled,
+                total: total || filled,
+                sources: sourcesOk || sourcesTotal,
+              }),
+            });
             showToast(
               Tf("datasets.parse_outcome_complete_toast", {
                 filled,
@@ -7832,8 +8299,6 @@ export default {
             );
           }
         } catch (err) {
-          // HTTP 4xx from parse-documents still carries last_parse /
-          // unreadable — reload so the outcome card appears, then toast.
           const payload = err && err.payload;
           try {
             const upd = await api(`/candidates/${d.id}`);
@@ -7843,21 +8308,20 @@ export default {
             /* ignore reload failure */
           }
           const last = state.selectedDataset?.last_parse || payload?.last_parse;
-          if (last && last.outcome === "failed") {
-            showToast(last.error || err.message || T("datasets.parse_failed"), "error");
-          } else if (
-            Array.isArray(payload?.unreadable) &&
-            payload.unreadable.length
-          ) {
-            showToast(
-              Tf("datasets.parse_unreadable_warning", {
-                files: payload.unreadable.map((f) => f.filename).join(", "),
-              }),
-              "error",
-            );
-          } else {
-            showToast(err.message || T("datasets.parse_failed"), "error");
-          }
+          const failMsg =
+            (last && last.outcome === "failed" && last.error) ||
+            (Array.isArray(payload?.unreadable) && payload.unreadable.length
+              ? Tf("datasets.parse_unreadable_warning", {
+                  files: payload.unreadable.map((f) => f.filename).join(", "),
+                })
+              : null) ||
+            err.message ||
+            T("datasets.parse_failed");
+          showPageAlert({
+            type: "error",
+            title: T("datasets.parse_outcome_failed"),
+            message: failMsg,
+          });
         }
         if (state.datasetParseTimer) {
           clearInterval(state.datasetParseTimer);
@@ -7907,6 +8371,11 @@ export default {
           const instruction = (state.generateInstruction || "").trim();
           state.datasetGenerating = true;
           render();
+          showPageAlert({
+            type: "info",
+            title: T("datasets.generate_running"),
+            message: T("datasets.analyze_dont_close"),
+          });
           await refreshAccessToken();
           try {
             const gen = await api(
@@ -7922,9 +8391,11 @@ export default {
             const upd = await api(`/candidates/${d.id}`);
             state.selectedDataset = upd.candidate;
             showToast(T("datasets.generate_done"));
-            // Auto-download (and open) the freshly generated document so the
-            // user doesn't have to hunt for it in the list — requested in beta
-            // feedback. Silent no-op if the id is missing.
+            showPageAlert({
+              type: "success",
+              title: T("datasets.generate_done"),
+              message: T("datasets.download_doc"),
+            });
             const newDocId = gen?.document?.id;
             if (newDocId) {
               window.open(
@@ -7933,7 +8404,11 @@ export default {
               );
             }
           } catch (err) {
-            showToast(err.message, "error");
+            showPageAlert({
+              type: "error",
+              title: T("datasets.generate_failed_title"),
+              message: err.message || String(err),
+            });
           }
           state.datasetGenerating = false;
           render();
@@ -7980,16 +8455,39 @@ export default {
           const file = ev.target?.files?.[0];
           if (!file) return;
           const key = inp.dataset.key;
+          const why = validateSourceFile(file);
+          if (why && file.size > 8 * 1024 * 1024) {
+            showPageAlert({
+              type: "error",
+              title: T("datasets.upload_failed_title"),
+              message: why,
+            });
+            return;
+          }
           try {
             await refreshAccessToken();
+            showPageAlert({
+              type: "info",
+              title: T("datasets.upload_in_progress_title"),
+              message: file.name,
+            });
             await apiUpload(
               `/candidates/${d.id}/image/${encodeURIComponent(key)}`,
               file,
             );
             showToast(T("datasets.image_uploaded"));
+            showPageAlert({
+              type: "success",
+              title: T("datasets.image_uploaded"),
+              message: file.name,
+            });
             await selectDataset(d.id);
           } catch (err) {
-            showToast(err.message || String(err), "error");
+            showPageAlert({
+              type: "error",
+              title: T("datasets.upload_failed_title"),
+              message: err.message || String(err),
+            });
           }
         }),
       );
